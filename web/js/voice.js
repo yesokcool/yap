@@ -133,27 +133,6 @@ function preferAudio(transceiver, { red }) {
 /** `?red=0` in the page's address: the voice goes as plain Opus (for measuring what RED does; not a setting). */
 const RED_DEFAULT = !/(?:^\?|&)red=0(?:&|$)/.test(globalThis.location?.search ?? '');
 
-const SHORTEST_BUFFER = false;
-
-/**
- * Ask a receiver for the shortest jitter buffer it can do (listen-only pages: an OBS link only
- * plays the call, so it wants the sound as soon as it can have it). `jitterBufferTarget` (ms) is
- * in Chrome since 124, so in OBS's browser source (Chromium 127); older Chromes only had
- * `playoutDelayHint` (s). It's the buffer's floor, not a cap: on a jittery network libwebrtc still
- * holds as much as it needs. (Measured on a clean network: no difference from leaving it unset,
- * since libwebrtc already sits at its floor there, ~30 ms held for a 20 ms target. It's asked for
- * anyway, so nothing (a default, an A/V sync) can raise that floor for an OBS link.)
- */
-function shortestBuffer(receiver) {
-  if (!SHORTEST_BUFFER) return; // off since 2026-10-11 (see Peer's #tuning): Chrome's own buffer
-  try {
-    if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 0;
-    else if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0;
-  } catch (err) {
-    console.warn('jitter buffer target not applied', err);
-  }
-}
-
 export class Voice extends EventTarget {
   mySid = null;
   iceServers = [];
@@ -213,9 +192,10 @@ export class Voice extends EventTarget {
   #watching = new Set();
 
   /**
-   * `listenOnly` (an OBS link): straight through. Never a mic or an audio graph; each person plays
-   * from their own <audio> element at full volume (no per-person gain or limiter: OBS sets the
-   * volume), and every connection asks for the shortest jitter buffer and 10 ms packets.
+   * `listenOnly` (an OBS link): the way VDO.Ninja's viewer plays a call. Never a mic or an audio
+   * graph; each person's track plays as it arrives from an element of its own at full volume (no
+   * per-person gain or limiter: OBS sets the volume), with the browser's own jitter buffer, and an
+   * element that pauses is started again (web/js/obs.js has the why and the measurements).
    */
   constructor({ signal, uidOf, resumable = () => false, fetchIce = null, listenOnly = false }) {
     super();
@@ -1095,11 +1075,12 @@ class Peer {
     this.audio = document.createElement('audio');
     this.audio.autoplay = true;
     this.audio.muted = voice.deafened;
+    // An OBS link keeps playing whatever happens (like VDO.Ninja's viewer: its element's onpause plays it again).
+    if (voice.listenOnly) this.audio.addEventListener('pause', () => this.resume());
     document.getElementById('audio-sink')?.append(this.audio);
     this.applyOutput();
 
     this.pc.ontrack = ({ track, transceiver }) => {
-      if (voice.listenOnly && track.kind === 'audio') shortestBuffer(transceiver.receiver);
       // The voice is always the first audio transceiver (some clients send it
       // with a stream id, so that can't tell them apart); anything else — the
       // video, a tab's audio — is a screen share.
@@ -1134,17 +1115,12 @@ class Peer {
       // Adding the transceiver fires negotiationneeded → we send the offer (RED first, then Opus).
       const voiceTransceiver = this.pc.addTransceiver(voice.outTrack ?? 'audio', { direction: 'sendrecv' });
       preferAudio(voiceTransceiver, { red: voice.red });
-      if (voice.listenOnly) shortestBuffer(voiceTransceiver.receiver);
     }
   }
 
-  /**
-   * How our descriptions are tuned (tuneOpus). A listen-only page asked for 10 ms packets and the
-   * shortest jitter buffer in v0.45.0; with a real Firefox sender into OBS that came out badly
-   * distorted (2026-10-11), so both are off again while the OBS link is reworked.
-   */
-  get #tuning() {
-    return {};
+  /** Their voice's element stopped (a browser can pause it): play it again. */
+  resume() {
+    if (this.audio.srcObject && this.audio.paused && this.voice.peers.get(this.sid) === this) this.audio.play().catch(() => {});
   }
 
   /**
@@ -1221,7 +1197,7 @@ class Peer {
       this.#makingOffer = true;
       const offer = await this.pc.createOffer();
       if (this.pc.signalingState !== 'stable') return;
-      await this.pc.setLocalDescription({ type: 'offer', sdp: tuneOpus(offer.sdp, this.#tuning) });
+      await this.pc.setLocalDescription({ type: 'offer', sdp: tuneOpus(offer.sdp) });
       this.send({ sdp: this.pc.localDescription.toJSON() });
     } catch (err) {
       console.warn('offer failed', err);
@@ -1253,7 +1229,7 @@ class Peer {
             if (t.receiver.track.kind === 'audio') preferAudio(t, { red: t === tr && this.voice.red });
           }
           const answer = await this.pc.createAnswer();
-          await this.pc.setLocalDescription({ type: 'answer', sdp: tuneOpus(answer.sdp, this.#tuning) });
+          await this.pc.setLocalDescription({ type: 'answer', sdp: tuneOpus(answer.sdp) });
           this.send({ sdp: this.pc.localDescription.toJSON() });
         }
         this.applySenderParams();
@@ -1512,7 +1488,11 @@ const TWCC = /^a=(?:rtcp-fb:\d+ transport-cc|extmap:\d+(?:\/\w+)? http:\/\/www\.
  *    the two people's settings; the sender also caps itself via maxBitrate)
  *  - useinbandfec=1: forward error correction — survives packet loss
  *  - usedtx=0: keep sending during silence (no clipped first syllables)
- *  - stereo=1: we can play stereo (music mode, screen-share audio)
+ *  - stereo=1: we can play stereo (music mode, screen-share audio). It also
+ *    makes a libwebrtc sender (Chrome, Firefox) encode with Opus's "audio"
+ *    mode instead of its "voip" mode, which high-passes the voice and tunes
+ *    for speech: measured on a synthetic voice at 510 kbps, 0.03 dB from the
+ *    original spectrum against 0.8 dB in voip mode (2026-10-11, for the OBS link)
  *  - sprop-stereo: whether *we* send stereo there (music mode; our own
  *    screen's audio)
  *  - minptime=10, maxplaybackrate=48000: low latency, full band
@@ -1531,16 +1511,8 @@ const TWCC = /^a=(?:rtcp-fb:\d+ transport-cc|extmap:\d+(?:\/\w+)? http:\/\/www\.
  * when it's lossy) and gains nothing, since Opus runs at a fixed target.
  * Video (screen sharing) keeps it. An answer can't add back what the offer
  * left out, so this works whoever offers.
- *
- * `ptime` (a listen-only page: 10): ask for packets that short on the voice
- * (`a=ptime`). The other side's encoder then makes 10 ms Opus frames instead of
- * 20 ms (libwebrtc follows the far side's ptime; an app that doesn't just keeps
- * 20 ms): sound waits for a shorter frame before it goes out. Measured Ada →
- * her OBS page (headless Chromium, 16 runs in pairs): ~11 ms sooner (median
- * ~48 → ~38 ms; sooner in 15 of 16), for 100 packets a second instead of 50
- * (~25 kbps more in headers, on that one connection).
  */
-export function tuneOpus(sdp, { ptime = null } = {}) {
+export function tuneOpus(sdp) {
   const eol = sdp.includes('\r\n') ? '\r\n' : '\n';
   const [head, ...sections] = sdp.split(`${eol}m=`);
   let audio = 0;
@@ -1551,7 +1523,6 @@ export function tuneOpus(sdp, { ptime = null } = {}) {
     return tuneAudio(body, eol, {
       'sprop-stereo': (voice ? settings.music : sending) ? '1' : '0',
       maxaveragebitrate: String(voice ? callBitrate() : screenAudioBitrate()),
-      ptime: voice ? ptime : null,
     });
   });
   return [head, ...tuned].join(`${eol}m=`);
@@ -1581,12 +1552,6 @@ function tuneAudio(body, eol, own) {
   } else {
     const rtpmap = lines.findIndex((line) => line.toLowerCase().startsWith(`a=rtpmap:${pt} opus/48000`));
     lines.splice(rtpmap + 1, 0, `a=fmtp:${pt} ${join(want)}`);
-  }
-  if (own.ptime) {
-    // One a=ptime, right after the Opus parameters.
-    const kept = lines.filter((line) => !line.startsWith('a=ptime:'));
-    kept.splice(kept.findIndex((line) => line.startsWith(`a=fmtp:${pt} `)) + 1, 0, `a=ptime:${own.ptime}`);
-    return kept.join(eol);
   }
   return lines.join(eol);
 }

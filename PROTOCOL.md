@@ -911,8 +911,6 @@ registering the transport-cc interceptor for video sections only, since
 webrtc-rs refuses an edited local description. A native client built on another stack must do the
 same, or native ↔ native calls pad again.)*
 
-A listen-only page (OBS) also adds `a=ptime:10` to its voice section.
-
 Also cap your own sender: `encodings[0].maxBitrate = <your setting>`,
 `priority`/`networkPriority = "high"`. Net effect: each direction runs at the
 lower of the two people's settings. Default 128 kbps; offer 64/96/128/256/510.
@@ -1053,19 +1051,22 @@ channel **greyed out** (an in-between state, not a call member: no volume, no
 ring), with "<name>'s OBS is still listening". The OBS page itself says
 "Paused: waiting for <name> to join <channel>." while it can't listen.
 
-**Playing it.** The OBS page connects to everyone in the call except other
-OBS links (its own account included) and plays each straight from an
-`<audio>` element at full volume: no mic, gate, audio graph, per-person volume
-or limiter (OBS sets the volume). Every audio receiver asks for the shortest
-jitter buffer (`jitterBufferTarget = 0`, else `playoutDelayHint = 0`), and its
-descriptions add `a=ptime:10` to the voice section after the Opus fmtp:
-libwebrtc senders then make 10 ms Opus frames on that one connection (100
-packets/s, ~25 kbps more in headers); an app that ignores ptime keeps 20 ms,
-which still works. RED stays as negotiated (it measured no added delay). While
-it listens it also plays a 20 Hz hum at −60 dBFS: Chromium calls a page silent
-below −72.25 dBFS, and OBS's browser (CEF) then stops capturing it after a
-couple of seconds, cutting the start of the next words. Measured (headless
-Chromium, localhost): a click to the OBS page ~48 → ~38 ms.
+**Playing it.** The OBS page plays the call the way VDO.Ninja's OBS view does:
+it connects to everyone in the call except other OBS links (its own account
+included) and plays each person's track straight from a media element at full
+volume, with no mic, gate, audio graph, per-person volume or limiter (OBS sets
+the volume). It uses the browser's own jitter buffer and packet size, and plays
+an element again if it pauses (on `pause`, and a check every 3 s). Its
+descriptions are tuned like everyone's (stereo=1 keeps libwebrtc senders in
+Opus's "audio" mode, measured closer to the original than VDO.Ninja's mono
+default). Yap's gate sends exact digital silence in a pause, and OBS's browser
+(CEF) drops its capture 2 s after Chromium calls a page silent (under −72.25
+dBFS for 2 s), cutting the next words; VDO.Ninja's ungated senders never send
+that silence. So once nobody has been heard for 1 s (every RTP audio level
+under −60 dBov), the page plays a 20 Hz tone at −60 dBFS and fades it out
+within ~100 ms of anyone being heard (`&keepalive=0`: never). Measured (the
+real app in Firefox and Chrome at 510 kbps): 0.03 dB from the original
+spectrum, no concealment, a click ~40–60 ms after it leaves the sender.
 
 ### Keeping calls across reconnects
 

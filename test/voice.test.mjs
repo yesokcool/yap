@@ -119,18 +119,10 @@ t('RED: tuneOpus keeps RED first and its fmtp, tunes the Opus line inside it, st
   assert.equal(tuneOpus(tuneOpus(red)), tuneOpus(red), 'idempotent');
 });
 
-t('a listen-only page (OBS) asks for 10 ms packets on the voice only; nobody else asks for any', () => {
+t('nobody asks for a packet size: the browser\'s 20 ms, OBS links included (10 ms went with v0.45.0)', () => {
   const red = OFFER.replace('m=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126', 'm=audio 9 UDP/TLS/RTP/SAVPF 63 111 9 0 8 13 110 126');
-  const tuned = tuneOpus(red, { ptime: 10 });
-  const [voice, screen, video] = sections(tuned);
-  assert.match(voice, /a=fmtp:111 [^\r]*\r\na=ptime:10\r\n/, 'right after the Opus parameters');
-  assert.equal(voice.match(/^a=ptime:/gm).length, 1);
-  assert.doesNotMatch(screen, /a=ptime/);
-  assert.doesNotMatch(video, /a=ptime/);
-  assert.equal(fmtp(voice).maxaveragebitrate, String(settings.bitrate), 'the rest of the tuning as always');
-  assert.equal(tuneOpus(tuned, { ptime: 10 }), tuned, 'idempotent');
-  assert.equal(sections(tuneOpus(red.replace('a=fmtp:111 minptime=10;useinbandfec=1\r\na=rtpmap:63', 'a=ptime:20\r\na=fmtp:111 minptime=10;useinbandfec=1\r\na=rtpmap:63'), { ptime: 10 }))[0].match(/^a=ptime:\d+/gm).join(), 'a=ptime:10', 'one ptime, ours');
-  assert.doesNotMatch(tuneOpus(red), /a=ptime/, 'a call page leaves the packet size to the browser (20 ms)');
+  assert.doesNotMatch(tuneOpus(red), /a=ptime/);
+  assert.equal(tuneOpus.length, 1, 'one argument: the description');
 });
 
 t('an Opus line without fmtp gets one right after its rtpmap', () => {

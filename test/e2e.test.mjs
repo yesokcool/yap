@@ -2228,6 +2228,76 @@ async function obsClickDelay(obs, obsSid, adaSid, clicks = 8) {
     await obs.evaluate(() => __played.stop());
   }
 }
+/**
+ * How cleanly a 1 kHz tone (-12 dBFS) from Ada comes out of her OBS page: Ada sends it instead of
+ * her mic on her connection to the OBS page for ~2.5 s; the OBS page fits a sine to 0.68 s of its
+ * receiver track and reports what's left (THD+N, dB), plus what its jitter buffer had to patch over.
+ */
+async function obsToneClean(obs, obsSid, adaSid) {
+  await a.evaluate(async (sid) => {
+    const ctx = new AudioContext({ sampleRate: 48000 });
+    await ctx.resume();
+    const tone = ctx.createOscillator();
+    tone.frequency.value = 1000;
+    const gain = ctx.createGain();
+    gain.gain.value = 0.25;
+    const out = ctx.createMediaStreamDestination();
+    out.channelCount = 1;
+    tone.connect(gain).connect(out);
+    tone.start();
+    const peer = yap.voice.peers.get(sid);
+    await peer.pc.getTransceivers().find((t) => t.receiver.track.kind === 'audio').sender.replaceTrack(out.stream.getAudioTracks()[0]);
+    globalThis.__tone = { ctx, peer };
+  }, obsSid);
+  try {
+    await a.waitForTimeout(1200); // the tone settles in (and Ada's own mic is out of the jitter buffer)
+    const inbound = () => obs.evaluate(async (sid) => {
+      let r = null;
+      (await yapObs.voice.peers.get(sid).pc.getStats()).forEach((s) => { if (s.type === 'inbound-rtp' && s.kind === 'audio') r = s; });
+      return { samples: r.totalSamplesReceived, concealed: r.concealedSamples - r.silentConcealedSamples, lost: r.packetsLost };
+    }, adaSid);
+    const before = await inbound();
+    const fit = await obs.evaluate(async (sid) => {
+      const receiver = yapObs.voice.peers.get(sid).pc.getReceivers().find((r) => r.track.kind === 'audio');
+      const ctx = new AudioContext({ sampleRate: 48000 });
+      await ctx.resume();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 32768;
+      const hush = ctx.createGain();
+      hush.gain.value = 0;
+      ctx.createMediaStreamSource(new MediaStream([receiver.track])).connect(analyser).connect(hush).connect(ctx.destination);
+      await new Promise((r) => setTimeout(r, 900));
+      const y = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(y);
+      ctx.close();
+      // least squares: a·sin + b·cos + c at 1 kHz; what's left is distortion + noise
+      let ss = 0, cc = 0, sc = 0, ys = 0, yc = 0, sum = 0;
+      for (let i = 0; i < y.length; i++) {
+        const w = (2 * Math.PI * 1000 * i) / 48000;
+        const sn = Math.sin(w), cs = Math.cos(w);
+        ss += sn * sn; cc += cs * cs; sc += sn * cs; ys += y[i] * sn; yc += y[i] * cs; sum += y[i];
+      }
+      const det = ss * cc - sc * sc;
+      const A = (ys * cc - yc * sc) / det, B = (yc * ss - ys * sc) / det, C = sum / y.length;
+      let res = 0, fitE = 0;
+      for (let i = 0; i < y.length; i++) {
+        const w = (2 * Math.PI * 1000 * i) / 48000;
+        const m = A * Math.sin(w) + B * Math.cos(w);
+        fitE += m * m;
+        res += (y[i] - m - C) ** 2;
+      }
+      return { thdn: 10 * Math.log10(res / fitE), levelDb: 10 * Math.log10(fitE / y.length) };
+    }, adaSid);
+    const after = await inbound();
+    return { ...fit, concealed: (after.concealed - before.concealed) / Math.max(1, after.samples - before.samples), lost: after.lost - before.lost };
+  } finally {
+    await a.evaluate(() => {
+      const { ctx, peer } = __tone;
+      peer.setTrack(yap.voice.outTrack); // her mic again
+      ctx.close();
+    });
+  }
+}
 let obsMeasured;
 
 await test('OBS link: a listen-only page joins the call and receives audio', async () => {
@@ -2281,9 +2351,9 @@ await test('OBS link: a listen-only page joins the call and receives audio', asy
     assert.ok((await received()) > 1000, 'audio bytes arrived');
     await obs.screenshot({ path: path.join(OUT, 'obs-overlay.png') });
 
-    // Straight through, with the shortest buffer (web/js/obs.js): each person plays from an <audio>
-    // element of their own at full volume (OBS sets the volume), no audio graph of its own, and
-    // every audio receiver asks for the shortest jitter buffer and 10 ms packets.
+    // The way VDO.Ninja's viewer plays a call (web/js/obs.js): each person from an element of their
+    // own at full volume (OBS sets the volume), no audio graph of its own, the browser's own jitter
+    // buffer and packet size (v0.45.0's shortest buffer and 10 ms packets are gone).
     const adaSid = await a.evaluate(() => yap.state.sid);
     const how = await obs.evaluate((sid) => {
       const peer = yapObs.voice.peers.get(sid);
@@ -2291,9 +2361,9 @@ await test('OBS link: a listen-only page joins the call and receives audio', asy
       const voiceSection = peer.pc.localDescription.sdp.split(/\r?\nm=/).find((s) => s.startsWith('audio'));
       return {
         contexts: globalThis.__audioContexts,
-        played: peer.audio.srcObject?.getAudioTracks()[0] === peer.pc.getReceivers().find((r) => r.track.kind === 'audio').track && !peer.audio.muted && peer.audio.volume === 1,
-        targets: receivers.map((r) => ('jitterBufferTarget' in r ? r.jitterBufferTarget : r.playoutDelayHint)),
-        ptime: /^a=ptime:10\r?$/m.test(voiceSection),
+        played: peer.audio.srcObject?.getAudioTracks()[0] === peer.pc.getReceivers().find((r) => r.track.kind === 'audio').track && !peer.audio.muted && peer.audio.volume === 1 && !peer.audio.paused,
+        targets: receivers.map((r) => ('jitterBufferTarget' in r ? r.jitterBufferTarget : r.playoutDelayHint ?? null)),
+        ptime: /^a=ptime:/m.test(voiceSection),
       };
     }, adaSid);
     const pps = async () => {
@@ -2310,30 +2380,55 @@ await test('OBS link: a listen-only page joins the call and receives audio', asy
     obsMeasured = { pps: Math.round(await pps()), ...(await obsClickDelay(obs, obsSid, adaSid)) };
     console.log(`    OBS page: Ada's click heard ${obsMeasured.median?.toFixed(1)} ms later (${obsMeasured.heard}/${obsMeasured.sent} clicks), ${obsMeasured.pps} packets/s from her`);
     assert.equal(how.contexts, 0, 'no audio graph on the OBS page');
-    assert.ok(how.played, 'Ada plays straight from her <audio> element, at full volume');
-    // The shortest buffer and 10 ms packets are off again (distortion with a real Firefox sender, 2026-10-11).
-    assert.ok(!how.ptime, 'no 10 ms packets asked for');
+    assert.ok(how.played, 'Ada plays straight from her own element, at full volume');
+    assert.ok(how.targets.every((t) => t == null), `the browser's own jitter buffer (${how.targets})`);
+    assert.ok(!how.ptime, 'no packet size asked for');
     assert.ok(obsMeasured.pps > 30, `packets keep coming: ${obsMeasured.pps} a second`);
     assert.ok(obsMeasured.heard >= 6, `Ada's clicks reached the OBS page (${obsMeasured.heard} of ${obsMeasured.sent})`);
     assert.ok(obsMeasured.median < 150, `the OBS page plays Ada ${obsMeasured.median} ms after she sends`);
 
-    // It keeps itself audible while it listens (web/js/obs.js › keepAudible): a looping 20 Hz hum at
-    // -60 dBFS, above Chromium's -72.25 dBFS "silent" line, so OBS's browser never stops capturing
-    // the page in a pause (that cut and garbled the start of the next words, in OBS only).
-    const humDb = await obs.evaluate(async () => {
-      const ctx = new AudioContext();
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 32768;
-      ctx.createMediaStreamSource(yapObs.hum.captureStream()).connect(analyser);
-      await new Promise((r) => setTimeout(r, 1200));
-      const buf = new Float32Array(analyser.fftSize);
-      analyser.getFloatTimeDomainData(buf);
-      ctx.close();
-      return 10 * Math.log10(buf.reduce((sum, v) => sum + v * v, 0) / buf.length);
-    });
-    obsMeasured.humDb = humDb;
-    assert.equal(await obs.evaluate(() => !yapObs.hum.paused && yapObs.hum.loop), true, 'the hum plays, looping');
-    assert.ok(humDb > -63 && humDb < -57, `the hum is at ${humDb.toFixed(1)} dBFS`);
+    // Clean: a tone from Ada comes out with distortion + noise far below it, nothing patched over.
+    const clean = await obsToneClean(obs, obsSid, adaSid);
+    obsMeasured.clean = clean;
+    console.log(`    OBS page: Ada's 1 kHz tone THD+N ${clean.thdn.toFixed(1)} dB at ${clean.levelDb.toFixed(1)} dBFS, ${(clean.concealed * 100).toFixed(2)} % patched over, ${clean.lost} lost`);
+    assert.ok(clean.levelDb > -18 && clean.levelDb < -12, `the tone arrives at its level (${clean.levelDb.toFixed(1)} dBFS, sent at -15)`);
+    assert.ok(clean.thdn < -35, `THD+N ${clean.thdn.toFixed(1)} dB`);
+    assert.ok(clean.concealed < 0.01, `${(clean.concealed * 100).toFixed(2)} % patched over`);
+    assert.equal(clean.lost, 0, 'no packets lost');
+
+    // An element that pauses plays again by itself (like VDO.Ninja's viewer).
+    await obs.evaluate((sid) => yapObs.voice.peers.get(sid).audio.pause(), adaSid);
+    await obs.waitForFunction((sid) => !yapObs.voice.peers.get(sid).audio.paused, adaSid, { timeout: 4000 });
+
+    // It keeps OBS capturing through pauses (web/js/obs.js › keepAlive), and only then: while anyone
+    // is heard (Ada and Ben's mics are on), nothing else plays; once both are muted, after a second,
+    // an inaudible 20 Hz tone at -60 dBFS (above Chromium's -72.25 dBFS "silent" line); it goes as
+    // soon as someone talks again.
+    const keepAlive = () => obs.evaluate(() => ({ on: yapObs.keepAlive.on, playing: !yapObs.keepAlive.element.paused }));
+    assert.deepEqual(await keepAlive(), { on: false, playing: false }, 'nothing mixed into their voices');
+    await a.click('[data-action="toggle-mute"]');
+    await b.click('[data-action="toggle-mute"]');
+    try {
+      await obs.waitForFunction(() => yapObs.keepAlive.on && !yapObs.keepAlive.element.paused && yapObs.keepAlive.element.volume === 1, null, { timeout: 5000 });
+      const keepDb = await obs.evaluate(async () => {
+        const ctx = new AudioContext();
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 32768;
+        ctx.createMediaStreamSource(yapObs.keepAlive.element.captureStream()).connect(analyser);
+        await new Promise((r) => setTimeout(r, 1200));
+        const buf = new Float32Array(analyser.fftSize);
+        analyser.getFloatTimeDomainData(buf);
+        ctx.close();
+        return 10 * Math.log10(buf.reduce((sum, v) => sum + v * v, 0) / buf.length);
+      });
+      obsMeasured.keepDb = keepDb;
+      assert.equal(await obs.evaluate(() => yapObs.keepAlive.element.loop), true, 'looping');
+      assert.ok(keepDb > -63 && keepDb < -57, `the keep-alive tone is at ${keepDb.toFixed(1)} dBFS`);
+    } finally {
+      await a.click('[data-action="toggle-mute"]');
+      await b.click('[data-action="toggle-mute"]');
+    }
+    await obs.waitForFunction(() => !yapObs.keepAlive.on && yapObs.keepAlive.element.paused, null, { timeout: 3000 });
 
     // It carries everyone, its own account included: Ada's link plays Ada (her voice from another
     // device of hers, on a stream) and Ben, and connects to nobody else.
@@ -2373,14 +2468,13 @@ await test('OBS link: a listen-only page joins the call and receives audio', asy
     await b.locator('#voice-channels').screenshot({ path: path.join(OUT, 'MW2-after.png') });
     // Then (the test server's TEST_OBS_GRACE, not 5 minutes) the server takes it out: Paused, and the row goes.
     await obs.waitForFunction(() => !yapObs.state.inCall && document.querySelector('#note').textContent === 'Paused: waiting for Ada to join Lounge.', null, { timeout: 20000 });
-    assert.equal(await obs.evaluate(() => yapObs.hum.paused), true, 'Paused: no hum (OBS may stop capturing)');
+    assert.deepEqual(await keepAlive(), { on: false, playing: false }, 'Paused: no keep-alive (OBS may stop capturing)');
     await obs.screenshot({ path: path.join(OUT, 'MW2-obs-paused.png') });
     await b.waitForSelector(row, { state: 'detached', timeout: 5000 });
     // Ada comes back: the OBS page joins again by itself.
     await a.click('button.channel.voice:has-text("Lounge")');
     await obs.waitForFunction(() => yapObs.state.inCall && [...yapObs.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'), null, { timeout: 15000 });
     assert.equal(await obs.isHidden('#note'), true, 'not paused any more');
-    assert.equal(await obs.evaluate(() => yapObs.hum.paused), false, 'the hum is back');
   } finally {
     await obs.close();
   }
@@ -3318,7 +3412,7 @@ for (const [mark, name, err] of results) {
   if (err) console.log(`    ${err.message ?? err}`);
 }
 if (measured) console.log(`\nOpus: ${measured.kbps} kbps received, ${measured.packets} packets, ${measured.lost} lost\nfmtp: ${measured.fmtp}`);
-if (obsMeasured?.median) console.log(`OBS page: a click plays ${obsMeasured.median.toFixed(1)} ms after it leaves Ada (median of ${obsMeasured.heard}), ${obsMeasured.pps} packets/s${obsMeasured.humDb ? `; keep-audible hum ${obsMeasured.humDb.toFixed(1)} dBFS` : ''}`);
+if (obsMeasured?.median) console.log(`OBS page: a click plays ${obsMeasured.median.toFixed(1)} ms after it leaves Ada (median of ${obsMeasured.heard}), ${obsMeasured.pps} packets/s${obsMeasured.clean ? `; a 1 kHz tone comes out at THD+N ${obsMeasured.clean.thdn.toFixed(1)} dB` : ''}${obsMeasured.keepDb ? `; keep-alive ${obsMeasured.keepDb.toFixed(1)} dBFS in pauses` : ''}`);
 console.log(`screenshots: ${OUT}`);
 const failed = results.filter((r) => r[0] === '✗').length;
 console.log(`${results.length - failed}/${results.length} passed`);

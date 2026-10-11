@@ -1,12 +1,20 @@
 {
-  "current": "0.45.1",
+  "current": "0.45.2",
   "releases": [
+    {
+      "version": "0.45.2",
+      "date": "2026-10-11",
+      "title": "The OBS link, VDO.Ninja's way",
+      "items": [
+        "The OBS link plays the call the way VDO.Ninja does: each voice straight through with nothing added while anyone talks, and it starts playing again by itself if it's paused."
+      ]
+    },
     {
       "version": "0.45.1",
       "date": "2026-10-11",
       "title": "OBS link rollback",
       "items": [
-        "The OBS link no longer distorts the call (yesterday's lower-delay settings are undone while it's reworked)."
+        "The OBS link no longer distorts the call: v0.45.0's lower-delay settings are undone while it's reworked."
       ]
     },
     {

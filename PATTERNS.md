@@ -206,14 +206,23 @@ louder than that: every client plays at `gain × your volume` through a
 
 ## Gotchas & lessons
 
-- **OBS's browser stops capturing a quiet page.** CEF (OBS's browser source)
-  stops its audio capture ~2–4 s after Chromium marks the page silent (under
-  −72.25 dBFS for 2 s) and starts a new one at the next sound, cutting the
-  first words. A page that must stay captured plays a −60 dBFS 20 Hz hum.
-  Also: `jitterBufferTarget` is a floor, not a cap; a remote `a=ptime:10`
-  makes a libwebrtc sender use 10 ms Opus frames (RED included); in headless
-  Chromium a failed `getDisplayMedia` glitches every audio stream for the rest
-  of the session, and `--disable-audio-output` breaks WebAudio → WebRTC.
+- **OBS's browser stops capturing a quiet page.** CEF 127 drops its capture
+  2 s after Chromium marks the page silent (under −72.25 dBFS) and starts a new
+  one at the next sound, cutting the first words. Fill only the silences with
+  something above −72.25 dBFS.
+- **"Control audio via OBS" mutes the page; CEF captures it like tab capture.**
+  To measure what OBS gets: full Chromium (`channel: 'chromium'`),
+  `--auto-accept-this-tab-capture`, `getDisplayMedia({ preferCurrentTab: true })`;
+  `--disable-audio-output`, not `--mute-audio` (that silences the loopback);
+  no `--use-fake-device-for-media-stream` (it returns a fake capture).
+- **Headless Firefox in the sandbox** needs `MOZ_APP_DATA`/`MOZ_LOCAL_APP_DATA`
+  in a scratch folder and `media.cubeb.force_mock_context` (real-time audio
+  with no device).
+- **Comparing Opus output across modes:** waveform SNR is meaningless across
+  modes (voip mode scored 9 dB and sounds fine); use spectral distance, and
+  expect NetEq to move latency in a call's first seconds. Also:
+  `jitterBufferTarget` is a floor, not a cap, and a failed `getDisplayMedia` in
+  headless Chromium glitches every audio stream for the rest of the session.
 
 - **An RTP check by payload type misses RED.** The impairment proxy treated
   only payload types 96–127 as RTP, so Chrome's RED (63) skipped the loss and

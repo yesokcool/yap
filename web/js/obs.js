@@ -5,6 +5,7 @@
  *   /obs#key=<invite key>&listen=<listen-only token>&channel=<voice channel id>
  *        [&only=<name>]   play just one person (one source per person)
  *        [&overlay=0]     audio only, nothing drawn
+ *        [&keepalive=0]   never play the pause tone below (to hear in OBS what it's for)
  * The token can only listen (the server enforces it); the apps leave it out
  * of the channel list and its chimes (2026-10-11). It listens only while its
  * account is in the channel, or for 5 minutes after it left (the server
@@ -12,19 +13,33 @@
  * it says "Paused: waiting for <name> to join <channel>." and joins again by
  * itself as soon as its account is back.
  *
- * Straight through, with as little delay as it can (2026-10-11): it still
- * connects to each person (voice is peer to peer), but that's all it takes
- * from a call. No mic, no gate, no audio graph, no per-person volume or
- * limiter: each person's sound plays from an <audio> element of its own, at
- * full volume (OBS sets the volume). Every audio receiver asks for the shortest
- * jitter buffer, and its descriptions ask for 10 ms packets (voice.js ›
- * listenOnly). RED stays as negotiated: it measured no added delay. Who's
- * speaking comes from the packets' own audio level (getSynchronizationSources),
- * not from listening to the sound. Measured (headless Chromium, localhost):
- * a click plays ~38 ms after it leaves its sender, from ~48 ms; a talker's
- * first sound comes out ~18 ms sooner (92 ms from 110, always-on). While it
- * listens it also keeps itself audible (keepAudible), so OBS never stops
- * capturing it in a pause.
+ * It plays the call the way VDO.Ninja's OBS view does (AGPL-3.0-only, like
+ * Yap; source: https://github.com/steveseguin/vdo.ninja, read at commit
+ * 0ac8228: lib.js › setupIncomingVideoTracking, updateIncomingAudioElement,
+ * playoutdelay; main.js › the window.obsstudio defaults). No code is copied,
+ * the approach is: each person's track straight into a media element of its
+ * own, at full volume, nothing in between (no audio graph, gain or limiter:
+ * OBS sets the volume), the browser's own jitter buffer, and an element that
+ * pauses is played again. Who's speaking comes from the packets' own audio
+ * level (getSynchronizationSources), not from listening to the sound.
+ *
+ * Measured 2026-10-11 (headless Chromium, the real web app as the sender with
+ * voice activity, 510 kbps and processing off, a synthetic voice, tones and a
+ * chirp): Firefox and Chrome senders arrive equally clean, as decoded and as
+ * a CEF-style capture of the whole page hears it (0.03-0.05 dB from the
+ * original spectrum, no concealment, THD+N -47 to -55 dB), a click ~45-55 ms
+ * after it leaves the sender. v0.45.0's shortest jitter buffer and 10 ms
+ * packets were no cleaner (10 ms sooner), VDO.Ninja asks for neither, and they
+ * were new when OBS sounded distorted: gone.
+ *
+ * One thing Yap needs that VDO.Ninja doesn't: Yap's voice-activity gate sends
+ * exact digital silence in a pause, and OBS's browser (CEF) stops capturing a
+ * page 2 s after Chromium calls it silent (under -72.25 dBFS for 2 s), then
+ * starts a new capture at the next sound, cutting its start. VDO.Ninja has no
+ * gate (its sender keeps sending the mic's own noise floor, which usually keeps
+ * the page audible) and nothing to keep OBS capturing. So while nobody is
+ * heard, and only then, this page plays an inaudible 20 Hz tone at -60 dBFS
+ * (keepAlive); it fades out as soon as anyone is heard.
  */
 import { Connection } from './conn.js';
 import { Voice } from './voice.js';
@@ -37,6 +52,7 @@ const token = params.get('listen') ?? '';
 const channelId = params.get('channel') ?? '';
 const only = (params.get('only') ?? '').toLowerCase();
 const overlay = params.get('overlay') !== '0';
+const keepAliveWanted = params.get('keepalive') !== '0';
 const $ = (id) => document.getElementById(id);
 
 const state = { sid: null, uid: null, users: new Map(), sessions: new Map(), channels: new Map(), inCall: false, joining: false, paused: false, speaking: new Set() };
@@ -54,19 +70,25 @@ function note(text) {
   $('note').textContent = text ?? '';
 }
 
+/** Under this audio level (linear, from the packets: −60 dBov) a voice isn't keeping the page audible. */
+const QUIET = 10 ** (-60 / 20);
+/** Quiet for this long (ms): the keep-alive starts. (CEF stops capturing ~4 s into a silence.) */
+const QUIET_FOR = 1000;
+
 /**
- * Keeps the page audible while it listens. Chromium calls a page silent once
- * what it plays stays under -72.25 dBFS (its kSilenceThresholdDBFS) for 2 s,
- * and OBS's browser (CEF) stops capturing the page's sound 2 s after that,
- * then starts again at the next sound: in OBS only, the first moment of
- * everyone's first words after a pause came out cut and glitchy (2026-10-11).
- * Pauses in a call are that quiet (encoded silence from a closed gate, or
- * noise suppression: measured -84 to -94 dBFS). So the page also plays a
- * 20 Hz hum at -60 dBFS, far below what anyone can hear, from an <audio>
- * element of its own (no audio graph), looping a 1 s WAV that ends where it
- * starts. Only while it listens: Paused lets CEF stop.
+ * Keeps OBS capturing through the call's pauses. Chromium calls a page silent
+ * once what it plays stays under -72.25 dBFS (its kSilenceThresholdDBFS) for
+ * 2 s, and OBS's browser (CEF 127: AlloyBrowserHostImpl::OnAudioStateChanged,
+ * kRecentlyAudibleTimeout) drops its capture 2 s after that and makes a new one
+ * at the next sound: the start of everyone's first words after a pause came
+ * out cut and glitchy, in OBS only (2026-10-11). A closed gate's pause decodes
+ * to exact zeros (measured). So once nobody has been heard for a second, the
+ * page plays a 20 Hz tone at -60 dBFS (far below anything audible) from an
+ * <audio> element of its own, looping a 1 s WAV that ends where it starts; it
+ * fades out as soon as anyone is heard, so a voice always reaches OBS alone.
+ * Not while Paused (CEF may stop then).
  */
-function keepAudible() {
+function keepAlive() {
   const rate = 48000;
   const amp = 32767 * 10 ** (-60 / 20) * Math.SQRT2; // -60 dBFS RMS
   const wav = new DataView(new ArrayBuffer(44 + rate * 2));
@@ -84,18 +106,62 @@ function keepAudible() {
   ascii(36, 'data');
   wav.setUint32(40, rate * 2, true);
   for (let i = 0; i < rate; i++) wav.setInt16(44 + i * 2, Math.round(amp * Math.sin((2 * Math.PI * 20 * i) / rate)), true);
-  const hum = new Audio(URL.createObjectURL(new Blob([wav], { type: 'audio/wav' })));
-  hum.id = 'keep-audible';
-  hum.loop = true;
-  document.body.append(hum);
+  const tone = new Audio(URL.createObjectURL(new Blob([wav], { type: 'audio/wav' })));
+  tone.id = 'keep-alive';
+  tone.loop = true;
+  tone.volume = 0;
+  document.body.append(tone);
+  let want = false;
+  let fader = null;
+  /** Volume to `to` in 5 steps over 100 ms (no click), then pause at 0. */
+  const fade = (to) => {
+    clearInterval(fader);
+    if (to > 0 && tone.paused) tone.play().catch(() => {});
+    fader = setInterval(() => {
+      tone.volume = Math.max(0, Math.min(1, tone.volume + (to > tone.volume ? 0.2 : -0.2)));
+      if (Math.abs(tone.volume - to) < 0.01) {
+        tone.volume = to;
+        clearInterval(fader);
+        if (!to) tone.pause();
+      }
+    }, 20);
+  };
   return {
-    element: hum,
-    on: () => hum.paused && hum.play().catch(() => {}),
-    off: () => hum.pause(),
+    element: tone,
+    get on() {
+      return want;
+    },
+    set(on) {
+      if (on === want) return;
+      want = on;
+      fade(on ? 1 : 0);
+    },
   };
 }
-const hum = keepAudible();
-globalThis.yapObs.hum = hum.element;
+const keeper = keepAlive();
+globalThis.yapObs.keepAlive = keeper;
+
+/** Is anyone's voice playing here (above QUIET, and not left out by `&only=`)? */
+const heard = () => [...voice.peers.values()].some((p) => !p.audio.muted && p.audioLevel() > QUIET);
+let quietSince = 0;
+setInterval(() => {
+  const now = performance.now();
+  if (!state.inCall || !keepAliveWanted) {
+    quietSince = 0;
+    return keeper.set(false);
+  }
+  if (heard()) {
+    quietSince = 0;
+    return keeper.set(false);
+  }
+  quietSince ||= now;
+  if (now - quietSince >= QUIET_FOR) keeper.set(true);
+}, 100);
+
+// Like VDO.Ninja's viewer: every few seconds, play any element that stopped (voice.js also does it on 'pause').
+setInterval(() => {
+  for (const peer of voice.peers.values()) peer.resume();
+}, 3000);
 
 /** Mute everyone but `only` (when set): their <audio> element, not a gain. */
 function applyOnly() {
@@ -109,7 +175,7 @@ function applyOnly() {
 /** Not listening: its account isn't in the channel (and wasn't for the last 5 minutes). */
 function pause() {
   state.paused = true;
-  hum.off();
+  keeper.set(false);
   const name = state.users.get(state.uid)?.name ?? 'your account';
   note(`Paused: waiting for ${name} to join ${state.channels.get(channelId)?.name ?? 'the voice channel'}.`);
 }
@@ -185,7 +251,6 @@ function handle(msg) {
         if (msg.channelId === channelId && !state.inCall) {
           state.inCall = true;
           state.paused = false;
-          hum.on(); // (before anyone's voice arrives, so OBS is already capturing)
           voice.enter([...state.sessions.values()].filter((x) => x.sid !== state.sid && x.voice?.channelId === channelId && talks(x)).map((x) => x.sid));
           note('');
         } else if (!msg.channelId && state.inCall) {
