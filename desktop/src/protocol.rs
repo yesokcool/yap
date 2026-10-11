@@ -568,6 +568,13 @@ pub enum ServerMsg {
     InviteCreated { invite: Invite, key: String },
     #[serde(rename = "invites")]
     Invites { invites: Vec<Invite> },
+    /// The owner reset the main invite link: this is the new main key (save it
+    /// as your link; PROTOCOL.md › HTTP › Resetting the main link).
+    #[serde(rename = "key")]
+    Key {
+        #[serde(default)]
+        key: String,
+    },
     #[serde(rename = "links")]
     Links { links: Vec<Link> },
     #[serde(rename = "modlog")]
@@ -1111,6 +1118,10 @@ pub mod out {
     pub fn invite_revoke(id: &str) -> Value {
         json!({ "t": "invite.revoke", "id": id })
     }
+    /// Owner only: a new main invite link (everyone connected gets `key`).
+    pub fn invite_reset_main() -> Value {
+        json!({ "t": "invite.resetMain" })
+    }
     pub fn link_add(name: &str, url: &str) -> Value {
         json!({ "t": "link.add", "name": name, "url": url })
     }
@@ -1353,6 +1364,10 @@ mod tests {
         }
         let inv = r#"{"t":"invite.created","invite":{"id":"i","label":"Ben","by":"u","createdAt":1,"uses":0,"lastUsedAt":null,"revoked":false},"key":"yi_abc"}"#;
         assert!(matches!(serde_json::from_str::<ServerMsg>(inv).unwrap(), ServerMsg::InviteCreated { .. }));
+        // The main link was reset: the new main key, to everyone connected.
+        let key = r#"{"t":"key","key":"k2_new-Main"}"#;
+        assert!(matches!(serde_json::from_str::<ServerMsg>(key).unwrap(), ServerMsg::Key { key } if key == "k2_new-Main"));
+        assert_eq!(out::invite_reset_main(), serde_json::json!({ "t": "invite.resetMain" }));
         let user = r##"{"id":"u","name":"Cleo","color":"#fff","lastSeen":0,"role":"pending","avatar":null,"look":null,"invitedBy":"Ada (for Cleo)"}"##;
         let cleo = serde_json::from_str::<User>(user).unwrap();
         assert_eq!(cleo.invited_by.as_deref(), Some("Ada (for Cleo)"));

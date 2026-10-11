@@ -11,12 +11,12 @@ the subprotocol on the WebSocket.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/check` (*key*) | `{ ok, keyRequired, protocol }`. Call before connecting so you can show "wrong invite key" (a failed WebSocket upgrade's 401 isn't readable from browsers). |
+| `GET /api/check` (*key*) | `{ ok, keyRequired, protocol }`, always against the current main key. Call before connecting so you can show "wrong invite key" (a failed WebSocket upgrade's 401 isn't readable from browsers). |
 | `GET /api/config` (*key*) | `{ gifs: { provider: "klipy", appKey } \| null, links: [{ id, name, url, view?, description? }], minecraft?: { name, address }, push: { publicKey } \| null, ntfy: { server }, source: string \| null }`. Client-side config for invited users. `links` is the same list as `ready.links` (older clients read it here); a link with `view` opens inside the app (today only `"board"`, and only on servers with a board). `minecraft` is there only when the server has one set (`MINECRAFT_SERVER`). `push.publicKey` = the VAPID key for browser pushes (null when the server has none). `ntfy.server` = the ntfy server this Yap pushes through (`NTFY_SERVER`, else `https://ntfy.sh`): subscribe to your topic there. `source` = where this server's source code is (the Source link; Yap is AGPL-3.0). |
 | `GET /api/minecraft` (*key*) | `{ name, address, online, checkedAt, ms?, version?, motd?, players?: { online, max, names }, error? }` for the server's Minecraft server, if it has one; 404 otherwise (Server List Ping from the Worker, cached ~30 s). `error` says why a ping failed. Poll ~once a minute. |
 | `GET /board` (+ the root paths in the server's `BOARD_PATHS`) | The optional board (another Worker, bound as `BOARD`), served same-origin so pointers can be drawn over it. 404 when the server has none. |
 | `GET /api/ice` (*key*) | `{ iceServers: [...] }` in `RTCIceServer` shape. STUN always; plus a TURN relay when the server has one (a fixed login, or short-lived Cloudflare credentials). Fetch right before joining voice. |
-| `GET /ws` (*key*) | WebSocket upgrade. 401 on a bad key, 426 without an upgrade. |
+| `GET /ws` (*key*) | WebSocket upgrade, 426 without one. A wrong, old or missing key opens a token-only socket (*Resetting the main link*), not a 401. |
 | `POST /api/image?sid=S&ut=U` (*key*) | A picture for a message: PNG, GIF, WebP or JPEG (sniffed from the bytes; no SVG), ≤ 1.9 MB → `{ ok: true, id, mime }`; then `send { image: { id, width, height } }`. |
 | `POST /api/avatar?sid=S&ut=U` (*key*) | Your picture: image bytes ≤ 512 KB (clients square-crop to 256 px) → `{ ok: true }`. Broadcast as a `user` update; `User.avatar` = media id. |
 | `POST /api/drawing?sid=S&ut=U` (*key*) | Save a picture of the drawing board to the gallery (a PNG, or an animated GIF), ≤ 1.9 MB → `{ ok: true, drawing }`, and `drawing` to everyone. |
@@ -65,7 +65,7 @@ says "reset the main link". Old main links stop working for anyone who isn't
 signed in yet; **signed-in devices keep working**: a WebSocket upgrade with a
 wrong or old key is still let through, but that socket may only send
 `hello { token }` (a valid device token), and anything else, or a bad token,
-closes it with 4003 "wrong invite key". So a client that holds a device token
+closes it with 4003 "wrong invite key" (a socket that never says hello is closed after ~20 s; other 4003 reasons, "banned", "denied" and "revoked", aren't about the key). So a client that holds a device token
 connects even when `/api/check` (or a 401) says its key is wrong, and saves
 `ready.key`. HTTP calls other than the socket still need the current key (or
 a personal link's). Personal invite links (`yi_…`) keep working. The server
@@ -206,6 +206,7 @@ with no password gets a temporary one through `member.resetPin`.
 | `delete` | `id, blobs?` | Own messages (owner/mods: anyone's). **Erased, not hidden:** its text, GIF, picture, reactions and earlier versions are wiped from the server; only an empty row stays so the id is never reused. `blobs` (your own Personal space only, ≤ 10): ids of the note's encrypted pictures to erase too. |
 | `invite.create` | `label` | Make a personal invite link → `invite.created` (the key is shown once; only its hash is stored). |
 | `invite.list` | | → `invites` (yours; everyone's for owner/mods). |
+| `invite.resetMain` | | Owner only (`forbidden` otherwise; `unavailable` on an open server; 3 at once, then one a minute): a new main key → `key` to everyone. |
 | `invite.revoke` | `id` | Maker or owner/mods. Stops new joins; people already in keep working (they hold the main key from `ready`). |
 | `link.add` | `name, url` | Any member. Sidebar Places; `https://` only, ≤ 20 links. → `links` to everyone. |
 | `link.remove` | `id` | Any member. → `links`. |
@@ -274,6 +275,7 @@ with no password gets a temporary one through `member.resetPin`.
 | `message` | `message, nonce?` | Broadcast to all; `nonce` only on your own echo. |
 | `deleted` | `id, channelId` | |
 | `edited` | `id, channelId, body, editedAt, sealed?` | The author edited a message; replace its text. `sealed`: a Personal-space note was just encrypted in place — also drop its `gif`/`image` (they're inside the note now); `editedAt` 0 = never edited. |
+| `key` | `key` | The main key changed (a reset, or the admin API went back to `YAP_KEY`): save it as your link and use it from the next connection. Never sent to OBS links. |
 | `invite.created` | `invite, key` | Only to the maker. Link = `<origin>/#key=<key>`. |
 | `invites` | `invites` | `{id, label, by, createdAt, uses, lastUsedAt, revoked}` |
 | `links` | `links` | The whole list, after any change. `{id, name, url, view?, description?}`; `view` opens inside Yap (`board`). |
@@ -1039,7 +1041,9 @@ the apps in their own data folder (the last three). Contents, in this order:
 only while its account is in that voice channel, or for **5 minutes** after
 it left: the server refuses its `voice.join` otherwise (`not_in_voice`,
 "Waiting for <name> to join <channel>.") and, when the 5 minutes pass, takes
-it out (`voice { sid, channelId: null }`). The OBS page watches `voice` events
+it out (`voice { sid, channelId: null }`, no `lost`, then `session.leave`); a
+reconnecting OBS page may rejoin within the 5 minutes, and the account coming
+back cancels them (test servers: `TEST_OBS_GRACE`, seconds). The OBS page watches `voice` events
 and joins again as soon as its account is back in that channel. What clients
 show: while the account is in the call, nothing (the OBS link is invisible,
 no chimes); while only the OBS link is there, the account's name in that
@@ -1199,6 +1203,7 @@ tools read it as `tools/instance.mjs` says). Unset key = admin API off.
 | `GET /api/admin/media/<id>` | One stored file's bytes, `Cache-Control: no-store` (backups use this, so nothing a post's deletion should erase lingers in a cache). |
 | `POST /api/admin/emoji?name=N` | Add an emoji without a live session (bulk imports); body = image bytes. Uploader shows as `admin`. |
 | `POST /api/admin/role?uid=&role=owner\|mod\|member\|banned` | Set a role (also lets someone out of the waiting room). |
+| `POST /api/admin/main-key` / `DELETE /api/admin/main-key` | A new main key (like `invite.resetMain`) / back to `YAP_KEY`; the mod log says which. |
 | `POST /api/admin/reset-pin?uid=` | A temporary password for someone who forgot theirs (or never set one) → `{ ok, name, pin }`. |
 | `POST /api/admin/channels?names=a,b[&kind=voice]` | Add channels by name (names that exist are skipped); `?archive=a,b` archives instead (messages kept), `?unarchive=a,b` brings archived ones back with their history. Clients get the usual `channel` / `channel.archived`. |
 | `POST /api/admin/merge-users?from=<dup uid>&into=<real uid>` | Merge a duplicate account: `from` reads as `into` everywhere (messages, emojis, deletes) and leaves the member list; its devices adopt `into` on reconnect. Nothing is rewritten. Everyone is bounced to reconnect. |

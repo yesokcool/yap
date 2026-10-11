@@ -19,24 +19,55 @@ export function inviteKey(request: Request, url: URL): string | null {
 }
 
 /**
- * Who may connect: true for the main invite key, the invite's id for a live
- * personal invite (yi_…), null otherwise. Personal invites are checked with
- * the Hub and remembered for a minute per Worker instance.
+ * The main key as this Worker instance last heard it from the Hub (the owner
+ * can reset it: PROTOCOL.md › Resetting the main link; YAP_KEY is only the
+ * first one), remembered for a minute. A key that doesn't match asks the Hub
+ * again, so a link that was just reset works at once; keys that still don't
+ * match are remembered as wrong for 10 s, so they don't each cost a request
+ * to the Hub. An old link keeps working here for up to a minute after a
+ * reset; the socket itself is checked by the Hub against the current key.
  */
-const inviteCache = new Map<string, { id: string | null; until: number }>();
-export async function keyAccess(env: Env, key: string | null): Promise<true | string | null> {
-  if (keyMatches(env, key)) return true;
-  if (!key || !key.startsWith('yi_')) return null;
+let mainCache: { key: string | null; until: number } | null = null;
+const wrongKeys = new Map<string, number>();
+
+async function mainKey(env: Env, fresh: boolean): Promise<string | null> {
   const now = Date.now();
-  const hit = inviteCache.get(key);
-  if (hit && hit.until > now) return hit.id;
-  const id = await hub(env).checkInvite(key);
-  if (inviteCache.size > 500) inviteCache.clear();
-  inviteCache.set(key, { id, until: now + (id ? 60_000 : 10_000) });
-  return id;
+  if (!fresh && mainCache && mainCache.until > now) return mainCache.key;
+  const key = await hub(env).mainKey();
+  mainCache = { key, until: now + 60_000 };
+  return key;
 }
 
-function keyMatches(env: Env, key: string | null): boolean {
-  if (!env.YAP_KEY) return true;
-  return Boolean(key) && sameSecret(key!, env.YAP_KEY);
+/** Forget what this instance remembers about the main key (the admin API just changed it). */
+export function forgetMainKey() {
+  mainCache = null;
+  wrongKeys.clear();
+}
+
+/**
+ * Who may connect: true for the main invite key, the invite's id for a live
+ * personal invite (yi_…), null otherwise. Personal invites are checked with
+ * the Hub and remembered for a minute per Worker instance. `exact` asks the
+ * Hub for the main key every time (/api/check, which says whether a link works).
+ */
+const inviteCache = new Map<string, { id: string | null; until: number }>();
+export async function keyAccess(env: Env, key: string | null, exact = false): Promise<true | string | null> {
+  if (!env.YAP_KEY) return true; // an open server (local dev only)
+  if (!key || key.length > 512) return null;
+  const now = Date.now();
+  if (sameSecret(key, (await mainKey(env, exact)) ?? '')) return true;
+  if (key.startsWith('yi_')) {
+    const hit = inviteCache.get(key);
+    if (hit && hit.until > now) return hit.id;
+    const id = await hub(env).checkInvite(key);
+    if (inviteCache.size > 500) inviteCache.clear();
+    inviteCache.set(key, { id, until: now + (id ? 60_000 : 10_000) });
+    return id;
+  }
+  if ((wrongKeys.get(key) ?? 0) > now && !exact) return null;
+  // Not the main key as last heard: it may have just been reset. Ask the Hub.
+  if (!exact && sameSecret(key, (await mainKey(env, true)) ?? '')) return true;
+  if (wrongKeys.size > 500) wrongKeys.clear();
+  wrongKeys.set(key, now + 10_000);
+  return null;
 }

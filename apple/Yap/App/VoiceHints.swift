@@ -2,6 +2,13 @@ import SwiftUI
 import YapCore
 import YapVoice
 
+/// An OBS link still listening while its account is out of the call
+/// (PROTOCOL.md › Voice › OBS links in a call): the spec's words.
+enum ObsText {
+    /// The greyed-out line in the channel (and what VoiceOver reads).
+    static func stillListening(_ name: String) -> String { "\(name)'s OBS is still listening" }
+}
+
 /// The web's wording for the quiet notes next to people in a call
 /// (web/js/app.js › voiceNote, PROTOCOL.md › Voice › Connection hints) and
 /// for the call's own warnings, wherever the app shows them.

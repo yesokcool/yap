@@ -1174,8 +1174,10 @@ a.btn { text-decoration: none; }
   .space-hud { right: 10px; }
 }
 
-/* OBS listeners in a voice channel; OBS link settings. */
-.voice-member.obs { color: var(--gray); font-style: italic; }
+/* An OBS link alone in a voice channel (its account left): the account, greyed. OBS link settings. */
+.voice-member.obs-listening { color: var(--gray); font-style: italic; cursor: default; }
+.voice-member.obs-listening:hover .name { text-decoration: none; }
+.voice-member.obs-listening .avatar { opacity: 0.45; filter: grayscale(1); }
 .obs-field .inline-form + .inline-form, .obs-field .btn.small { margin-top: 4px; }
 
 /* Add to Home Screen. */

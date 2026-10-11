@@ -373,6 +373,8 @@ export type ClientMessage =
   | { t: 'invite.create'; label: string }
   | { t: 'invite.list' }
   | { t: 'invite.revoke'; id: string }
+  /** Owner only: a new main invite link (old ones stop working for anyone not signed in yet) → `key` to everyone. */
+  | { t: 'invite.resetMain' }
   /** Sidebar Places: add an https link, or remove one. */
   | { t: 'link.add'; name: string; url: string }
   | { t: 'link.remove'; id: string }
@@ -464,8 +466,9 @@ export type ServerMessage =
   | { t: 'build'; build: { app: string; style: string } }
   /**
    * `uid` is your canonical id — adopt it if it differs from what you sent (merged accounts).
-   * `key`: the server's main invite key, so members who came in through a
-   * personal invite keep working if that invite is revoked later.
+   * `key`: the server's main invite key now, so members who came in through a
+   * personal invite keep working if that invite is revoked later, and devices
+   * that connected with an old key (the owner reset the link) get the new one.
    * `storageWarning` (owner/mods): a database is over 80% full.
    */
   | { t: 'ready'; v: number; sid: string; uid: string; token?: string; needsPin: boolean; notify: { mode: NotifyMode; topic: string | null; quiet?: QuietHours | null }; channels: Channel[]; users: User[]; sessions: Session[]; emojis: Emoji[]; pending: User[]; build?: { app: string; style: string }; key?: string; links?: Link[]; storageWarning?: boolean; uploadToken?: string; resumeKey?: string; vault?: VaultWrap | null; weakPin?: boolean; weakReason?: WeakReason; secretKind?: 'pin' | 'password'; sounds?: Sound[]; hangs?: Hang[] }
@@ -484,6 +487,8 @@ export type ServerMessage =
   /** A hang is starting now. */
   | { t: 'hang.now'; id: string }
   | { t: 'invite.created'; invite: Invite; key: string }
+  /** The main invite key changed (the owner reset the link): save it as your link. Never sent to OBS links. */
+  | { t: 'key'; key: string }
   | { t: 'invites'; invites: Invite[] }
   | { t: 'links'; links: Link[] }
   | { t: 'modlog'; entries: ModLogEntry[] }

@@ -46,7 +46,8 @@ function describeSettings() {
     Quality: kbps(settings.bitrate),
     'Channel quality': shared ? `${kbps(shared)} for everyone` : "each person's own",
     'Input mode': mode,
-    'Noise suppression': music ? 'off (music mode)' : settings.rnnoise ? 'stronger (RNNoise)' : onOff(settings.noiseSuppression),
+    // (RNNoise once the mic is open; the browser's own where it can't run.)
+    'Noise suppression': music ? 'off (music mode)' : !settings.noiseSuppression ? 'off' : voice.rawStream && !voice.rnnoise ? "on (the browser's)" : 'on (RNNoise)',
     'Echo cancellation': music ? 'off (music mode)' : onOff(settings.echoCancellation),
     'Automatic gain': music ? 'off (music mode)' : onOff(settings.autoGain),
     'Music mode': onOff(music),

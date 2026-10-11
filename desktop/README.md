@@ -101,6 +101,9 @@ and `share-dialog` opens Share Screen, both with `YAP_DEBUG_SCREEN=pattern`:
 the only thing offered is then a synthetic test pattern, never the real
 screen; without it, on macOS 14+ `share-dialog` shows the dialog that leads to
 Apple's picker, which only opens on a click), `YAP_DEBUG_OPEN=doodle|sound[:chime]` (+ `YAP_DEBUG_SOUND=<file>`),
+`YAP_DEBUG_RESET_MAIN=ask` with `YAP_DEBUG_OPEN=settings:6` (Invite with the
+"Reset main link?" popup open; `press` also presses Reset link once
+connected as the owner, so only ever against a test server),
 `YAP_DEBUG_HINT=weak|relay|cant|reconnecting` (in voice, show that
 connection hint on everyone else; `reconnecting` also says your own call is
 reconnecting), `YAP_DEBUG_HEAR=1` with `YAP_DEBUG_AUDIO=silence` +
@@ -236,7 +239,15 @@ has no install button. People using it get new versions from the server's
   notification if they're on). In a narrow window the bars over the chat wrap
   their words short of their buttons, or put the buttons on a row below. The invite key
   goes in the `X-Yap-Key` header and the `["yap", "key.K"]` WebSocket
-  subprotocol, never in a URL.
+  subprotocol, never in a URL. **A wrong invite key** shows the sign-on
+  window's "The invite key changed. Paste the new invite link." only when
+  it's certain: a 4003 close (a server that lets a wrong-key socket through
+  for `hello { token }` only, and closes anything else) or a 401 on the
+  upgrade (an older server). Three failed connections in a row ask
+  `/api/check` only when the app has no device token, so a signed-in
+  computer whose stored link is old (the owner reset it while it was off)
+  keeps connecting with its token and saves the new key from `ready.key`
+  (`core::key_verdict`). The app keeps trying meanwhile.
 - **No presence, on purpose:** nobody is shown online or offline — no dots,
   no counts, no "last seen", no member sidebar — so people can drop in and
   chill. The server only reveals sessions in voice or on a shared view
@@ -345,6 +356,18 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   and the People sheet). The server's
   main key from `ready.key` replaces the stored one, so a revoked personal
   link never locks a member out.
+- **Reset main link** (the owner only; PROTOCOL.md › HTTP › Resetting the
+  main link): Settings › Invite › Main link › **Reset main link…** asks in a
+  popup over Settings, in the spec's words ("Reset main link?" "The old link
+  stops working for anyone who hasn't joined yet. Everyone already signed in
+  keeps working, and their apps get the new link by themselves. Personal
+  invite links keep working." [Reset link] [Cancel], Windows' order like
+  every dialog here, Reset link in red and never the default), sends
+  `invite.resetMain`, then shows the new link with Copy (a refusal shows the
+  server's words under the warning). Every app connected gets `key { key }`
+  and saves it as its stored link at once (config.json's `"key"`), and the
+  socket's next attempt uses it; `ready.key` does the same for anyone who
+  was away. The mod log says "reset the main link".
 - **Owner & mods:** Settings › Owner & mods shows the moderation log
   (`modlog`) in the web's plain words ("The owner (admin key) made Rosa a
   member", "set the voice quality in "Lounge" to 256 kbps for everyone"),
@@ -528,10 +551,16 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   (`channel.bitrate`) or "each person's own"; the panel only says "Sound:
   256k for everyone" when one is set. A call uses `channel.bitrate ?? your
   setting` and renegotiates when it changes. An OBS link (`client: "obs"`)
-  listens without showing up, like on the web: it isn't listed under the
-  channel and gets no join or leave chime, but the call connects to it as
-  to anyone (`Model::voice_members`; the call report names it "Name's
-  OBS"). The voice track goes out in no stream
+  listens without showing up while its account is in the call, like on the
+  web: it isn't listed under the channel and gets no join or leave chime,
+  but the call connects to it as to anyone (`Model::voice_members`; the call
+  report names it "Name's OBS"). While only the OBS link is there (its
+  account left; a newer server lets it listen for 5 more minutes,
+  PROTOCOL.md › Voice › OBS links in a call), the channel shows the account
+  greyed out — a faded picture and "Ada's OBS is still listening" in grey
+  italics, the tooltip saying why — so nobody's heard without knowing. It's
+  an in-between state, not a call member: no volume on click, no speaking
+  ring, no marks, not counted (`Model::obs_listening`). The voice track goes out in no stream
   (`a=msid:- <track>`, like a browser's `addTransceiver(track)`), so it's
   never taken for a screen share.
 - **Audio redundancy (RED, RFC 2198)** (PROTOCOL.md › Voice › Redundancy;
@@ -814,7 +843,10 @@ the server's `Error`), `--approve-all` (let everyone in from the waiting room:
 a test doorman, which has to be the owner or a mod),
 `--react-to TEXT --react EMOJI`, `--ping TEXT`, `--send-gif QUERY`,
 `--edit-to TEXT`, `--send-image FILE`, `--add-link NAME=URL`,
-`--make-invite LABEL` (prints `INVITE <label> <link>`), `--channel-bitrate N`,
+`--make-invite LABEL` (prints `INVITE <label> <link>`), `--reset-main-link`
+(as the owner, reset the main invite link once in; every app connected logs
+`KEY saved sha256:<first 8 hex of the new key's SHA-256>`, never the key,
+and so does one that saves a different `ready.key`), `--channel-bitrate N`,
 `--reply-to TEXT [--reply-body TEXT]` (reply to someone's message containing
 TEXT, live or already there; prints `REPLIED to <id>`; incoming replies log
 `[reply to <id>]`), `--vault PASSCODE` (encrypt the Personal space or unlock
@@ -855,7 +887,9 @@ counter; never the real screen), `--share-sound` (with a stereo test tone as
 its sound), `--watch-screen` (watch the first person sharing in our channel;
 `SCREEN frames <n> <w>x<h> sound <bytes>B` each second, and `screenFrames`,
 `screenSize`, `screenSoundBytes`, `screenEncoded` in the SUMMARY). It logs `MENTION`, `REACTION`, `PING` lines, and for voice
-`CHIME` (every join/leave chime it would play, sounds on or off), `RESUME` /
+`CHIME` (every join/leave chime it would play, sounds on or off),
+`OBSLISTEN Lounge: Ada` / `OBSLISTEN none` (the greyed "<name>'s OBS is
+still listening" rows, when they change), `RESUME` /
 `GHOST` (calls kept across reconnects), `HINT` (connection hints), `MIC`
 (sending silence), `AUDIO` (a stream reopened), `ICE`, `HEAR`; the stats line
 each second has the jitter buffer (`jb=held/target ms`, `ins`/`drop`), the
@@ -937,9 +971,13 @@ receives about twice the Opus rate; through the proxy, payload type 63 on
 every packet each way: Chrome's stats name Opus as the codec even then), and
 native's call report (`--call-report`: the header, the web user's block with
 the connection type and `red+opus` each way, the timeline, no IP address);
-an OBS link (the web's `/obs` page, listen-only) in native's call: native
-connects to it and it hears native, with no join or leave chime (the
-`CHIME` lines), and native's call report names "Name's OBS";
+an OBS link (the web's `/obs` page, listen-only) in native's call with its
+account (the web user) in it too: native connects to it and it hears native,
+with no join or leave chime for it (the `CHIME` lines are the web user's:
+join, leave, join), and native's call report names "Name's OBS"; when the
+web user leaves, native shows them greyed out (`OBSLISTEN Lounge: Web…`)
+while the OBS link listens on, and when they're back, nothing
+(`OBSLISTEN none`);
 and screen sharing +
 Watch together (native asks `watch.get` at connect; the web's `screen: true`
 in voice and its `watch.join` / `watch.leave` reach native, on and off);
@@ -959,6 +997,14 @@ soundboard (native uploads a WAV and plays it in voice: the web hears it; the
 web plays it: native hears it), a hang a few seconds out (the web lists it,
 both get `hang.now`; needs the dev server's `--var TEST_HANGS:1`), and a
 doodle reaction + Save to Personal + shelf/catch-up requests from native.
+Last, **the main link reset**: a native app made owner through the admin API
+resets it; a native member connected meanwhile and the web page save the
+same new key; a device that signed in before and was off connects with the
+old key and its device token and saves the new key; a sign-in with the old
+key is turned away (`BadKey`, from the 4003 close), and one with the new key
+gets in. Then the admin API puts the server's own key back (`DELETE
+/api/admin/main-key`; the member saves that too), so the suite can run again
+against the same server.
 
 ```sh
 # from the repo root: the local test server (port 8788, throwaway data, keyed;
@@ -1208,6 +1254,15 @@ test pattern), `headless.rs`.
   already signed in (`device.handoff`), on macOS, Windows and Linux browsers.
 - **A hang starting** while Yap is in the background (the notification, then
   Join voice).
+- **Reset main link** with real people: the owner resets it while friends
+  are connected on the desktop app, the web and the iPhone, and while one
+  computer is asleep or quit; everyone keeps working, Copy main invite link
+  then gives the new link everywhere, the sleeping computer comes back
+  without asking for a link, and the old link in a fresh profile
+  (`--config`) says "The invite key changed…".
+- **An OBS link in OBS Studio** while you leave and rejoin the call: friends
+  see you greyed out ("…'s OBS is still listening") only while you're out,
+  and after 5 minutes away it stops listening and the row goes.
 
 - **Draw with a real mouse / pen / trackpad** (strokes, lines, boxes,
   circles, text, eraser, undo, the wiggle), **layers** (the chips, the eye,

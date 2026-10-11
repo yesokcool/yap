@@ -180,6 +180,11 @@ YAP_TEST_URL=http://127.0.0.1:8789 YAP_TEST_KEY=testkey YAP_TEST_ADMIN=testadmin
   swift test --scratch-path /tmp/yapkit-build
 ```
 
+The main-link reset suite needs a second server (same command, another
+port and `--persist-to`): add `YAP_TEST_RESET_URL=http://127.0.0.1:8799`.
+Start both with `--var TEST_OBS_GRACE:4` and add `YAP_TEST_OBS_GRACE=4` to
+also see an OBS link taken out when its account doesn't come back.
+
 They cover: signup → `pending` (with `uid` + token) → admin approval →
 `ready`; login on a second "device"; token reconnect; sign-out revoking only
 that device; friendly `name_taken` / `bad_token`, and the server's own
@@ -323,6 +328,31 @@ only "You're in". An OBS link in voice is in no row or count
 is down (`CallKeeperTests`). Every suite signs up with
 `correct-horse-582039`.
 
+Round 7 added: `MainLinkTests` (`invite.resetMain` and `key` on the wire;
+the owner's new link to copy and nobody else's; a refusal in the server's
+words; `ready.key` replacing an old link and the next connect using it; a
+signed-in device not stopped by `/api/check`; 4003 or 401 = a wrong key,
+anything else reconnects; the mod log's words; signing out forgets the
+link), `ObsListeningTests` (an OBS link invisible while its account is in
+the call, greyed out once it left or moved channels, one per account, gone
+when the server takes it out), the app's `MainLinkAppTests` (the question's
+words, owner only) and `VoicePersonTests` (no popover on it). Against the
+dev server: `ObsListeningIntegrationTests` (an OBS link refused with
+`not_in_voice` until its account is there, invisible, then greyed out when
+the account leaves and invisible again when it's back; with
+`YAP_TEST_OBS_GRACE=<seconds>` matching the server's `--var
+TEST_OBS_GRACE:<seconds>`, also taken out when the grace runs out) and,
+on a second server of its own because a reset changes the key under every
+other suite (`YAP_TEST_RESET_URL`, same key and admin key; the test puts
+`YAP_KEY` back through `DELETE /api/admin/main-key` at the end),
+`MainLinkIntegrationTests`: only the owner resets; everyone connected saves
+the new key; the old key fails `/api/check` and `/api/config` while the new
+one and personal links work; a device that was offline comes back with
+the old link and its token and takes the new key; a reconnect uses the new
+key; signing in with the old key, or an old key with a bad token, ends in
+4003 on the invite screen; the mod log; a newcomer with the new link
+reaches the waiting room.
+
 Round 5 added: `RedTests` (RED first in the voice only, the RED fmtp, a
 screen share's audio plain Opus, no RED without an offer of it, off taking
 it out), `RedLoopbackTests` (iOS simulator: two engines in one process with
@@ -399,6 +429,12 @@ new (the "New since" line, and the Jump to first unread pill when it's off
 screen); `YAP_DRAFT=text` starts the open channel's composer with that text
 (`\n` for a new line); `YAP_DEMO_RESET=Name` resets that (throwaway, local)
 account's password once online, to show the temporary password;
+`YAP_ASK=resetmain` (with `YAP_SCREEN=settings YAP_SETTINGS_PAGE=invite`,
+as the owner) asks "Reset main link?"; `YAP_DEMO_RESET_MAIN=1` resets the
+main link for real once online (a local server; `DELETE
+/api/admin/main-key` puts its key back) to show the new link;
+`seed-demo.mjs --voice --obs` leaves Ada's OBS link listening in Lounge
+after she leaves ("Ada's OBS is still listening");
 `YAP_SCREEN=password` opens Change password (Set a password on an old PIN);
 `YAP_ORIENTATION=landscape` turns the iPhone app to landscape once it's up;
 `YAP_DEMO_CALL_ENDED=soundTaken|soundFailed|stopped|offline|channelGone` (with `YAP_AUTOJOIN` and
@@ -455,6 +491,21 @@ YAP_INVITE='http://127.0.0.1:8789/#key=testkey' YAP_LOGIN='Sam:correct-horse-582
   see the server's main link (with the web's warning about sharing it);
   everyone else invites with personal links, as on the web. A new invite
   link for the same server swaps the key and keeps you signed in.
+- **Reset main link** (the owner only; PROTOCOL.md › Resetting the main
+  link): **Reset main link…** under the main link asks first — **Reset main
+  link?** "The old link stops working for anyone who hasn't joined yet.
+  Everyone already signed in keeps working, and their apps get the new link
+  by themselves. Personal invite links keep working." [Reset link] [Cancel]
+  — sends `invite.resetMain` and shows the new link once (Copy, Share…,
+  Done). Every device saves a new main key as its link, from `key { key }`
+  live or `ready.key`, and the socket's next connect uses it
+  (`YapConnection.retarget`). A device that still has an old link connects
+  with its device token (the server lets a wrong key through for
+  `hello { token }` only), so the invite screen lets a link for the server
+  it's signed in to through even when `/api/check` says no
+  (`YapClient.signsInWithToken`). A socket closed with **4003** (or an older
+  server's 401) is a wrong key for real: "That invite link doesn't work
+  anymore. Paste the new one." The mod log says "reset the main link".
   Waiting-room rows say whose invite, and when the same personal link
   already brought someone else in (`invite.usedBy`, PROTOCOL.md › Waiting
   room) they say so: "This link was also used by Dee — check with Ada."
@@ -489,7 +540,14 @@ YAP_INVITE='http://127.0.0.1:8789/#key=testkey' YAP_LOGIN='Sam:correct-horse-582
   web: no row under the voice channel or in the call sheet, no join or
   leave chime, in no count (`YapClient.voiceRoster`), and they don't make
   that person online. The call still connects to them
-  (`voiceSessions`), so OBS keeps hearing it.
+  (`voiceSessions`), so OBS keeps hearing it. Since round 7 an OBS link
+  follows its account (PROTOCOL.md › Voice › OBS links in a call): the
+  server lets it listen only while its account is in that channel, or for
+  5 minutes after it left. Meanwhile the channel (and the call sheet) shows
+  the account greyed out, **"Ada's OBS is still listening"** (dimmed
+  picture, a small TV; `YapClient.obsStillListening`, `ObsListeningRow98`),
+  one line per account: an in-between state, not a call member — no volume
+  popover, no speaking ring, in no count, no chimes.
 - **Owner & mods:** an Activity list (`modlog`, same wording as the web).
 - **Skin tones:** a tone row in both emoji pickers (`yap.emojiTone`, 0–5);
   picks, suggestions, reactions and typed `:shortcodes:` use it.
@@ -741,7 +799,8 @@ small popover (`VoicePersonMenu`): their name and role, their away note,
 setting as People › person), **Watch screen** while they share, and what the
 web offers owner and mods: **Make mod / Remove mod** (owner), **Reset
 password…** and **Ban** (mods, not on the owner; asked first in the usual box). Your own
-row has none (an OBS link has no row at all). SwiftUI has no right-click gesture, so one
+row has none, nor does an OBS link (no row while its account is in the call; a greyed line
+without a popover after it left). SwiftUI has no right-click gesture, so one
 local event monitor hands a right-click to the row under the pointer
 (`RightClicks`).
 

@@ -259,6 +259,45 @@ async fn recv_opt<T>(rx: &mut Option<mpsc::UnboundedReceiver<T>>) -> Option<T> {
     }
 }
 
+/// What the sign-in screen says when the invite key is wrong.
+const BAD_KEY: &str = "The invite key changed. Paste the new invite link.";
+
+/// What a closed socket says about our invite key.
+#[derive(Debug, PartialEq, Eq)]
+enum KeyVerdict {
+    /// It's wrong: ask for the new link (the app keeps trying meanwhile).
+    Wrong,
+    /// Maybe: ask `/api/check`.
+    Ask,
+    /// Nothing to do with the key: just offline for now.
+    Fine,
+}
+
+/// `unauthorized`: a 401 on the upgrade (a server from before resettable
+/// links) or a 4003 close (a newer one: the key was wrong and the socket
+/// didn't sign in with a device token). Three failures in a row without ever
+/// getting in may also be a changed key, but only without a device token:
+/// since the main link can be reset, a newer server lets a device token in
+/// whatever key came with it, so `/api/check` saying "wrong key" doesn't stop
+/// a signed-in device (it saves the new key from `ready`). PROTOCOL.md › HTTP ›
+/// Resetting the main link.
+fn key_verdict(unauthorized: bool, failures: u32, was_online: bool, has_token: bool) -> KeyVerdict {
+    if unauthorized {
+        KeyVerdict::Wrong
+    } else if failures == 3 && !was_online && !has_token {
+        KeyVerdict::Ask
+    } else {
+        KeyVerdict::Fine
+    }
+}
+
+/// A key in the logs: never the key itself, the start of its SHA-256.
+pub fn key_fingerprint(key: &str) -> String {
+    use sha2::Digest;
+    let hash = sha2::Sha256::digest(key.as_bytes());
+    format!("sha256:{}", hash.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>())
+}
+
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
@@ -441,17 +480,15 @@ impl Core {
                 let was_online = self.online;
                 self.online = false;
                 self.on_disconnect();
-                let failures = {
+                let (failures, has_token) = {
                     let mut m = self.shared.model.lock();
                     m.failures += 1;
-                    m.failures
+                    (m.failures, m.token.is_some())
                 };
-                if unauthorized {
-                    self.set_status(Status::BadKey, "The invite key changed. Paste the new invite link.");
-                } else {
-                    self.set_status(Status::Offline, &reason);
-                    // Repeated failures without getting in: maybe the key changed.
-                    if failures == 3 && !was_online {
+                match key_verdict(unauthorized, failures, was_online, has_token) {
+                    KeyVerdict::Wrong => self.set_status(Status::BadKey, BAD_KEY),
+                    KeyVerdict::Ask => {
+                        self.set_status(Status::Offline, &reason);
                         let (server, key) = {
                             let m = self.shared.model.lock();
                             (m.config.server.clone(), m.config.key.clone())
@@ -459,13 +496,40 @@ impl Core {
                         if let Ok(Ok(check)) = tokio::task::spawn_blocking(move || crate::http::check(&server, &key)).await
                             && !check.ok
                         {
-                            self.set_status(Status::BadKey, "The invite key changed. Paste the new invite link.");
+                            self.set_status(Status::BadKey, BAD_KEY);
                         }
                     }
+                    KeyVerdict::Fine => self.set_status(Status::Offline, &reason),
                 }
             }
             NetEvent::Msg(msg) => self.on_msg(*msg).await,
         }
+    }
+
+    /// The server's main invite key (`key` after the owner reset the main
+    /// link, or `ready.key`): our stored link from now on, saved straight
+    /// away, and the key every reconnect uses. True when it changed.
+    fn save_main_key(&mut self, key: String) -> bool {
+        if key.is_empty() {
+            return false;
+        }
+        {
+            let mut m = self.shared.model.lock();
+            if m.config.key == key {
+                return false;
+            }
+            m.config.key = key.clone();
+            m.main_key_seq += 1;
+            m.main_reset_error = None;
+        }
+        self.shared.save_config();
+        if let Some(n) = &self.net {
+            *n.key.lock() = key.clone();
+        }
+        log::info!("saved the server's main invite key");
+        self.emit(CoreEvent::Extra("KEY", format!("saved {}", key_fingerprint(&key))));
+        self.repaint();
+        true
     }
 
     /// Store a device token the server just issued; the password is no longer needed.
@@ -641,5 +705,31 @@ impl Core {
         if changed {
             self.repaint();
         }
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    /// A wrong key stops at the sign-in screen only when it's certain (a 401
+    /// or a 4003), or after three failures without a device token; a device
+    /// that's signed in keeps knocking with its token whatever /api/check says.
+    #[test]
+    fn a_device_token_gets_past_a_stale_key() {
+        assert_eq!(key_verdict(true, 1, false, true), KeyVerdict::Wrong, "a 4003 (or an older server's 401) is certain, token or not");
+        assert_eq!(key_verdict(true, 1, true, false), KeyVerdict::Wrong);
+        assert_eq!(key_verdict(false, 3, false, false), KeyVerdict::Ask, "three failures, no token: maybe the key changed");
+        assert_eq!(key_verdict(false, 3, false, true), KeyVerdict::Fine, "a device token connects even when /api/check says the key is wrong");
+        assert_eq!(key_verdict(false, 3, true, false), KeyVerdict::Fine, "it got in before: not the key");
+        assert_eq!(key_verdict(false, 1, false, false), KeyVerdict::Fine);
+        assert_eq!(key_verdict(false, 4, false, false), KeyVerdict::Fine, "asked once");
+    }
+
+    #[test]
+    fn keys_never_reach_the_logs() {
+        let f = key_fingerprint("testkey");
+        assert!(f.starts_with("sha256:") && f.len() == 15 && !f.contains("testkey"), "{f}");
+        assert_ne!(key_fingerprint("testkey"), key_fingerprint("testkey2"));
     }
 }

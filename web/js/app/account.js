@@ -2,7 +2,7 @@
 // password" prompt), your devices, sign-in alerts, starting over from the
 // waiting room, and Add to Home Screen.
 
-import { settings, save } from '../settings.js';
+import { settings, save, keyProtocols, socketUrl } from '../settings.js';
 import { esc, formatTime } from '../format.js';
 import { applySignInLink, checkKey, parseKey, sendHello, start } from '../app.js';
 import { $, coarsePointer, conn, state } from './state.js';
@@ -108,7 +108,8 @@ export function bindWelcome() {
       if (check && !check.ok) return error("That invite link didn't work. Ask for a new one.");
       const keyChanged = key !== settings.key;
       save({ key });
-      if (keyChanged && conn) location.reload(); // simplest way to re-open the socket with the new key
+      if (keyChanged && conn?.stopped) Object.assign(conn, { url: socketUrl(key), protocols: keyProtocols(key) }); // (turned away for a wrong key: restarted below)
+      else if (keyChanged && conn) location.reload(); // simplest way to re-open the socket with the new key
     }
     const signup = form.mode.value === 'signup';
     save({ color: welcomeColor, token: '' }); // the name is kept once the server says yes (ready / pending)
@@ -118,6 +119,7 @@ export function bindWelcome() {
     renderUserPanel();
     if (conn?.open && !state.sid) sendHello();
     else if (conn?.open) location.reload(); // switching accounts mid-session: start clean
+    else if (conn?.stopped) conn.restart(); // sends hello once it's open
     start();
   });
 }

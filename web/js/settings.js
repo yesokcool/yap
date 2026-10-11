@@ -22,8 +22,7 @@ const DEFAULTS = {
   pttKey: 'Backquote',
   bitrate: 128000,
   music: false,
-  noiseSuppression: true,
-  rnnoise: false, // RNNoise (WebAssembly) instead of the browser's noise suppression
+  noiseSuppression: true, // RNNoise wherever it runs, else the browser's own (voice.js)
   relayOnly: false, // voice only through the TURN relay, so people in a call never see your IP
   shareSurface: 'window', // screen sharing: window | monitor | browser
   shareQuality: 'smooth', // smooth (1080p60) | sharp (1440p30) | max (4K60)
@@ -57,6 +56,10 @@ export const settings = load();
 // Before the 3-way choice there was one switch: on = everything, off = mentions only.
 if (!settings.desktopNotify) settings.desktopNotify = settings.notifications ? 'all' : 'mentions';
 if (!settings.color) settings.color = COLORS[Math.floor(Math.random() * COLORS.length)];
+// One Noise suppression switch since 2026-10 (it uses RNNoise wherever it runs): the old
+// "Stronger noise removal" (rnnoise) was noise removal too, so either one on keeps it on.
+if (settings.rnnoise) settings.noiseSuppression = true;
+delete settings.rnnoise;
 // One look since the Apple and Arch skins went (2026-10): a skin saved before then
 // is dropped, so everyone is on Windows 98 with the light or dark they picked.
 delete settings.skin;

@@ -84,6 +84,7 @@ fn cmd_group(cmd: &Cmd) -> Part {
         Cmd::CreateInvite(..)
         | Cmd::ListInvites
         | Cmd::RevokeInvite(..)
+        | Cmd::ResetMainLink
         | Cmd::AddLink { .. }
         | Cmd::RemoveLink(..)
         | Cmd::ModLog
@@ -757,6 +758,16 @@ impl Core {
             Cmd::RevokeInvite(id) => {
                 self.send(out::invite_revoke(&id));
                 self.send(out::invite_list());
+            }
+            Cmd::ResetMainLink => {
+                self.shared.model.lock().main_reset_error = None;
+                if self.send(out::invite_reset_main()) {
+                    log::info!("resetting the main invite link");
+                } else {
+                    let mut m = self.shared.model.lock();
+                    m.main_reset_error = Some("You're offline. Try again once Yap is back.".into());
+                    m.main_key_seq += 1;
+                }
             }
             Cmd::AddLink { name, url } => {
                 self.send(out::link_add(name.trim(), url.trim()));

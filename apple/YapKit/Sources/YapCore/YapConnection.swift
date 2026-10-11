@@ -13,7 +13,10 @@ public final class YapConnection {
     public enum CloseReason: Sendable, Equatable {
         /// Network dropped, server restarted, heartbeat timed out: we retry.
         case lost
-        /// The upgrade was refused with 401: the invite key is wrong. No retry.
+        /// The invite key is wrong: the upgrade was refused with 401 (servers
+        /// before the main link could be reset), or the socket was closed
+        /// with 4003 (a wrong key may only say `hello { token }`, and that
+        /// token didn't work). No retry.
         case badKey
         /// `stop()` was called. No retry.
         case stopped
@@ -26,8 +29,9 @@ public final class YapConnection {
     public private(set) var isOpen = false
     public private(set) var isStopped = true
 
-    private let url: URL
-    private let protocols: [String]
+    /// Where the next `connect()` goes, and with which key (`retarget`).
+    private(set) var url: URL
+    private(set) var protocols: [String]
     private let session: URLSession
     private var task: URLSessionWebSocketTask?
     private var generation = 0
@@ -66,6 +70,24 @@ public final class YapConnection {
         self.task = task
         task.resume()
         runTask = Task { [weak self] in await self?.run(task, gen: gen) }
+    }
+
+    /// The main invite key changed (`key`, `ready.key`): reconnects use the
+    /// new one. The socket that's open stays as it is.
+    public func retarget(url: URL, protocols: [String]) {
+        self.url = url
+        self.protocols = protocols
+    }
+
+    /// The close code the server uses for a wrong invite key (PROTOCOL.md ›
+    /// Resetting the main link).
+    static let wrongKeyCloseCode = 4003
+
+    /// A socket that ended this way had a wrong invite key: the upgrade's 401
+    /// (older servers), or 4003 from servers that let a wrong key through
+    /// for `hello { token }` only.
+    static func endedForWrongKey(status: Int?, closeCode: Int) -> Bool {
+        status == 401 || closeCode == wrongKeyCloseCode
     }
 
     /// Give up for good (signed out, banned, turned away): no more reconnects.
@@ -140,7 +162,7 @@ public final class YapConnection {
         } catch {
             guard gen == generation else { return }
             let status = (task.response as? HTTPURLResponse)?.statusCode
-            lost(badKey: status == 401)
+            lost(badKey: Self.endedForWrongKey(status: status, closeCode: task.closeCode.rawValue))
         }
     }
 

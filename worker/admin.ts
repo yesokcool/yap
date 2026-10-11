@@ -4,6 +4,7 @@
 import { checkWav } from './extras';
 import { sameSecret } from './encoding';
 import { hub, media } from './objects';
+import { forgetMainKey } from './access';
 import { MAX_PICTURE, contentId, fail, sniffImage, uploadEmoji } from './uploads';
 
 /** Admin endpoints take `Authorization: Bearer <ADMIN_KEY>`; disabled if unset. */
@@ -67,6 +68,16 @@ export async function adminRoute(request: Request, url: URL, env: Env): Promise<
       if (!adminOk(env, request)) return new Response('Admin key required.', { status: 401 });
       if (request.method !== 'POST') return new Response('POST ?uid=<uid>.', { status: 405 });
       const result = await hub(env).resetPin(url.searchParams.get('uid') ?? '');
+      return Response.json(result, { status: result.ok ? 200 : 400 });
+    }
+
+    // The main invite link: POST = a new one (like Settings › Invite › Reset main link…),
+    // DELETE = back to the YAP_KEY secret. Everyone connected gets the new key.
+    case '/api/admin/main-key': {
+      if (!adminOk(env, request)) return new Response('Admin key required.', { status: 401 });
+      if (request.method !== 'POST' && request.method !== 'DELETE') return new Response('POST for a new main link, DELETE to go back to YAP_KEY.', { status: 405 });
+      const result = await hub(env).resetMainKey(request.method === 'DELETE');
+      forgetMainKey();
       return Response.json(result, { status: result.ok ? 200 : 400 });
     }
 

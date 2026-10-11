@@ -20,7 +20,8 @@ Making channel text Signal-grade means end-to-end encryption: per-group keys, mu
 ## What protects Yap today
 
 **Getting in**
-- **Invite key:** a random invite key (128 bits, made the way SELF_HOSTING.md shows). Without it, nothing connects. It travels in a header or the WebSocket subprotocol, so not in URLs or logs. (A key with characters other than letters, digits, `-` and `_` can't ride in the subprotocol, so the apps put it in the socket's address; keys made the way SELF_HOSTING.md shows never do.)
+- **Invite key:** a random invite key (128 bits, made the way SELF_HOSTING.md shows). Without it, nobody new gets in. It travels in a header or the WebSocket subprotocol, so not in URLs or logs. (A key with characters other than letters, digits, `-` and `_` can't ride in the subprotocol, so the apps put it in the socket's address; keys made the way SELF_HOSTING.md shows never do.)
+  - **Resetting it** (since 2026-10-11): the owner's Settings › Invite › Reset main link… makes a new random key (192 bits) that the server keeps from then on (`YAP_KEY` is only the first one); the old link stops working for anyone who isn't signed in yet. Signed-in devices keep working: a socket with a wrong or old key is still opened, but all it may send is one `hello` with a valid device token (anything else, or a bad token, closes it), and it's handed the new key. One that never says hello is closed after 20 s (whenever the next socket opens). So a wrong key costs an outsider nothing more than a socket that closes; it never gets them in.
 - **Waiting room:** a new account can't see or post anything until the owner or a mod lets them in; only they see who's waiting (and get a push about it). "Turn away" bans them.
 - **Accounts:** a name plus a password of 8 or more characters (since 2026-10-11). Accounts from before then may still have a 6-digit PIN: it keeps signing in until its owner chooses a password, and nothing new can be set as a PIN.
   - **No guessable passwords:** the most common passwords (about 10,800 of 8+ characters, from SecLists' list of the 100,000 most common, MIT; `worker/common-passwords.ts`), your own name, one character repeated, and keyboard rows or counting are refused, so a curious friend (or a stranger with a list) can't just try the obvious. Someone still on a PIN, a guessable password or a temporary one is asked once on each device to choose a password ("Later" hides it there for good).
@@ -39,7 +40,7 @@ Making channel text Signal-grade means end-to-end encryption: per-group keys, mu
   - per IP, for new accounts.
 - **Uploads:** pictures only as PNG, GIF, WebP or JPEG, checked by their actual bytes (never SVG); soundboard clips only as WAV, which the server reads sample by sample to cap their loudness; encrypted Personal-space pictures as opaque bytes. All size-capped, and served with `nosniff` and a no-script policy. Each upload must come from a signed-in connection, proven by a token only that connection received (session ids alone are visible to everyone), checked before anything is stored.
 - **Invite links:** each person can make their own, revocable link; only a hash is stored, and newcomers still wait for the owner or a mod to let them in.
-- **OBS links:** listen-only tokens that can do nothing but join voice muted. Since 2026-10-11 they don't show up in the channel (anyone in a call can record it anyway); keep the link private, and turn them all off in Settings.
+- **OBS links:** listen-only tokens that can do nothing but join voice muted, and only a voice channel their account is in, or left less than 5 minutes ago (the server takes them out after that). They don't show up in the channel while their account is there (anyone in a call can record it anyway); when it isn't, the account shows greyed, "<name>'s OBS is still listening", so nobody is heard by a link they can't see. They never get the main key. Keep the link private, and turn them all off in Settings.
 - **Message text:** always escaped before display. Links only allow `http(s)`. GIFs only come from KLIPY's CDN, so nobody can post an IP-logging image.
 
 **The page**
@@ -68,7 +69,8 @@ Making channel text Signal-grade means end-to-end encryption: per-group keys, mu
 - **The owner's keys:** whoever holds the Cloudflare account or the admin key can read everything. Guard both, and keep the admin key and the password pepper (`PIN_PEPPER`) in a password manager or keychain, never in the repo.
 
 ## If something leaks
-- **Invite link leaked:** `npx wrangler secret put YAP_KEY` (old links stop working; share the new one).
+- **Invite link leaked:** the owner resets it (Settings › Invite › Reset main link…; or the admin API, `POST /api/admin/main-key`). Old links stop working for anyone not signed in yet; everyone signed in keeps working and gets the new link by themselves. Share the new one. (`npx wrangler secret put YAP_KEY` only sets the first key: once the link has been reset, the server keeps its own until `DELETE /api/admin/main-key` goes back to `YAP_KEY`.)
+- **A personal invite link leaked:** turn it off (Settings › Invite › Turn off).
 - **Admin key leaked:** `npx wrangler secret put ADMIN_KEY`, then update wherever your tools read it (`tools/instance.mjs`).
 - **Someone's password leaked:** an owner or mod resets it (member menu › Reset password…) and sends them the temporary one; they choose a new password after signing in.
 - **A bad actor got in:** ban them (member menu › Ban); everything they posted can be deleted by mods.

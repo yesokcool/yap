@@ -149,6 +149,7 @@ struct VoicePanel: View {
         let voice = model.voice
         let channelId = model.callSheetChannel
         let sessions = model.client.voiceRoster(in: channelId)
+        let obs = model.client.obsStillListening(in: channelId)
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
@@ -156,7 +157,11 @@ struct VoicePanel: View {
                         ForEach(sessions) { session in
                             person(session)
                         }
-                        if sessions.count <= 1 {
+                        // OBS links whose account left: greyed out, not in the call.
+                        ForEach(obs) { session in
+                            ObsListeningRow98(session: session, large: true)
+                        }
+                        if sessions.count <= 1, obs.isEmpty {
                             Text("Nobody else here yet. Friends hear you the moment they join.")
                                 .font(Theme.chrome)
                                 .foregroundStyle(Theme.grayText)

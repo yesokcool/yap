@@ -10,6 +10,7 @@ export type HubHost = Pick<
   | 'aliasMap'
   | 'aliases'
   | 'allow'
+  | 'armAlarm'
   | 'broadcast'
   | 'canonical'
   | 'channel'

@@ -28,6 +28,13 @@ export interface Attachment {
   sdirty?: boolean;
   /** Personal invite this socket connected with (set by the Worker). */
   invite?: string;
+  /**
+   * Came with a wrong or old invite key (PROTOCOL.md › Resetting the main
+   * link): until its hello, all it may send is `hello { token }`. `since` =
+   * when it connected (one that never says hello is closed after 20 s).
+   */
+  keyless?: boolean;
+  since?: number;
   /** Listen-only (an OBS link): may only join voice and listen. */
   listen?: boolean;
   /** The connection's User-Agent, cut short (for naming new devices). */

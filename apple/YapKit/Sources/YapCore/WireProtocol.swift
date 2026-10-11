@@ -104,6 +104,9 @@ public enum ClientMessage: Encodable, Sendable {
     case inviteCreate(label: String)
     case inviteList
     case inviteRevoke(id: String)
+    /// Owner only: a new main invite key for the server; everyone connected
+    /// gets it as `key` (PROTOCOL.md › Resetting the main link).
+    case inviteResetMain
     /// Sidebar Places: add an https link, or remove one.
     case linkAdd(name: String, url: String)
     case linkRemove(id: String)
@@ -192,6 +195,7 @@ public enum ClientMessage: Encodable, Sendable {
         case .inviteCreate: "invite.create"
         case .inviteList: "invite.list"
         case .inviteRevoke: "invite.revoke"
+        case .inviteResetMain: "invite.resetMain"
         case .linkAdd: "link.add"
         case .linkRemove: "link.remove"
         case .channelBitrate: "channel.bitrate"
@@ -250,7 +254,8 @@ public enum ClientMessage: Encodable, Sendable {
         case let .accountPin(pin, current):
             try c.encode(pin, forKey: "pin")
             try c.encodeIfPresent(current, forKey: "current")
-        case .accountSignout, .voiceLeave, .inviteList, .modlog, .personalPlain, .accountDevices, .accountSignoutOthers, .watchGet, .deviceHandoff:
+        case .accountSignout, .voiceLeave, .inviteList, .modlog, .personalPlain, .accountDevices, .accountSignoutOthers, .watchGet, .deviceHandoff,
+             .inviteResetMain:
             break
         case let .memberResetPin(uid), let .memberApprove(uid), let .memberDeny(uid), let .memberBan(uid):
             try c.encode(uid, forKey: "uid")
@@ -485,6 +490,8 @@ public enum ServerMessage: Sendable {
     /// Only to the maker; the key is shown once.
     case inviteCreated(Invite, key: String)
     case invites([Invite])
+    /// The main invite key was reset (`key { key }`): save it as the link.
+    case key(String)
     case links([PlaceLink])
     case modlog([ModLogEntry])
     /// My Personal space's wrapped key changed (nil = encryption turned off).
@@ -594,6 +601,8 @@ public enum ServerMessage: Sendable {
                 message = .inviteCreated(try c.decode(Invite.self, forKey: "invite"), key: try str("key"))
             case "invites":
                 message = .invites((try? c.decodeIfPresent([Invite].self, forKey: "invites")) ?? [])
+            case "key":
+                message = .key(try str("key"))
             case "links":
                 message = .links(((try? c.decodeIfPresent([Lenient<PlaceLink>].self, forKey: "links")) ?? []).compactMap(\.value))
             case "vault":

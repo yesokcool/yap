@@ -29,9 +29,17 @@ extension YapClient {
         openConnection()
     }
 
-    /// After `/api/check` said the key is good. The same server with a new
-    /// key (the old one was rotated) keeps this device signed in; another
-    /// server starts over.
+    /// A link `/api/check` turns down still opens this server for a device
+    /// that's signed in to it: the server lets a wrong or old key through for
+    /// `hello { token }`, and `ready.key` brings the current one
+    /// (PROTOCOL.md › Resetting the main link). A 4003 close says otherwise.
+    public func signsInWithToken(at endpoint: ServerEndpoint) -> Bool {
+        hasToken && self.endpoint?.baseURL == endpoint.baseURL
+    }
+
+    /// After `/api/check` said the key is good (or `signsInWithToken`). The
+    /// same server with a new key (the old one was rotated) keeps this device
+    /// signed in; another server starts over.
     public func useInvite(_ endpoint: ServerEndpoint) {
         let sameServer = self.endpoint?.baseURL == endpoint.baseURL
         if !sameServer {
@@ -210,6 +218,9 @@ extension YapClient {
                 // Stop the spinner; say why.
                 for key in shelves.keys where shelves[key]?.loading == true { shelves[key]?.loading = false }
                 notice = Notice(text: message)
+            } else if re == "invite.resetMain" {
+                mainResetAsked = false
+                notice = Notice(text: message)
             } else if re == "device.handoff" {
                 // No pass (slowed down): the web app just asks for name + password.
                 handoffWaiter?(nil)
@@ -280,6 +291,8 @@ extension YapClient {
         links = []
         invites = []
         createdInvite = nil
+        newMainLink = nil
+        mainResetAsked = false
         modLog = nil
         vaultWrap = nil
         vaultKey = nil

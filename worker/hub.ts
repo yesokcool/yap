@@ -3,7 +3,8 @@ import { BUILD } from './build';
 import { LISTEN_ALLOWED, visible, type Attachment } from './attachment';
 import { MEMBER_ROLES, toChannel, toSession, toUser, voiceResume, type ChannelRow, type UserRow } from './rows';
 import { migrate } from './schema';
-import { b64urlEncode, hex } from './encoding';
+import { b64urlEncode, hex, sameSecret } from './encoding';
+import { inviteKey } from './access';
 import { settings } from './settings';
 import { cleanAway } from './extras';
 import {
@@ -37,16 +38,18 @@ import {
   type WeakReason,
 } from './protocol';
 import { WAITING, WEAK, devicesOf, onHandoff, onHello, onObsCreate, onObsRevoke, onResetPin, onRevokeDevice, onSetPin, onSignOut, onSignOutOthers, onVaultSet, resetPin, setTestPin, vaultOf } from './hub-accounts';
-import { DB_LIMIT_BYTES, addChannels, addEmoji, archiveChannels, checkInvite, invites, links, mergeUsers, modLog, onApprove, onBan, onChannelArchive, onChannelBitrate, onChannelCreate, onClaimOwner, onEmojiDelete, onEmojiRename, onInviteCreate, onInviteRevoke, onLinkAdd, onLinkRemove, onRole, onStats, setRole, stats, unarchiveChannels, unmergeUser, type AddEmojiResult } from './hub-admin';
+import { DB_LIMIT_BYTES, addChannels, addEmoji, archiveChannels, checkInvite, invites, links, mergeUsers, modLog, onApprove, onBan, onChannelArchive, onChannelBitrate, onChannelCreate, onClaimOwner, onEmojiDelete, onEmojiRename, onInviteCreate, onInviteRevoke, onLinkAdd, onResetMain, resetMainKey, onLinkRemove, onRole, onStats, setRole, stats, unarchiveChannels, unmergeUser, type AddEmojiResult } from './hub-admin';
 import { exportPage, importBackup } from './hub-backup';
 import { addDrawing, gallery, onDrawClear, onDrawSeg, onDrawState, onDrawStroke, onDrawUndo, onDrawWipe } from './hub-draw';
-import { addSound, hangs, onHangCancel, onHangSet, onSoundDelete, onSoundPlay, onWhenGet, onWhenSet, sounds, startDueHangs } from './hub-extras';
+import { addSound, hangs, onHangCancel, onHangSet, onSoundDelete, onSoundPlay, nextHangAt, onWhenGet, onWhenSet, sounds, startDueHangs } from './hub-extras';
 import { onDelete, onEdit, onHistory, onPersonalPlain, onPersonalSeal, onPin, onPins, onPollVote, onReact, onSearch, onSend, onShelf, onUnreadCounts } from './hub-messages';
 import { notifySettings, onNotifySettings, onPing, onPushSubscribe, onQuiet } from './hub-pushes';
 import { onSpaceMove, onSpaceState, saveSpot } from './hub-space';
 import { onWatchNext, onWatchQueue, onWatchSet, setWatching, watchState } from './hub-watch';
 
 const VIEWS = new Set(['board', 'draw', 'space']);
+/** meta row: until when an OBS link of `uid` may keep listening in `channel` without its account. */
+const obsGraceKey = (uid: string, channel: string) => `obs_grace:${uid}:${channel}`;
 
 export class Hub extends DurableObject<Env> {
   // The feature modules (hub-*.ts) reach these through HubHost (hub-host.ts).
@@ -152,6 +155,13 @@ export class Hub extends DurableObject<Env> {
     // Set by the Worker (after it checked the key), never by the client.
     const invite = request.headers.get('X-Yap-Invite');
     if (invite && ID_RE.test(invite)) attachment.invite = invite;
+    // A wrong or old key may only say hello with a device token. The Worker's
+    // idea of the main key can be a minute old, so "main" is checked again here.
+    const access = request.headers.get('X-Yap-Access');
+    if (access === 'token' || (access === 'main' && !this.isMainKey(inviteKey(request, new URL(request.url))))) {
+      Object.assign(attachment, { keyless: true, since: Date.now() });
+    }
+    this.closeIdleKeyless();
     server.serializeAttachment(attachment);
     this.rememberOrigin(request.url);
     // Clients may pass the invite key as a subprotocol ("yap", "key.<k>") to
@@ -178,6 +188,7 @@ export class Hub extends DurableObject<Env> {
       return this.send(ws, { t: 'error', code: 'bad_json', message: 'Each frame is a JSON object with a "t".' });
     }
     const me = ws.deserializeAttachment() as Attachment;
+    if (me.keyless && !me.hello) return this.onKeylessHello(ws, me, msg);
     try {
       if (me.pending) throw new ClientError('pending', WAITING);
       if (me.listen && !LISTEN_ALLOWED.has(msg.t)) throw new ClientError('forbidden', 'This is a listen-only (OBS) link.');
@@ -233,6 +244,9 @@ export class Hub extends DurableObject<Env> {
           return await onInviteCreate(this, ws, me, msg);
         case 'invite.list': return this.send(ws, { t: 'invites', invites: invites(this, me.uid) });
         case 'invite.revoke': return onInviteRevoke(this, ws, me, msg);
+        case 'invite.resetMain':
+          this.limit(me.uid, 'resetmain', 3, 1 / 60);
+          return onResetMain(this, me);
         case 'link.add':
           this.limit(me.sid, 'link', 5, 0.1);
           return onLinkAdd(this, me, msg);
@@ -351,6 +365,54 @@ export class Hub extends DurableObject<Env> {
     }
   }
 
+  // ── The main invite key (PROTOCOL.md › Resetting the main link) ─────────
+
+  /**
+   * The main invite key now: the one the owner last reset it to (meta
+   * 'main_key'), else YAP_KEY, which is only the first one. Null on an open
+   * server (no YAP_KEY, local dev only).
+   */
+  currentKey(): string | null {
+    if (!this.env.YAP_KEY) return null;
+    return this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'main_key'").toArray()[0]?.value ?? this.env.YAP_KEY;
+  }
+
+  private isMainKey(key: string | null): boolean {
+    const current = this.currentKey();
+    return current === null || (key !== null && sameSecret(key, current));
+  }
+
+  /**
+   * A socket that came with a wrong or old key: its one hello must carry a
+   * valid device token (a signed-in device, an OBS link, a sign-in pass);
+   * anything else, or a bad token, closes it with 4003 "wrong invite key".
+   */
+  private async onKeylessHello(ws: WebSocket, me: Attachment, msg: ClientMessage) {
+    if (msg.t !== 'hello' || typeof msg.token !== 'string' || !msg.token) return this.closeQuietly(ws, 4003, 'wrong invite key');
+    try {
+      await onHello(this, ws, { ...me, keyless: undefined, since: undefined }, msg);
+    } catch (err) {
+      // A bad token says "wrong invite key" (that's what the person has to fix first); anything else (banned) says why.
+      if (err instanceof ClientError && err.code !== 'bad_token') this.send(ws, { t: 'error', code: err.code, message: err.message, re: 'hello' });
+      else if (!(err instanceof ClientError)) console.error('hello failed', err);
+      this.closeQuietly(ws, 4003, 'wrong invite key');
+    }
+  }
+
+  /** Sockets with a wrong key that never said hello go after 20 s (checked whenever a socket opens). */
+  private closeIdleKeyless() {
+    const now = Date.now();
+    for (const ws of this.ctx.getWebSockets()) {
+      const a = ws.deserializeAttachment() as Attachment | null;
+      if (a?.keyless && !a.hello && now - (a.since ?? 0) > 20_000) this.closeQuietly(ws, 4003, 'wrong invite key');
+    }
+  }
+
+  /** Worker RPC (worker/access.ts): the main invite key now. */
+  async mainKey(): Promise<string | null> {
+    return this.currentKey();
+  }
+
   async webSocketClose(ws: WebSocket, code: number) {
     this.drop(ws);
     try {
@@ -372,6 +434,7 @@ export class Hub extends DurableObject<Env> {
     ws.serializeAttachment({ ...me, hello: false });
     // `lost`: the socket went without a voice.leave, so the call may come back (PROTOCOL.md › Voice › Keeping calls across reconnects).
     if (me.vc) this.broadcast({ t: 'voice', sid: me.sid, channelId: null, muted: me.muted, deafened: me.deafened, lost: true });
+    if (me.vc && !me.listen) this.obsAccountLeft(me.uid, me.vc);
     if (me.sdirty) saveSpot(this, me.uid, me.sx!, me.sy ?? 0, me.sd ?? 0);
     if (visible(me)) this.broadcast({ t: 'session.leave', sid: me.sid });
     this.sql.exec('UPDATE users SET last_seen = ? WHERE id = ?', Date.now(), me.uid);
@@ -381,6 +444,7 @@ export class Hub extends DurableObject<Env> {
   admit(ws: WebSocket, me: Attachment, token?: string) {
     const ut = me.listen ? undefined : hex(crypto.getRandomValues(new Uint8Array(16)));
     const { hasPin, ...secret } = this.secretInfo(me.uid);
+    const key = me.listen ? null : this.currentKey(); // an OBS link never gets the main key
     const updated: Attachment = { ...me, hello: true, pending: false, view: null, ut };
     ws.serializeAttachment(updated);
     this.send(ws, {
@@ -398,7 +462,7 @@ export class Hub extends DurableObject<Env> {
       // The waiting room is for the owner and mods (they let people in); everyone else gets [].
       pending: this.isMod(me.uid) && !me.listen ? this.pendingUsers() : [],
       build: BUILD,
-      ...(this.env.YAP_KEY && !me.listen ? { key: this.env.YAP_KEY } : {}),
+      ...(key ? { key } : {}),
       links: links(this),
       sounds: sounds(this),
       hangs: hangs(this),
@@ -448,6 +512,9 @@ export class Hub extends DurableObject<Env> {
     if (me.listen) msg = { ...msg, muted: true, deafened: false };
     const channel = this.channel(msg.channelId);
     if (!channel || channel.kind !== 'voice') throw new ClientError('no_channel', 'That voice channel does not exist.');
+    if (me.listen && !this.accountIn(me.uid, channel.id) && this.obsGraceUntil(me.uid, channel.id) <= Date.now()) {
+      throw new ClientError('not_in_voice', `Waiting for ${this.user(me.uid)?.name ?? 'them'} to join ${channel.name}.`);
+    }
     // Keeping a call across a reconnect: `prev` is the session this one
     // replaces, `proof` that session's resume key. The key is an HMAC of
     // (sid, uid), so it proves `prev` was *this account's* session — even
@@ -483,12 +550,77 @@ export class Hub extends DurableObject<Env> {
     const sharing = Boolean(vc && screen);
     const updated: Attachment = { ...me, vc, muted, deafened, screen: sharing, ...(vc ? {} : { vr: undefined, vp: undefined }) };
     ws.serializeAttachment(updated);
+    if (!me.listen && me.vc !== vc) {
+      if (vc) this.sql.exec('DELETE FROM meta WHERE key = ?', obsGraceKey(me.uid, vc)); // back in time: no countdown
+      if (me.vc) this.obsAccountLeft(me.uid, me.vc);
+    }
     this.showSession(ws, me, updated);
     if (me.vc !== vc || me.muted !== muted || me.deafened !== deafened || Boolean(me.screen) !== sharing) {
       this.broadcast({ t: 'voice', sid: me.sid, channelId: vc, muted, deafened, ...(sharing ? { screen: true } : {}), ...voiceResume(updated) });
     }
     this.hideSession(ws, me, updated);
     return updated;
+  }
+
+  // ── OBS links follow their account (PROTOCOL.md › Voice › OBS links in a call) ──
+  // An OBS link listens only while its account is in that voice channel, or
+  // for 5 minutes after it left (meta 'obs_grace:<uid>:<channel>' = until
+  // when, so it survives hibernation and deploys); then the alarm takes it out.
+
+  /** How long an OBS link keeps listening after its account left (TEST_OBS_GRACE seconds on a test server). */
+  private get obsGraceMs(): number {
+    const test = Number(this.env.TEST_OBS_GRACE);
+    return test > 0 && test <= 300 ? test * 1000 : 5 * 60_000;
+  }
+
+  /** Is this account in `channel` itself (not just through an OBS link)? */
+  private accountIn(uid: string, channel: string): boolean {
+    return this.sockets().some((ws) => {
+      const a = ws.deserializeAttachment() as Attachment;
+      return a.uid === uid && a.vc === channel && !a.listen;
+    });
+  }
+
+  private obsGraceUntil(uid: string, channel: string): number {
+    return Number(this.sql.exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', obsGraceKey(uid, channel)).toArray()[0]?.value ?? 0);
+  }
+
+  /** The account left `channel`: if that was its last session there and an OBS link of its is listening, the 5 minutes start. */
+  private obsAccountLeft(uid: string, channel: string) {
+    if (this.accountIn(uid, channel)) return;
+    const listening = this.sockets().some((ws) => {
+      const a = ws.deserializeAttachment() as Attachment;
+      return a.listen && a.uid === uid && a.vc === channel;
+    });
+    if (!listening) return;
+    this.sql.exec(
+      'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      obsGraceKey(uid, channel), String(Date.now() + this.obsGraceMs),
+    );
+    this.ctx.waitUntil(this.armAlarm());
+  }
+
+  /** Time's up: OBS links whose account didn't come back stop listening (`voice {channelId: null}`). */
+  private endObsGrace() {
+    const now = Date.now();
+    for (const row of this.sql.exec<{ key: string; value: string }>("SELECT key, value FROM meta WHERE key LIKE 'obs_grace:%'").toArray()) {
+      if (Number(row.value) > now) continue;
+      this.sql.exec('DELETE FROM meta WHERE key = ?', row.key);
+      const [, uid, channel] = row.key.split(':');
+      if (this.accountIn(uid, channel)) continue;
+      for (const ws of this.sockets()) {
+        const a = ws.deserializeAttachment() as Attachment;
+        if (a.listen && a.uid === uid && a.vc === channel) this.setVoice(ws, a, null, a.muted, a.deafened);
+      }
+    }
+  }
+
+  /** The one Durable Object alarm: the next hang to start, or the next OBS link whose time is up. */
+  async armAlarm() {
+    const obs = this.sql.exec<{ at: number | null }>("SELECT MIN(CAST(value AS INTEGER)) AS at FROM meta WHERE key LIKE 'obs_grace:%'").one().at;
+    const next = Math.min(nextHangAt(this) ?? Infinity, obs ?? Infinity);
+    if (next === Infinity) await this.ctx.storage.deleteAlarm();
+    else await this.ctx.storage.setAlarm(Math.max(next, Date.now() + 1000));
   }
 
   /** The secret behind resume keys: random, made once, kept in meta (never exported). */
@@ -649,9 +781,11 @@ export class Hub extends DurableObject<Env> {
     return addSound(this, input);
   }
 
-  /** The Durable Object alarm: hangs starting now (hub-extras.ts). */
+  /** The Durable Object alarm: hangs starting now (hub-extras.ts), OBS links whose time is up. */
   async alarm() {
-    return startDueHangs(this);
+    await startDueHangs(this);
+    this.endObsGrace();
+    await this.armAlarm();
   }
 
   async addChannels(names: string[], kind: 'text' | 'voice') {
@@ -664,6 +798,13 @@ export class Hub extends DurableObject<Env> {
 
   async unarchiveChannels(names: string[], kind: 'text' | 'voice') {
     return unarchiveChannels(this, names, kind);
+  }
+
+  /** Admin API: a new main key (or, `first`, back to YAP_KEY). */
+  async resetMainKey(first: boolean): Promise<{ ok: boolean; key?: string; message?: string }> {
+    if (!this.env.YAP_KEY) return { ok: false, message: 'This server has no YAP_KEY (it is open).' };
+    const key = resetMainKey(this, 'admin', first);
+    return first ? { ok: true } : { ok: true, key };
   }
 
   async checkInvite(key: string): Promise<string | null> {

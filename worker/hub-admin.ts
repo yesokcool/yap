@@ -251,6 +251,35 @@ export function onInviteRevoke(hub: HubHost, ws: WebSocket, me: Attachment, msg:
   hub.send(ws, { t: 'invites', invites: invites(hub, me.uid) });
 }
 
+// ── The main invite link (PROTOCOL.md › Resetting the main link) ──────
+
+/** The owner resets the main link: old links stop working for anyone who isn't signed in yet. */
+export function onResetMain(hub: HubHost, me: Attachment) {
+  if (hub.user(me.uid)?.role !== 'owner') throw new ClientError('forbidden', 'Only the owner can reset the main link.');
+  if (!hub.env.YAP_KEY) throw new ClientError('unavailable', "This server is open (it has no invite key), so there's no link to reset.");
+  resetMainKey(hub, me.uid);
+}
+
+/**
+ * A new random main key from now on (or, with `first`, YAP_KEY again), kept
+ * in meta 'main_key' and sent to everyone connected (`key`; never to OBS
+ * links). Signed-in devices with an old key still connect (worker/access.ts,
+ * Hub.fetch) and get it in `ready.key`.
+ */
+export function resetMainKey(hub: HubHost, actor: string, first = false): string {
+  let key = hub.env.YAP_KEY ?? '';
+  if (first) hub.sql.exec("DELETE FROM meta WHERE key = 'main_key'");
+  else {
+    // Letters, digits, - and _ (it fits a WebSocket subprotocol), and never yi_ (a personal invite).
+    do key = b64urlEncode(crypto.getRandomValues(new Uint8Array(24)));
+    while (key.startsWith('yi_'));
+    hub.sql.exec("INSERT INTO meta (key, value) VALUES ('main_key', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key);
+  }
+  hub.log(actor, 'invite.resetMain', null, first ? 'YAP_KEY' : null);
+  hub.sendWhere({ t: 'key', key }, (a) => !a.listen);
+  return key;
+}
+
 /** Worker RPC: is this a live personal invite key? Returns its id. */
 export async function checkInvite(hub: HubHost, key: string): Promise<string | null> {
   if (!/^yi_[A-Za-z0-9_-]{32}$/.test(key)) return null;

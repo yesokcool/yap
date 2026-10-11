@@ -29,7 +29,7 @@ Pick the address before inviting people. Moving later resets everyone's local se
 Secrets go into Cloudflare, never into files. Make up long random values and keep a copy of each in a password manager:
 
 ```sh
-openssl rand -hex 16 | npx wrangler secret put YAP_KEY          # the invite key: anyone with it can ask to join (letters, digits, - and _ only)
+openssl rand -hex 16 | npx wrangler secret put YAP_KEY          # the first invite key: anyone with it can ask to join (letters, digits, - and _ only); reset it later in the app
 openssl rand -hex 32 | npx wrangler secret put PIN_PEPPER       # mixed into PIN hashes; a restore needs the same one
 openssl rand -hex 32 | npx wrangler secret put ADMIN_KEY        # backups, restores, claiming owner
 ```
@@ -49,6 +49,8 @@ npm run deploy
 Open `https://<your address>/#key=<your YAP_KEY>` and sign up. **The first person becomes the owner.**
 
 Share that same link with friends. Newcomers wait in a waiting room until you or a mod lets them in (you get a push). Members can also make personal invite links (Settings › Invite), which you can revoke one by one.
+
+If the main link leaks, reset it: Settings › Invite › **Reset main link…** (owner). Everyone signed in keeps working and gets the new link by themselves. Once reset, the server keeps its own key, so `wrangler secret put YAP_KEY` won't change it (`DELETE /api/admin/main-key` goes back to `YAP_KEY`).
 
 If you ever lose owner rights, Settings › Owner & mods › "Claim owner" takes the `ADMIN_KEY`.
 

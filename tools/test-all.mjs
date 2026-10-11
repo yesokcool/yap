@@ -12,7 +12,8 @@
  *
  * The server is `npm run dev:test` with everything the full suites need: the
  * fake ntfy and Web Push services (run by the protocol test, on free ports),
- * TEST_HANGS, TEST_PINS (old-PIN accounts for the tests), a fresh VAPID key
+ * TEST_HANGS, TEST_PINS (old-PIN accounts for the tests), TEST_OBS_GRACE (an
+ * OBS link's 5 minutes after its account left, in seconds), a fresh VAPID key
  * and a brand-new database. For the backup →
  * restore round trip it's backed up, stopped, and started again on an empty
  * database to restore into. Temp files go to $TMPDIR (TMPDIR=… moves them).
@@ -210,7 +211,8 @@ async function main() {
     const [port, ntfyPort, pushPort] = await freePorts(3);
     // A fresh Web Push key for this run (never printed).
     const vapid = execFileSync(process.execPath, [path.join(ROOT, 'tools/make-vapid.mjs')], { encoding: 'utf8' }).trim();
-    const vars = { NTFY_SERVER: `http://127.0.0.1:${ntfyPort}`, TEST_HANGS: '1', TEST_PINS: '1', VAPID_PRIVATE_JWK: vapid };
+    // TEST_OBS_GRACE: an OBS link keeps listening 4 s (not 5 minutes) after its account left the call.
+    const vars = { NTFY_SERVER: `http://127.0.0.1:${ntfyPort}`, TEST_HANGS: '1', TEST_PINS: '1', TEST_OBS_GRACE: '4', VAPID_PRIVATE_JWK: vapid };
     const env = (url) => ({
       YAP_URL: url, YAP_KEY: KEY, YAP_ADMIN_KEY: ADMIN,
       YAP_TEST_NTFY_PORT: String(ntfyPort), YAP_TEST_PUSH_PORT: String(pushPort),

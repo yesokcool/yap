@@ -164,6 +164,11 @@ pub struct Model {
     pub invites: Vec<Invite>,
     /// The link we just made: (label, full link). Shown once.
     pub new_invite: Option<(String, String)>,
+    /// Bumped when the stored main invite key changes (`key` after the owner
+    /// reset the main link, or a different `ready.key`), or when resetting it
+    /// was turned away (its words in `main_reset_error`).
+    pub main_key_seq: u64,
+    pub main_reset_error: Option<String>,
     /// The moderation log (Settings › Activity).
     pub modlog: Vec<ModLogEntry>,
     /// A picture is uploading.
@@ -491,6 +496,8 @@ impl Model {
             links: None,
             invites: Vec::new(),
             new_invite: None,
+            main_key_seq: 0,
+            main_reset_error: None,
             modlog: Vec::new(),
             sending_picture: false,
             upload_token: None,
@@ -720,6 +727,11 @@ impl Model {
         self.users.get(&self.config.uid).is_some_and(|u| u.role == "owner" || u.role == "mod")
     }
 
+    /// Are we the owner (reset the main link, make mods)?
+    pub fn am_owner(&self) -> bool {
+        self.users.get(&self.config.uid).is_some_and(|u| u.role == "owner")
+    }
+
     pub fn user_name(&self, uid: &str) -> String {
         self.users.get(uid).map(|u| u.name.clone()).unwrap_or_else(|| "Unknown".into())
     }
@@ -731,6 +743,26 @@ impl Model {
         let mut members: Vec<&Session> = self.sessions.values().filter(|s| !s.is_obs() && s.voice.as_ref().is_some_and(|v| v.channel_id == channel_id)).collect();
         members.sort_by_cached_key(|s| self.user_name(&s.uid).to_lowercase());
         members
+    }
+
+    /// Whose OBS link is still listening in a voice channel they aren't in
+    /// themselves (it may for 5 minutes after they leave; PROTOCOL.md › Voice ›
+    /// OBS links in a call): shown greyed out under the channel, "<name>'s OBS
+    /// is still listening", so nobody's heard without knowing. Not a call
+    /// member: no volume, no ring, not counted. Their uids, A–Z by name, once
+    /// each however many OBS links they have there.
+    pub fn obs_listening(&self, channel_id: &str) -> Vec<&str> {
+        let in_channel = |s: &Session| s.voice.as_ref().is_some_and(|v| v.channel_id == channel_id);
+        let mut uids: Vec<&str> = self
+            .sessions
+            .values()
+            .filter(|s| s.is_obs() && in_channel(s))
+            .map(|s| s.uid.as_str())
+            .filter(|uid| !self.sessions.values().any(|s| !s.is_obs() && s.uid == *uid && in_channel(s)))
+            .collect();
+        uids.sort_by_cached_key(|uid| (self.user_name(uid).to_lowercase(), uid.to_string()));
+        uids.dedup();
+        uids
     }
 
     pub fn emojis_by_name(&self) -> HashMap<String, Emoji> {
@@ -942,5 +974,41 @@ mod voice_tests {
         assert_eq!(sids(m.voice_members("games")), ["s3"]);
         assert!(m.voice_members("quiet").is_empty());
         assert!(m.sessions["o1"].is_obs(), "still a session in the call");
+        assert!(m.obs_listening("lounge").is_empty(), "Rosa is in the call herself: her OBS link stays invisible");
+    }
+
+    /// While only someone's OBS link is in a channel, they show greyed out
+    /// there ("Rosa's OBS is still listening"); once they're back, nothing.
+    #[test]
+    fn an_obs_link_without_its_account_shows_greyed_out() {
+        let mut m = Model::new(Config::default());
+        for (id, name) in [("u1", "Rosa"), ("u2", "ben"), ("u3", "Ada")] {
+            m.users.insert(id.into(), serde_json::from_value(json!({ "id": id, "name": name, "color": "#5b6cff" })).unwrap());
+        }
+        let session = |sid: &str, uid: &str, client: &str, channel: Option<&str>| -> Session {
+            serde_json::from_value(json!({ "sid": sid, "uid": uid, "client": client, "voice": channel.map(|c| json!({ "channelId": c, "muted": true })) })).unwrap()
+        };
+        for s in [
+            session("s2", "u2", "desktop", Some("lounge")),
+            // Rosa left the call (her app is in chat): her OBS link listens on, for now.
+            session("s1", "u1", "web", None),
+            session("o1", "u1", "obs", Some("lounge")),
+            session("o1b", "u1", "obs", Some("lounge")),
+            // Ada moved to another channel; her OBS link stayed in Lounge.
+            session("s3", "u3", "desktop", Some("games")),
+            session("o3", "u3", "obs", Some("lounge")),
+        ] {
+            m.sessions.insert(s.sid.clone(), s);
+        }
+        assert_eq!(m.obs_listening("lounge"), ["u3", "u1"], "A–Z by name, once each (Rosa has two OBS links there)");
+        assert!(m.obs_listening("games").is_empty(), "Ada herself is in Games");
+        let sids = |list: Vec<&Session>| list.iter().map(|s| s.sid.clone()).collect::<Vec<_>>();
+        assert_eq!(sids(m.voice_members("lounge")), ["s2"], "not call members");
+        // Rosa comes back: her OBS link is invisible again.
+        m.sessions.get_mut("s1").unwrap().voice = Some(serde_json::from_value(json!({ "channelId": "lounge" })).unwrap());
+        assert_eq!(m.obs_listening("lounge"), ["u3"]);
+        // The server takes Ada's OBS link out 5 minutes after she left.
+        m.sessions.get_mut("o3").unwrap().voice = None;
+        assert!(m.obs_listening("lounge").is_empty());
     }
 }

@@ -19,6 +19,8 @@ interface YapSecrets {
   VAPID_PRIVATE_JWK?: string;
   /** Local tests only: hangs may start a second from now, off the half-hour grid. Never set in production. */
   TEST_HANGS?: string;
+  /** Local tests only: an OBS link keeps listening this many seconds (not 5 minutes) after its account left the call. Never set in production. */
+  TEST_OBS_GRACE?: string;
   /** Local tests only: POST /api/admin/test-pin gives an account an old 6-digit PIN. Never set in production. */
   TEST_PINS?: string;
 }

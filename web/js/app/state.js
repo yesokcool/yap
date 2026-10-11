@@ -56,6 +56,10 @@ export const state = {
   awaitingChannel: null,
   micTest: false,
   failures: 0,
+  /** This device's link is wrong or old (it connects with its device token until `ready.key` brings the new one). */
+  keyWrong: false,
+  /** The owner asked to reset the main link: show the new one when `key` comes back. */
+  resettingMain: false,
   /** Encrypted Personal space: the server's wrap, and this device's key once unlocked. */
   vault: { wrap: null, key: null, keyCt: null },
   /** Replying to: { id, uid, channelId } */

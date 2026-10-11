@@ -45,6 +45,35 @@ extension YapClient {
     public func refreshInvites() { send(.inviteList) }
     public func revokeInvite(_ id: String) { send(.inviteRevoke(id: id)) }
 
+    /// Owner only: a new main invite link. Old main links stop working for
+    /// anyone not signed in yet; everyone signed in keeps working and their
+    /// apps get the new key (`key`). The new link comes back as `newMainLink`.
+    public func resetMainLink() {
+        newMainLink = nil
+        mainResetAsked = send(.inviteResetMain)
+        if !mainResetAsked { notice = Notice(text: "Not connected right now. Try again in a moment.") }
+    }
+
+    /// A new main key from the server (`key`, or `ready.key`): it becomes
+    /// this device's link, for HTTP calls now and the socket's next connect.
+    func adoptMainKey(_ key: String) {
+        guard !key.isEmpty, var endpoint, endpoint.key != key else { return }
+        endpoint.key = key
+        self.endpoint = endpoint
+        credentials.endpoint = endpoint
+        connection?.retarget(url: endpoint.webSocketURL, protocols: endpoint.webSocketProtocols)
+    }
+
+    /// `key { key }`: the main link was reset (by me, or by the owner on
+    /// another device). Saved silently; whoever asked here sees the new link.
+    func mainKeyReset(_ key: String) {
+        adoptMainKey(key)
+        if mainResetAsked, let endpoint {
+            mainResetAsked = false
+            newMainLink = endpoint.inviteLink
+        }
+    }
+
     /// Adds a sidebar link (https only, like the server). False if the URL won't do.
     @discardableResult
     public func addLink(name: String, url: String) -> Bool {
@@ -61,6 +90,8 @@ extension YapClient {
     public var me: User? { users[uid] }
     public var myRole: Role { me?.role ?? .member }
     public var isMod: Bool { myRole.canModerate }
+    /// Only the owner resets the main link.
+    public var isOwner: Bool { myRole == .owner }
 
     public func user(_ uid: String) -> User? { users[uid] }
 
@@ -126,6 +157,18 @@ extension YapClient {
     /// Presence): the server only shows sessions in voice or on a shared view.
     public var members: [User] {
         users.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// OBS links still listening in a voice channel their account isn't in
+    /// (the server keeps one there up to 5 minutes after its account left:
+    /// PROTOCOL.md › Voice › OBS links in a call), one per account, A–Z.
+    /// Shown greyed out — "<name>'s OBS is still listening" — and never a call
+    /// member: no volume, no speaking ring, not counted. While the account
+    /// is in the channel, its OBS link shows nowhere.
+    public func obsStillListening(in channelId: String) -> [Session] {
+        let present = Set(voiceRoster(in: channelId).map(\.uid))
+        var seen = Set<String>()
+        return voiceSessions(in: channelId).filter { $0.isListener && !present.contains($0.uid) && seen.insert($0.uid).inserted }
     }
 
     /// The voice channel someone is in right now, if any (OBS listeners don't count).

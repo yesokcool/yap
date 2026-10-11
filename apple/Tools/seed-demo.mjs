@@ -3,13 +3,16 @@
 // the live server.
 //
 //   YAP_URL=http://127.0.0.1:8789 YAP_KEY=testkey YAP_ADMIN_KEY=testadmin \
-//     node apple/Tools/seed-demo.mjs [--stay <seconds>] [--voice [--screen]]
+//     node apple/Tools/seed-demo.mjs [--stay <seconds>] [--voice [--screen] [--obs]]
 //
 // Accounts (password correct-horse-582039): Sam, Cleo, Ada, Ben. With --stay, Cleo and Ada
 // stay online and Cleo keeps "typing" in general; with --voice too, Cleo,
 // Ada and Ben sit in Lounge (no audio: they never connect, for the call
 // sheet's screenshots with YAP_SCREEN=voicepanel:lounge); with --screen, Ada
-// also says she's sharing her screen (a LIVE badge; no video). Also: a picture (the app
+// also says she's sharing her screen (a LIVE badge; no video); with --obs, Ada
+// makes an OBS link, it joins Lounge while she's there, and she leaves: her
+// OBS link keeps listening (the server keeps it up to 5 minutes), so Lounge
+// shows "Ada's OBS is still listening". Also: a picture (the app
 // icon, as a "draft"), an edited message, two of Sam's invite links, and
 // encrypted notes in Sam's Personal space (passcode "purple tiger river",
 // sent from "another device", so unread), and a reply.
@@ -26,6 +29,7 @@ const PASSWORD = 'correct-horse-582039';
 const STAY = Number(process.argv[process.argv.indexOf('--stay') + 1]) || 0;
 const VOICE = process.argv.includes('--voice') && STAY > 0;
 const SCREEN = VOICE && process.argv.includes('--screen');
+const OBS = VOICE && process.argv.includes('--obs');
 const here = path.dirname(fileURLToPath(import.meta.url));
 const admin = (p, init = {}) => fetch(`${BASE}${p}`, { ...init, headers: { ...init.headers, Authorization: `Bearer ${ADMIN}` } });
 
@@ -252,10 +256,27 @@ if (VOICE) {
     console.log('Ada is sharing her screen (LIVE)');
   }
 }
+let obs = null;
+if (OBS) {
+  // Ada's OBS link joins while she's in Lounge (the server only lets it in
+  // then), then Ada leaves and it keeps listening.
+  await pause(300);
+  ada.send({ t: 'obs.create' });
+  const { token: obsToken } = await ada.next((m) => m.t === 'obs.created');
+  obs = new Client('Ada (OBS)', '#d6409f');
+  await obs.open();
+  obs.send({ t: 'hello', v: 1, client: 'obs', token: obsToken });
+  obs.ready = await obs.next((m) => m.t === 'ready');
+  obs.send({ t: 'voice.join', channelId: 'lounge', muted: true, deafened: false });
+  await obs.next((m) => m.t === 'voice' && m.sid === obs.ready.sid && m.channelId === 'lounge');
+  ada.send({ t: 'voice.leave' });
+  await pause(300);
+  console.log("Ada left Lounge; her OBS link is still listening");
+}
 if (STAY > 0) {
   console.log(`staying online for ${STAY}s (Cleo typing)`);
   const typing = setInterval(() => cleo.send({ t: 'typing', channelId: 'general' }), 3000);
-  const ping = setInterval(() => { for (const c of VOICE ? [cleo, ada, ben] : [cleo, ada]) c.ws.send('ping'); }, 15000);
+  const ping = setInterval(() => { for (const c of [...(VOICE ? [cleo, ada, ben] : [cleo, ada]), ...(obs ? [obs] : [])]) c.ws.send('ping'); }, 15000);
   cleo.send({ t: 'typing', channelId: 'general' });
   await new Promise((r) => setTimeout(r, STAY * 1000));
   clearInterval(typing);
@@ -264,4 +285,5 @@ if (STAY > 0) {
 cleo.ws.close();
 ada.ws.close();
 if (VOICE) ben.ws.close();
+obs?.ws.close();
 setTimeout(() => process.exit(0), 300);

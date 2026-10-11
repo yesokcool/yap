@@ -107,8 +107,11 @@ struct InviteView: View {
         Task {
             defer { checking = false }
             do {
+                // A device signed in to this server gets in even with an old
+                // link (its token opens the socket; `ready` brings the current
+                // key). If that doesn't work either, the socket says so (4003).
                 let result = try await ServerAPI(endpoint: endpoint).check()
-                if result.ok {
+                if result.ok || model.client.signsInWithToken(at: endpoint) {
                     model.client.useInvite(endpoint)
                     model.refreshConfig()
                 } else {

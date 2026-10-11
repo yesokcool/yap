@@ -315,6 +315,68 @@ await test('Settings › Invite: make a personal link; Places: add a link everyo
   await a.waitForSelector(`#links a.channel:has-text("Wiki ${RUN}")`, { state: 'detached', timeout: 5000 });
 });
 
+await test('Settings › Invite › Reset main link… (owner only): the warning, then the new link; signed-in devices with the old key keep working and pick it up', async () => {
+  await ensureOwner(a);
+  const openInvite = async (page) => {
+    await page.click('[data-action="open-settings"]');
+    await page.click('#settings-tabs [role=tab]:text-is("Invite")');
+  };
+  // Ben isn't the owner: no reset for him.
+  await openInvite(b);
+  assert.equal(await b.isHidden('#reset-main-btn'), true, 'only the owner resets it');
+  await b.keyboard.press('Escape');
+  await openInvite(a);
+  await a.waitForSelector('#reset-main-btn:not([hidden])');
+  await a.locator('#main-invite').screenshot({ path: path.join(OUT, 'MW1-before.png') });
+  let key;
+  try {
+    await a.click('#reset-main-btn');
+    await a.waitForSelector('#confirm-dialog[open]');
+    assert.deepEqual(await a.evaluate(() => ['confirm-title', 'confirm-text', 'confirm-ok', 'confirm-cancel'].map((id) => document.getElementById(id).textContent)), [
+      'Reset main link?',
+      "The old link stops working for anyone who hasn't joined yet. Everyone already signed in keeps working, and their apps get the new link by themselves. Personal invite links keep working.",
+      'Reset link',
+      'Cancel',
+    ]);
+    await a.locator('#confirm-dialog').screenshot({ path: path.join(OUT, 'MW1-warning.png') });
+    // Cancel changes nothing.
+    await a.click('#confirm-cancel');
+    await a.waitForTimeout(300);
+    assert.equal(await a.evaluate(() => yap.settings.key), KEY);
+    await a.click('#reset-main-btn');
+    await a.click('#confirm-dialog[open] #confirm-ok');
+    await a.waitForSelector('#main-link-made:not([hidden])', { timeout: 5000 });
+    key = new URLSearchParams(new URL(await a.inputValue('#main-link')).hash.slice(1)).get('key');
+    assert.match(key, /^[A-Za-z0-9_-]{32}$/);
+    assert.notEqual(key, KEY);
+    assert.equal(await a.evaluate(() => yap.settings.key), key, 'the owner\'s own link is the new one');
+    await a.locator('#main-invite').screenshot({ path: path.join(OUT, 'MW1-after.png') });
+    await b.waitForFunction((k) => yap.settings.key === k, key, { timeout: 5000 }); // Ben's page got it by itself
+    await a.keyboard.press('Escape');
+    // A device that's signed in but still has the old key (it was closed during the reset) gets in, and saves the new one.
+    await b.evaluate((old) => {
+      const saved = JSON.parse(localStorage.getItem('yap.settings'));
+      localStorage.setItem('yap.settings', JSON.stringify({ ...saved, key: old }));
+    }, KEY);
+    await b.reload();
+    await b.waitForFunction(() => yap.state.status === 'online', null, { timeout: 15000 });
+    assert.equal(await b.evaluate(() => yap.settings.key), key, 'ready.key is its link now');
+    assert.equal(await b.isHidden('#welcome-dialog'), true, 'never asked for a link');
+    // Someone new with the old link is told it doesn't work.
+    const ctx = await newContext({ viewport: { width: 1280, height: 800 } }, 'old link');
+    const page = await ctx.newPage();
+    await page.goto(`${BASE}/#key=${encodeURIComponent(KEY)}`);
+    await page.waitForSelector('#welcome-dialog[open] #welcome-key-field:not([hidden])', { timeout: 10000 });
+    assert.equal(await page.textContent('#welcome-error'), "That invite link didn't work. Ask for a new one.");
+    await ctx.close();
+  } finally {
+    // Back to the test server's own key for everything after this.
+    await fetch(`${BASE}/api/admin/main-key`, { method: 'DELETE', headers: { Authorization: `Bearer ${process.env.YAP_ADMIN_KEY}` } });
+  }
+  await a.waitForFunction((k) => yap.settings.key === k, KEY, { timeout: 5000 });
+  await b.waitForFunction((k) => yap.settings.key === k, KEY, { timeout: 5000 });
+});
+
 await test('Settings: Advanced starts closed, long lists show 5 then all, and it reopens on your last tab', async () => {
   // Ada lists everyone's invite links as the owner. On the shared test server (npm run test:all runs
   // the protocol test first) someone else came first, so she claims it with the admin key.
@@ -329,14 +391,16 @@ await test('Settings: Advanced starts closed, long lists show 5 then all, and it
   await b.waitForFunction((run) => (yap.state.invites ?? []).filter((x) => x.label.endsWith(run)).length >= 3, RUN, { timeout: 5000 });
   const tab = (name) => a.click(`#settings-tabs [role=tab]:text-is("${name}")`);
   await a.click('[data-action="open-settings"]');
-  // Voice: everyday groups, then Advanced (closed) with quality, music mode, RNNoise, relay-only and OBS.
+  // Voice: everyday groups (one Noise suppression switch), then Advanced (closed) with quality, music mode, relay-only and OBS.
   await tab('Voice');
   assert.deepEqual(await a.$$eval('#settings-form section:not([hidden]) .settings-group > legend', (els) => els.map((e) => e.textContent)), ['Mic & output', 'How you talk', 'Sounds']);
   assert.equal(await a.evaluate(() => document.getElementById('voice-advanced').open), false, 'Advanced starts closed');
   assert.equal(await a.isVisible('#settings-form select[name=bitrate]'), false);
   await a.click('#voice-advanced > summary');
   await a.waitForSelector('#settings-form select[name=bitrate]', { state: 'visible' });
-  for (const name of ['music', 'rnnoise', 'relayOnly']) assert.ok(await a.evaluate((n) => document.querySelector(`#settings-form [name=${n}]`).closest('#voice-advanced'), name), `${name} is under Advanced`);
+  assert.equal(await a.locator('#settings-form [name=rnnoise]').count(), 0, 'no second noise switch');
+  assert.equal(await a.evaluate(() => document.querySelector('#settings-form [name=noiseSuppression]').closest('#voice-advanced')), null, 'Noise suppression is with the everyday ones');
+  for (const name of ['music', 'relayOnly']) assert.ok(await a.evaluate((n) => document.querySelector(`#settings-form [name=${n}]`).closest('#voice-advanced'), name), `${name} is under Advanced`);
   // OK stays on screen however long the tab is (the tab scrolls inside).
   const ok = await a.locator('#settings-form .settings-actions .btn').boundingBox();
   assert.ok(ok && ok.y + ok.height <= 800, 'OK is on screen');
@@ -1286,6 +1350,35 @@ await test('Settings › Voice before any call: Copy last call report is disable
   await a.click('#settings-form .settings-actions .btn');
 });
 
+await test('Settings › Voice › Test mic: the button shows it\'s testing, the bar moves, Stop test lets the mic go; in every input mode; a blocked mic says so', async () => {
+  const width = () => a.evaluate(() => parseFloat(document.querySelector('#meter-fill').style.width) || 0);
+  await a.click('[data-action="open-settings"]');
+  await a.click('#settings-tabs [role=tab]:text-is("Voice")');
+  // Ada is on "Always on": the level and Test mic are there too (they used to be voice activity only).
+  assert.equal(await a.evaluate(() => yap.settings.mode), 'open');
+  await a.waitForSelector('#mic-test-btn:visible');
+  assert.equal(await a.isVisible('[name=vadThreshold]'), false, 'the sensitivity is for voice activity');
+  await a.click('#mic-test-btn');
+  await a.waitForSelector('#mic-test-btn[aria-pressed="true"]:text-is("Stop test")', { timeout: 3000 });
+  await a.waitForFunction(() => /^Listening/.test(document.querySelector('#mic-test-status').textContent), null, { timeout: 8000 });
+  await until(async () => (await width()) > 20, 5000, 'the bar to move');
+  await a.locator('#settings-form .mic-level').screenshot({ path: path.join(OUT, 'MW4-after.png') });
+  await a.click('#mic-test-btn');
+  await a.waitForSelector('#mic-test-btn[aria-pressed="false"]:text-is("Test mic")');
+  assert.equal(await width(), 0, 'stopped: the bar goes back');
+  assert.equal(await a.evaluate(() => yap.voice.rawStream), null, 'and the mic is let go');
+  // The browser blocks the mic: the line says so, and how to fix it.
+  await a.evaluate(() => {
+    globalThis.__gum = navigator.mediaDevices.getUserMedia;
+    navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException('Permission denied', 'NotAllowedError'));
+  });
+  await a.click('#mic-test-btn');
+  await a.waitForFunction(() => /blocked the microphone/.test(document.querySelector('#mic-test-status').textContent), null, { timeout: 5000 });
+  assert.equal(await a.getAttribute('#mic-test-btn', 'aria-pressed'), 'false');
+  await a.evaluate(() => (navigator.mediaDevices.getUserMedia = globalThis.__gum));
+  await a.click('#settings-form .settings-actions .btn');
+});
+
 await test('both join Lounge and connect peer to peer', async () => {
   await a.click('button.channel.voice:has-text("Lounge")');
   await a.waitForSelector('.vp-status.ok', { timeout: 10000 });
@@ -1483,6 +1576,44 @@ await test('the mic reopens by itself when it stops; a stalled audio graph fails
   });
   await a.waitForFunction(() => !yap.voice.stalled, null, { timeout: 5000 });
   assert.equal(await a.locator('.vp-warn:has-text("plain mic")').count(), 0);
+});
+
+await test('Test mic in a call: says the mic is already on, the bar moves, and stopping it keeps the call', async () => {
+  await a.click('[data-action="open-settings"]');
+  await a.click('#settings-tabs [role=tab]:text-is("Voice")');
+  await a.click('#mic-test-btn');
+  await a.waitForFunction(() => /you’re in a call/.test(document.querySelector('#mic-test-status').textContent), null, { timeout: 5000 });
+  await until(() => a.evaluate(() => parseFloat(document.querySelector('#meter-fill').style.width) > 20), 5000, 'the bar to move');
+  await a.click('#mic-test-btn');
+  await a.waitForSelector('#mic-test-btn[aria-pressed="false"]');
+  await a.click('#settings-form .settings-actions .btn');
+  assert.ok(await a.evaluate(() => yap.voice.rawStream && [...yap.voice.peers.values()].some((p) => p.pc.connectionState === 'connected')), 'still in the call, mic open');
+});
+
+await test('one Noise suppression switch: RNNoise in the call (not the browser\'s too); music mode turns it off; an old "stronger" setting keeps it on', async () => {
+  const mic = () => a.evaluate(() => ({ rnnoise: yap.voice.rnnoise, asked: window.__micAsked?.noiseSuppression ?? null }));
+  const reopen = (patch) => a.evaluate(async (p) => {
+    Object.assign(yap.settings, p);
+    await yap.voice.restartMic();
+  }, patch);
+  if (SYNTH) assert.deepEqual(await mic(), { rnnoise: true, asked: false }, 'RNNoise, and not the browser\'s filter as well');
+  else assert.equal((await mic()).rnnoise, true);
+  await reopen({ music: true });
+  assert.equal((await mic()).rnnoise, false, 'music mode: off');
+  if (SYNTH) assert.equal((await mic()).asked, false);
+  await reopen({ music: false, noiseSuppression: false });
+  assert.equal((await mic()).rnnoise, false, 'switched off: off');
+  await reopen({ noiseSuppression: true });
+  assert.equal((await mic()).rnnoise, true);
+  await a.waitForFunction(() => [...yap.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'));
+  // Settings from before: "Stronger noise removal" on (with the old switch off) means noise removal stays on.
+  const ctx = await newContext({ viewport: { width: 800, height: 600 } }, 'old settings');
+  await ctx.addInitScript(() => location.origin.startsWith('http') && localStorage.setItem('yap.settings', JSON.stringify({ noiseSuppression: false, rnnoise: true })));
+  const page = await ctx.newPage();
+  await page.goto(`${BASE}/`);
+  await page.waitForFunction(() => globalThis.yap?.settings);
+  assert.deepEqual(await page.evaluate(() => [yap.settings.noiseSuppression, 'rnnoise' in yap.settings]), [true, false]);
+  await ctx.close();
 });
 
 await test('a dropped connection keeps the call: same peer connection, audio keeps flowing, no chimes', async () => {
@@ -2030,22 +2161,45 @@ await test('OBS link: a listen-only page joins the call and receives audio', asy
   await obs.click('#start');
   await obs.waitForFunction(() => yapObs.state.inCall && [...yapObs.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'), null, { timeout: 15000 });
   // It listens without showing up in the channel (and without a chime).
+  const obsSid = await obs.evaluate(() => yapObs.state.sid);
   await b.waitForTimeout(500);
-  assert.equal(await b.locator('#voice-channels .voice-member.obs').count(), 0, 'the OBS link is not listed');
+  assert.equal(await b.locator(`#voice-channels [data-voice-sid="${obsSid}"], #voice-channels .obs-listening`).count(), 0, 'the OBS link is not listed');
   try {
-    // Audio packets arrive (give RTP a moment to start).
-    await obs.waitForFunction(async () => {
+    // Audio packets arrive (give RTP a moment to start). (Polled from here: waitForFunction takes
+    // an async function's promise as a truthy answer at once, so it never waited for the bytes.)
+    const received = () => obs.evaluate(async () => {
       let total = 0;
       for (const p of yapObs.voice.peers.values()) {
         const stats = await p.pc.getStats();
         stats.forEach((r) => { if (r.type === 'inbound-rtp' && r.kind === 'audio') total += r.bytesReceived; });
       }
-      return total > 1000;
-    }, null, { timeout: 10000, polling: 500 });
+      return total;
+    });
+    await until(async () => (await received()) > 1000, 10000, 'audio at the OBS page');
+    assert.ok((await received()) > 1000, 'audio bytes arrived');
     await obs.screenshot({ path: path.join(OUT, 'obs-overlay.png') });
+
+    // Ada leaves (PROTOCOL.md › Voice › OBS links in a call): her OBS link listens on for a while,
+    // and Lounge shows her greyed, "Ada's OBS is still listening" (not a call member: no menu).
+    await a.click('[data-action="leave-voice"]');
+    const row = '#voice-channels .voice-member.obs-listening';
+    await b.waitForSelector(`${row}:has-text("Ada's OBS is still listening")`, { timeout: 5000 });
+    assert.equal(await b.locator(`${row}[data-action]`).count(), 0, 'no volume menu');
+    assert.equal(await obs.evaluate(() => yapObs.state.inCall), true, 'still listening');
+    await b.locator('#voice-channels').screenshot({ path: path.join(OUT, 'MW2-after.png') });
+    // Then (the test server's TEST_OBS_GRACE, not 5 minutes) the server takes it out: Paused, and the row goes.
+    await obs.waitForFunction(() => !yapObs.state.inCall && document.querySelector('#note').textContent === 'Paused: waiting for Ada to join Lounge.', null, { timeout: 20000 });
+    await obs.screenshot({ path: path.join(OUT, 'MW2-obs-paused.png') });
+    await b.waitForSelector(row, { state: 'detached', timeout: 5000 });
+    // Ada comes back: the OBS page joins again by itself.
+    await a.click('button.channel.voice:has-text("Lounge")');
+    await obs.waitForFunction(() => yapObs.state.inCall && [...yapObs.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'), null, { timeout: 15000 });
+    assert.equal(await obs.isHidden('#note'), true, 'not paused any more');
   } finally {
     await obs.close();
   }
+  // Ada is back in the call with Ben for the tests after this one.
+  await a.waitForFunction(() => yap.state.voiceChannel === 'lounge' && [...yap.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'), null, { timeout: 15000 });
 });
 
 await test('board opens inside Yap during a call; cursors show for others', async () => {
@@ -2116,10 +2270,10 @@ await test('draw together: strokes show up live for the other person', async () 
     return [img.naturalWidth, img.naturalHeight];
   }, gif.toString('base64'));
   assert.deepEqual(decoded, [640, 400], 'Chromium decodes it');
-  await b.waitForFunction(async () => {
+  await until(() => b.evaluate(async () => {
     const first = document.querySelector('.gallery-item');
-    return first && (await fetch(first.href)).headers.get('content-type') === 'image/gif';
-  }, null, { timeout: 8000, polling: 500 });
+    return Boolean(first) && (await fetch(first.href)).headers.get('content-type') === 'image/gif';
+  }), 8000, 'the GIF in the gallery');
   // Share puts the drawing in the chat.
   await a.click('[data-tool="share"]');
   await b.waitForFunction(() => [...yap.state.history.get('general')?.messages ?? []].some((m) => m.image?.width === 640), null, { timeout: 8000 });

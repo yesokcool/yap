@@ -6,7 +6,11 @@
  *        [&only=<name>]   play just one person (one source per person)
  *        [&overlay=0]     audio only, nothing drawn
  * The token can only listen (the server enforces it); the apps leave it out
- * of the channel list and its chimes (2026-10-11).
+ * of the channel list and its chimes (2026-10-11). It listens only while its
+ * account is in the channel, or for 5 minutes after it left (the server
+ * enforces that too: PROTOCOL.md › Voice › OBS links in a call): otherwise
+ * it says "Paused: waiting for <name> to join <channel>." and joins again by
+ * itself as soon as its account is back.
  */
 import { Connection } from './conn.js';
 import { Voice } from './voice.js';
@@ -21,7 +25,7 @@ const only = (params.get('only') ?? '').toLowerCase();
 const overlay = params.get('overlay') !== '0';
 const $ = (id) => document.getElementById(id);
 
-const state = { sid: null, users: new Map(), sessions: new Map(), inCall: false, speaking: new Set() };
+const state = { sid: null, uid: null, users: new Map(), sessions: new Map(), channels: new Map(), inCall: false, joining: false, paused: false, speaking: new Set() };
 const voice = new Voice({
   signal: (to, data) => conn.send({ t: 'signal', to, data }),
   uidOf: (sid) => state.sessions.get(sid)?.uid,
@@ -44,10 +48,24 @@ function applyOnly() {
   }
 }
 
+/** Not listening: its account isn't in the channel (and wasn't for the last 5 minutes). */
+function pause() {
+  state.paused = true;
+  const name = state.users.get(state.uid)?.name ?? 'your account';
+  note(`Paused: waiting for ${name} to join ${state.channels.get(channelId)?.name ?? 'the voice channel'}.`);
+}
+
+/** Its account is in the channel (not just another OBS link of theirs). */
+const accountIn = () => [...state.sessions.values()].some((s) => s.uid === state.uid && s.client !== 'obs' && s.voice?.channelId === channelId);
+
 function render() {
   const stage = $('stage');
   stage.classList.toggle('hidden', !overlay);
   if (!overlay) return;
+  if (!state.inCall) {
+    stage.innerHTML = ''; // paused: nobody is being heard
+    return;
+  }
   const people = [...state.sessions.values()].filter((s) => s.voice?.channelId === channelId && s.client !== 'obs');
   const shown = only ? people.filter((s) => state.users.get(s.uid)?.name?.toLowerCase() === only) : people;
   stage.innerHTML = shown.map((s) => {
@@ -57,20 +75,34 @@ function render() {
   }).join('');
 }
 
+/** STUN only, for when /api/ice says no: an OBS link made before the owner reset the main link still has the old key (worker/ice.ts has the same two). */
+const FALLBACK_ICE = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }];
+
 async function join() {
-  const ice = await fetch('/api/ice', { headers: { 'X-Yap-Key': key } }).then((r) => r.json()).then((j) => j.iceServers).catch(() => undefined);
-  await voice.prepare(ice, { listenOnly: true });
-  conn.send({ t: 'voice.join', channelId, muted: true, deafened: false });
+  if (state.joining || state.inCall) return;
+  state.joining = true;
+  try {
+    const ice = await fetch('/api/ice', { headers: { 'X-Yap-Key': key } })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((j) => j.iceServers, () => FALLBACK_ICE);
+    await voice.prepare(ice, { listenOnly: true });
+    conn.send({ t: 'voice.join', channelId, muted: true, deafened: false });
+  } finally {
+    state.joining = false;
+  }
 }
 
 function handle(msg) {
   switch (msg.t) {
     case 'ready':
       state.sid = msg.sid;
+      state.uid = msg.uid;
       voice.mySid = msg.sid;
       state.users = new Map(msg.users.map((u) => [u.id, u]));
       state.sessions = new Map(msg.sessions.map((s) => [s.sid, s]));
-      note(state.sessions.size ? '' : '');
+      state.channels = new Map(msg.channels.map((c) => [c.id, c]));
+      note('');
+      // (Even when its account isn't there: it may have left a moment ago, and the server says.)
       join().catch((err) => note(`Couldn't join voice: ${err.message}`));
       return render();
     case 'user':
@@ -90,12 +122,20 @@ function handle(msg) {
       if (msg.sid === state.sid) {
         if (msg.channelId === channelId && !state.inCall) {
           state.inCall = true;
+          state.paused = false;
           voice.enter([...state.sessions.values()].filter((x) => x.sid !== state.sid && x.voice?.channelId === channelId).map((x) => x.sid));
           note('');
+        } else if (!msg.channelId && state.inCall) {
+          // Its account didn't come back in time: the server took it out.
+          state.inCall = false;
+          voice.hangupAll();
+          pause();
         }
       } else if (prev === channelId && msg.channelId !== channelId) {
         voice.drop(msg.sid);
       }
+      // Its account is back: listen again, at once.
+      if (!state.inCall && state.paused && msg.channelId === channelId && accountIn()) join().catch((err) => note(`Couldn't join voice: ${err.message}`));
       return render();
     }
     case 'signal': {
@@ -106,6 +146,7 @@ function handle(msg) {
     case 'error':
       if (msg.code === 'bad_token') note('This OBS link was turned off. Make a new one in Yap › Settings › Voice › Advanced › Stream to OBS.');
       else if (msg.code === 'no_channel') note('That voice channel is gone. Make a new OBS link in Yap.');
+      else if (msg.code === 'not_in_voice') pause(); // (the server sends this before its account's join, which rejoins: below)
       return;
   }
 }
@@ -120,6 +161,7 @@ setInterval(applyOnly, 1000);
 
 conn.addEventListener('open', () => {
   state.inCall = false;
+  state.paused = false;
   voice.hangupAll();
   conn.send({ t: 'hello', v: 1, client: 'obs', token });
 });

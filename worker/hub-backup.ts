@@ -3,7 +3,6 @@
 import { toMessage, type MessageRow } from './rows';
 import { MIGRATIONS, eraseDeletedPosts } from './schema';
 import type { HubHost } from './hub-host';
-import { armHangs } from './hub-extras';
 
 /**
  * Everything, including archived channels, deleted messages and deleted
@@ -37,7 +36,8 @@ export async function exportPage(hub: HubHost, afterTs: number, limit: number) {
     links: all('SELECT * FROM links ORDER BY position'),
     modLog: all('SELECT * FROM mod_log ORDER BY id'),
     devices: all('SELECT * FROM devices ORDER BY created_at'),
-    meta: all("SELECT * FROM meta WHERE key IN ('canvas')"),
+    // Draw's page number, and the main invite key if the owner reset it (a restore keeps the link people have now).
+    meta: all("SELECT * FROM meta WHERE key IN ('canvas', 'main_key')"),
     messages,
     next: messages.length === limit ? messages[messages.length - 1].ts : null,
   };
@@ -90,7 +90,7 @@ export async function importBackup(hub: HubHost, part: { phase: string; data?: R
     hub.sql.exec("DELETE FROM meta WHERE key = 'importing'");
     hub.lastTs = 0;
     hub.aliases = null;
-    await armHangs(hub);
+    await hub.armAlarm();
     hub.ctx.waitUntil(hub.emptyTrash());
     hub.reconnectEveryone();
     return { ok: true };

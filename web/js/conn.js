@@ -1,6 +1,8 @@
 /**
  * The one WebSocket to the server, with heartbeat and automatic reconnect.
- * Events: 'open', 'message' (detail = parsed frame), 'close'.
+ * Events: 'open', 'message' (detail = parsed frame), 'close' (detail =
+ * { code, reason } when the server closed it). `url` and `protocols` can
+ * change between connections (a new invite key).
  */
 export class Connection extends EventTarget {
   #ws = null;
@@ -47,7 +49,7 @@ export class Connection extends EventTarget {
       }
       this.#emit('message', msg);
     };
-    ws.onclose = () => this.#lost(ws);
+    ws.onclose = (e) => this.#lost(ws, e);
     ws.onerror = () => {}; // a close event always follows
   }
 
@@ -59,6 +61,19 @@ export class Connection extends EventTarget {
     try {
       this.#ws?.close();
     } catch {}
+  }
+
+  get stopped() {
+    return this.#stopped;
+  }
+
+  /** Start again after stop() (a new invite link was pasted). */
+  restart() {
+    this.#stopped = false;
+    if (!this.#ws) {
+      this.#retry = 0;
+      this.connect();
+    }
   }
 
   /** Tests: lose the connection as if the network dropped it (then reconnect as usual). */
@@ -80,7 +95,7 @@ export class Connection extends EventTarget {
     return true;
   }
 
-  #lost(ws) {
+  #lost(ws, event) {
     if (this.#ws !== ws) return;
     ws.onopen = ws.onmessage = ws.onclose = null;
     try {
@@ -88,7 +103,7 @@ export class Connection extends EventTarget {
     } catch {}
     this.#ws = null;
     clearInterval(this.#pingTimer);
-    this.#emit('close');
+    this.#emit('close', { code: event?.code ?? 0, reason: event?.reason ?? '' });
     if (this.#stopped) return;
     const delay = Math.min(10_000, 500 * 2 ** this.#retry++) * (0.75 + Math.random() * 0.5);
     this.#retryTimer = setTimeout(() => this.connect(), delay);

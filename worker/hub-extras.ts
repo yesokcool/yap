@@ -98,7 +98,7 @@ export function onHangSet(hub: HubHost, me: Attachment, msg: Extract<ClientMessa
   const hang: Hang = { id: crypto.randomUUID(), at, title, channelId, uid: me.uid, createdAt: now };
   hub.sql.exec('INSERT INTO hangs (id, at, title, channel_id, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?)', hang.id, at, title, channelId, me.uid, now);
   hub.broadcast({ t: 'hang', hang });
-  hub.ctx.waitUntil(armHangs(hub));
+  hub.ctx.waitUntil(hub.armAlarm());
 }
 
 export function onHangCancel(hub: HubHost, me: Attachment, msg: Extract<ClientMessage, { t: 'hang.cancel' }>) {
@@ -107,17 +107,15 @@ export function onHangCancel(hub: HubHost, me: Attachment, msg: Extract<ClientMe
   if (hub.canonical(row.user_id) !== me.uid && !hub.isMod(me.uid)) throw new ClientError('forbidden', 'Only whoever planned it (or a mod) can cancel it.');
   hub.sql.exec('UPDATE hangs SET cancelled_at = ? WHERE id = ?', Date.now(), String(msg.id));
   hub.broadcast({ t: 'hang.cancelled', id: String(msg.id) });
-  hub.ctx.waitUntil(armHangs(hub));
+  hub.ctx.waitUntil(hub.armAlarm());
 }
 
-/** Wake up when the next hang starts (one Durable Object alarm). */
-export async function armHangs(hub: HubHost) {
-  const next = hub.sql.exec<{ at: number | null }>('SELECT MIN(at) AS at FROM hangs WHERE cancelled_at IS NULL AND notified_at IS NULL').one().at;
-  if (next === null) await hub.ctx.storage.deleteAlarm();
-  else await hub.ctx.storage.setAlarm(Math.max(next, Date.now() + 1000));
+/** When the next hang starts, if one is planned (the Hub's one alarm wakes up then: Hub.armAlarm). */
+export function nextHangAt(hub: HubHost): number | null {
+  return hub.sql.exec<{ at: number | null }>('SELECT MIN(at) AS at FROM hangs WHERE cancelled_at IS NULL AND notified_at IS NULL').one().at;
 }
 
-/** Hangs starting now: tell everyone connected, and push once to whoever said they're free. */
+/** Hangs starting now: tell everyone connected, and push once to whoever said they're free. (The alarm is armed again after.) */
 export async function startDueHangs(hub: HubHost) {
   const now = Date.now();
   const due = hub.sql
@@ -142,7 +140,6 @@ export async function startDueHangs(hub: HubHost) {
       deliver(hub, t, { title: `🗓 ${h.title} is starting${where ? ` · ${where}` : ''}`, message: 'Hop on Yap!', tags: ['calendar'], priority: 4, tag: `hang-${h.id}` });
     }
   }
-  await armHangs(hub);
 }
 
 // ── When's good (a weekly when2meet) ───────────────────────────────────

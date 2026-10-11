@@ -28,6 +28,8 @@ pub struct SettingsState {
     confirm_others: bool,
     /// Invite › "Turn off" is asking about this link.
     confirm_revoke: Option<String>,
+    /// Invite › Reset main link (owner): the warning, then the new link.
+    reset_main: Option<ResetMain>,
     /// Voice: asked the server whether it has a relay.
     asked_relay: bool,
     /// Screenshot aid: YAP_DEBUG_HEAR started Hear yourself once.
@@ -36,6 +38,31 @@ pub struct SettingsState {
     advanced: bool,
     /// Long lists showing everything ("Show all N"), until Settings opens again.
     show_all: HashSet<&'static str>,
+}
+
+/// Settings › Invite › Reset main link, a popup over Settings (owner only;
+/// PROTOCOL.md › HTTP › Resetting the main link).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResetMain {
+    /// "Reset main link?" with the warning, [Reset link] [Cancel]. Screenshot
+    /// aid: `press` presses Reset link once the server is there.
+    Asking { press: bool },
+    /// Sent; waiting for `main_key_seq` to move past this.
+    Waiting(u64),
+    /// The new link, with Copy.
+    Done,
+}
+
+impl ResetMain {
+    /// The server answered: the new key (Done), or its words (asking again, `main_reset_error` shows).
+    fn poll(self, m: &Model) -> Self {
+        match self {
+            ResetMain::Waiting(sent) if m.main_key_seq != sent => {
+                if m.main_reset_error.is_some() { ResetMain::Asking { press: false } } else { ResetMain::Done }
+            }
+            other => other,
+        }
+    }
 }
 
 impl SettingsState {
@@ -62,6 +89,12 @@ impl SettingsState {
             confirm_signout: false,
             confirm_others: false,
             confirm_revoke: None,
+            // Screenshot aid (debug builds): YAP_DEBUG_RESET_MAIN=ask opens the warning; `press` resets (a test server only!).
+            reset_main: match std::env::var("YAP_DEBUG_RESET_MAIN").ok().filter(|_| cfg!(debug_assertions)).as_deref() {
+                Some("ask") => Some(ResetMain::Asking { press: false }),
+                Some("press") => Some(ResetMain::Asking { press: true }),
+                _ => None,
+            },
             asked_relay: false,
             hear_asked: false,
             advanced,
@@ -517,10 +550,83 @@ pub(super) fn invite_tab(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<A
     theme::group(ui, "Main link", p, |ui| {
         // The web's caution, before the button.
         note(ui, "The main link never expires and doesn't say who invited whom. Only share it if you mean to.", p);
-        if theme::button(ui, "Copy main invite link", Btn::Normal, true, p).clicked() {
-            acts.push(Act::Copy(crate::config::invite_link(&m.config), "Invite link copied."));
-        }
+        ui.horizontal_wrapped(|ui| {
+            if theme::button(ui, "Copy main invite link", Btn::Normal, true, p).clicked() {
+                acts.push(Act::Copy(crate::config::invite_link(&m.config), "Invite link copied."));
+            }
+            // The owner can make a new one (the old one stops letting new people in).
+            if m.am_owner() && theme::button_sized(ui, "Reset main link…", Btn::Normal, m.status == Status::Online, vec2(120.0, 23.0), p).clicked() {
+                st.reset_main = Some(ResetMain::Asking { press: false });
+            }
+        });
     });
+    reset_main_popup(ui, m, p, acts, st);
+}
+
+/// Reset main link? — a popup over Settings, in the spec's words: the
+/// warning with [Reset link] [Cancel] (Windows' order, like every dialog
+/// here); then the new link with Copy.
+fn reset_main_popup(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>, st: &mut SettingsState) {
+    let Some(state) = st.reset_main.map(|r| r.poll(m)) else { return };
+    // Only the owner, while connected (a screenshot aid could open it for anyone).
+    let state = match state {
+        ResetMain::Asking { press: true } if m.status == Status::Online && m.am_owner() => {
+            acts.push(Act::Cmd(Cmd::ResetMainLink));
+            ResetMain::Waiting(m.main_key_seq)
+        }
+        other => other,
+    };
+    let (mut keep, mut close_box) = (true, true);
+    let mut next = state;
+    let resp = egui::Modal::new(egui::Id::new("reset-main")).frame(dialog_frame(p)).backdrop_color(Color32::TRANSPARENT).show(ui.ctx(), |ui| {
+        let title = if state == ResetMain::Done { "New main link" } else { "Reset main link" };
+        window(ui, p, title, Some("link"), 360.0, Some(&mut close_box), |ui| match state {
+            ResetMain::Asking { .. } | ResetMain::Waiting(_) => {
+                let waiting = matches!(state, ResetMain::Waiting(_));
+                ui.label(egui::RichText::new("Reset main link?").font(theme::bold_font(theme::ui())).color(p.text));
+                ui.label(theme::text(
+                    "The old link stops working for anyone who hasn't joined yet. Everyone already signed in keeps working, and their apps get the new link by themselves. Personal invite links keep working.",
+                    p.text,
+                ));
+                if let Some(e) = m.main_reset_error.as_ref().filter(|_| !waiting) {
+                    ui.label(theme::text(e, p.danger));
+                }
+                actions(ui, |ui| {
+                    if theme::button(ui, "Cancel", Btn::Normal, true, p).clicked() {
+                        keep = false;
+                    }
+                    let ok = !waiting && m.status == Status::Online;
+                    if theme::button_sized(ui, if waiting { "Resetting…" } else { "Reset link" }, Btn::Danger, ok, vec2(90.0, 23.0), p).clicked() && ok {
+                        acts.push(Act::Cmd(Cmd::ResetMainLink));
+                        next = ResetMain::Waiting(m.main_key_seq);
+                    }
+                });
+            }
+            ResetMain::Done => {
+                // The web's words.
+                let link = crate::config::invite_link(&m.config);
+                ui.label(theme::text("The new main link:", p.text));
+                ui.horizontal(|ui| {
+                    let mut shown = link.clone();
+                    let w = ui.available_width() - 82.0;
+                    theme::field(ui, egui::TextEdit::singleline(&mut shown).desired_width(w).font(theme::mono(12.0)), p);
+                    if theme::button(ui, "Copy", Btn::Normal, true, p).clicked() {
+                        acts.push(Act::Copy(link.clone(), "New main link copied."));
+                    }
+                });
+                note(ui, "The old one stopped working for anyone who hasn't joined yet.", p);
+                actions(ui, |ui| {
+                    if primary_button(ui, "OK", p, true).clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        keep = false;
+                    }
+                });
+            }
+        });
+    });
+    if resp.should_close() || !close_box {
+        keep = false;
+    }
+    st.reset_main = keep.then_some(next);
 }
 
 /// Who did something, at the start of an Activity line: "The owner (admin
@@ -575,6 +681,10 @@ pub(super) fn log_words(m: &Model, e: &crate::protocol::ModLogEntry) -> String {
         "emoji.delete" => format!("deleted the emoji {d}").trim().to_string(),
         "invite.create" => with_detail("made an invite link"),
         "invite.revoke" => with_detail("turned off an invite link"),
+        // The owner made a new main link (PROTOCOL.md › HTTP › Resetting the main
+        // link); the admin API can also put the server's own YAP_KEY back.
+        "invite.resetMain" if d == "YAP_KEY" => "set the main link back to the server’s first one".into(),
+        "invite.resetMain" => "reset the main link".into(),
         "link.add" => match d.split_once(" → ") {
             Some((name, host)) => format!("added {name} ({host}) to Places"),
             None => format!("added {} to Places", detail.as_deref().unwrap_or("a link")),
@@ -904,10 +1014,33 @@ mod tests {
         assert_eq!(log_words(&m, &e("channel.bitrate", None, Some("\"Lounge\" → personal settings"))), "let everyone in \"Lounge\" pick their own voice quality again");
         assert_eq!(log_words(&m, &e("link.add", None, Some("Wiki → example.com"))), "added Wiki (example.com) to Places");
         assert_eq!(log_words(&m, &e("obs.revoke", None, Some("3"))), "turned off their 3 OBS links");
+        assert_eq!(log_words(&m, &e("invite.resetMain", None, None)), "reset the main link");
+        assert_eq!(log_words(&m, &e("invite.resetMain", None, Some("YAP_KEY"))), "set the main link back to the server’s first one");
         assert_eq!(log_words(&m, &e("member.kick", Some("ada"), Some("x"))), "did “member kick” (x)");
         assert_eq!(actor_name(&m, Some("admin")), "The owner (admin key)");
         let mut admin = e("member.role", Some("ada"), Some("member"));
         admin.actor = Some("admin".into());
         assert_eq!(log_words(&m, &admin), "made Ada a member");
+    }
+}
+
+#[cfg(test)]
+mod reset_main_tests {
+    use super::*;
+
+    /// The popup waits for the server: the new key (Done, then the link with
+    /// Copy) or its refusal (back to the warning, with the server's words).
+    #[test]
+    fn the_popup_follows_the_server() {
+        let mut m = Model::new(Config::default());
+        let sent = ResetMain::Waiting(m.main_key_seq);
+        assert_eq!(sent.poll(&m), sent, "nothing yet");
+        m.main_key_seq += 1;
+        assert_eq!(sent.poll(&m), ResetMain::Done, "the new main key came");
+        m.main_reset_error = Some("Only the owner can do that.".into());
+        m.main_key_seq += 1;
+        let again = ResetMain::Waiting(m.main_key_seq - 1);
+        assert_eq!(again.poll(&m), ResetMain::Asking { press: false }, "turned away: the warning again, with the words");
+        assert_eq!(ResetMain::Done.poll(&m), ResetMain::Done);
     }
 }

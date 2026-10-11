@@ -29,7 +29,7 @@ import { askUnlock, bindVaultDialog, showVaultDialog, syncVault } from './app/pe
 import { bindSearch, onSearchResults, openSearch, openSwitcher, renderResultList, runSearch } from './app/search.js';
 import { doodlePad, markAllRead, onUnreadCounts, openCatchup, openDoodle, openPicture, openShelf, openSoundboard, renderHangs, renderShelf, requestUnreadCounts, sendQuiet, setAway, soundboard, viewDoodle } from './app/extras.js';
 import { bindCallReport, callNote, callSettingsChanged, copyCallReport } from './app/call-report-ui.js';
-import { bindPttKey, bindSettings, bindingPtt, copyInvite, hearYourself, openSettings, renderAvatarSettings, renderAwaySettings, renderChimeSettings, renderInvites, renderModLog, renderNotifySettings, renderObsLink, renderStorage, showingAll, startMicTest } from './app/settings-ui.js';
+import { bindPttKey, bindSettings, bindingPtt, copyInvite, copyMainLink, hearYourself, onMainKey, openSettings, renderAvatarSettings, renderAwaySettings, renderChimeSettings, renderInvites, renderModLog, renderNotifySettings, renderObsLink, renderStorage, showingAll, startMicTest } from './app/settings-ui.js';
 
 // Console/debug handle (also used by test/e2e.test.mjs and the voice interop tests).
 globalThis.yap = {
@@ -63,9 +63,13 @@ async function boot() {
   bindUi();
   renderAll();
   const check = await checkKey(settings.key);
-  if (check && !check.ok) {
+  // A wrong (or old: the owner reset the main link) key doesn't stop a device
+  // that's signed in: the server lets its token in and hands it the new link
+  // (PROTOCOL.md › Resetting the main link). Anyone else needs a working link.
+  if (check && !check.ok && !settings.token) {
     return showWelcome({ needKey: true, error: settings.key ? "That invite link didn't work. Ask for a new one." : '' });
   }
+  state.keyWrong = Boolean(check && !check.ok); // (the API waits for the right one: ready.key)
   // Signed in on this device (a token): connect. Otherwise sign up or in first.
   if (!settings.token) return showWelcome({ needKey: false });
   start();
@@ -85,7 +89,7 @@ function ensureConfig() {
 
 export function start() {
   if (conn) return;
-  ensureConfig();
+  if (!state.keyWrong) ensureConfig(); // (else once `ready` has handed us the link)
   // The key rides in the WebSocket subprotocol (not the URL), unless it has odd characters.
   setConn(new Connection(socketUrl(), keyProtocols()));
   conn.addEventListener('open', sendHello);
@@ -97,6 +101,18 @@ export function start() {
   addEventListener('pagehide', () => {
     if (state.voiceChannel) conn?.send({ t: 'voice.leave' });
   });
+}
+
+/**
+ * This server's main invite key, from `ready.key` or `key` (the owner reset
+ * the link): it's this device's link from now on, for the API and the next
+ * connection.
+ */
+export function useKey(key) {
+  state.keyWrong = false;
+  if (!key || key === settings.key) return;
+  save({ key });
+  if (conn) Object.assign(conn, { url: socketUrl(), protocols: keyProtocols() });
 }
 
 /** Sign up / sign in (from the welcome form), else this device's token. */
@@ -178,6 +194,9 @@ function handle(msg) {
     case 'links':
       state.links = msg.links;
       return renderLinks();
+    case 'key':
+      useKey(msg.key);
+      return onMainKey(msg.key);
     case 'invite.created': {
       $('invite-made').hidden = false;
       $('invite-link').value = `${location.origin}/#key=${encodeURIComponent(msg.key)}`;
@@ -462,6 +481,7 @@ function handle(msg) {
       if (msg.code === 'pending') return;
       if (msg.re === 'hello') return onHelloError(msg);
       if (msg.re === 'send') return onSendError(msg);
+      if (msg.re === 'invite.resetMain') state.resettingMain = false;
       if (msg.re === 'account.pin') {
         $('pin-error').textContent = msg.message;
         $('pin-error').hidden = false;
@@ -487,8 +507,9 @@ function onReady(msg) {
   state.hangs = new Map((msg.hangs ?? []).map((h) => [h.id, h]));
   soundboard?.render();
   state.waiting = new Map((msg.pending ?? []).map((u) => [u.id, u]));
-  // Members get the main key, so a personal invite being revoked later can't lock this device out.
-  if (msg.key && msg.key !== settings.key) save({ key: msg.key });
+  // Members get the main key, so a personal invite being revoked later can't lock this device
+  // out, and a device that connected with an old one (the main link was reset) gets the new one.
+  useKey(msg.key);
   if (msg.links) state.links = msg.links;
   state.uploadToken = msg.uploadToken ?? null;
   syncVault(msg.vault ?? null);
@@ -531,7 +552,7 @@ function onReady(msg) {
     // dropped), nor for anyone already back with a plain join.
     for (const sid of [...state.ghosts.keys()]) {
       const ghost = state.sessions.get(sid);
-      const back = [...state.sessions.values()].some((s) => s.uid === ghost?.uid && !state.ghosts.has(s.sid) && s.voice?.channelId === ghost?.voice?.channelId);
+      const back = [...state.sessions.values()].some((s) => s.uid === ghost?.uid && s.client !== 'obs' && !state.ghosts.has(s.sid) && s.voice?.channelId === ghost?.voice?.channelId);
       if (!ghost?.voice?.resume || back) {
         dropGhost(sid, { quiet: true });
         if (!back && ghost?.client !== 'obs') deferLeaveChime(ghost?.uid); // lost, not left: no chimes if they're back within 5 s (none for an OBS link)
@@ -591,7 +612,14 @@ const RESUME_MS = 20_000;
 
 let resumeTimer = null;
 
-function onDisconnect() {
+function onDisconnect({ detail } = {}) {
+  // A wrong key with a token the server doesn't know (signed out meanwhile): nothing gets in
+  // until there's a working link. (A ban says so first and stops the connection itself.)
+  if (detail?.code === 4003 && detail.reason === 'wrong invite key' && !conn.stopped) {
+    conn.stop();
+    save({ token: '' });
+    showWelcome({ needKey: true, mode: 'login', error: 'This invite link stopped working. Paste the new one, then sign in.' });
+  }
   // In a call? Keep it: audio is peer to peer and doesn't need the socket.
   // (Servers that predate this send no resumeKey: hang up as before.)
   if (state.voiceChannel && state.resumeKey && !state.resume) {
@@ -619,8 +647,9 @@ function onDisconnect() {
   state.resumeKey = null;
   state.speaking.clear();
   renderAll();
-  // Repeated failures without ever getting in: maybe the key was changed.
-  if (++state.failures === 3) {
+  // Repeated failures without ever getting in: maybe the key was changed. (Signed in here:
+  // the server still lets this device in with its token and sends the new link.)
+  if (++state.failures === 3 && !settings.token) {
     checkKey(settings.key).then((check) => {
       if (check && !check.ok) showWelcome({ needKey: true, error: 'This invite link stopped working. Paste the new one.' });
     });
@@ -890,6 +919,18 @@ function onClick(e) {
     case 'revoke-obs':
       return confirmSheet({ title: 'Turn off your OBS links?', text: 'Every OBS link you made stops working, and anything using them stops playing.', ok: 'Turn off', danger: true })
         .then((yes) => yes && conn?.send({ t: 'obs.revoke' }));
+    case 'reset-main':
+      return confirmSheet({
+        title: 'Reset main link?',
+        text: "The old link stops working for anyone who hasn't joined yet. Everyone already signed in keeps working, and their apps get the new link by themselves. Personal invite links keep working.",
+        ok: 'Reset link',
+        danger: true,
+      }).then((yes) => {
+        if (!yes) return;
+        state.resettingMain = true; // show the new link when it comes back (`key`)
+        conn?.send({ t: 'invite.resetMain' });
+      });
+    case 'copy-main-link': return copyMainLink();
     case 'create-invite':
       return conn?.send({ t: 'invite.create', label: $('invite-label').value.trim() });
     case 'copy-made-invite':

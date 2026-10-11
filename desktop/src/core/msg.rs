@@ -27,6 +27,7 @@ fn msg_group(msg: &ServerMsg) -> Part {
         | ServerMsg::Error { .. }
         | ServerMsg::InviteCreated { .. }
         | ServerMsg::Invites { .. }
+        | ServerMsg::Key { .. }
         | ServerMsg::Links { .. }
         | ServerMsg::Vault { .. }
         | ServerMsg::PersonalPlain { .. }
@@ -115,15 +116,15 @@ impl Core {
                     m.secret_kind = secret_kind.unwrap_or_else(|| "pin".into());
                     m.join_requests = pending.clone();
                     m.needs_pin = needs_pin;
-                    // Keep the main key: a personal invite we came in with may be revoked later.
-                    if let Some(k) = key.filter(|k| !k.is_empty() && *k != m.config.key) {
-                        log::info!("keeping the server's main invite key");
-                        m.config.key = k;
-                        m.config_dirty = true;
-                    }
                     if links.is_some() {
                         m.links = links;
                     }
+                }
+                // Keep the main key: a personal invite we came in with may be revoked
+                // later, and the owner may have reset the main link while we were away
+                // (our device token got us in with the old one).
+                if let Some(k) = key {
+                    self.save_main_key(k);
                 }
                 for u in &pending {
                     self.emit(CoreEvent::JoinRequest { uid: u.id.clone(), name: u.name.clone(), invited_by: u.invited_by.clone(), used_by: u.invite.as_ref().map(|i| i.used_by.clone()).unwrap_or_default() });
@@ -288,6 +289,18 @@ impl Core {
                     self.repaint();
                     return;
                 }
+                // Resetting the main link was turned away (not the owner, too often…):
+                // the dialog that asked shows the server's words.
+                if re.as_deref() == Some("invite.resetMain") {
+                    {
+                        let mut m = self.shared.model.lock();
+                        m.main_reset_error = Some(message.clone());
+                        m.main_key_seq += 1;
+                    }
+                    self.emit(CoreEvent::Error { code, message });
+                    self.repaint();
+                    return;
+                }
                 if re.as_deref() == Some("device.handoff") {
                     // No pass right now (too many at once): open the web anyway; it asks to sign in.
                     if let Some((place, _)) = self.handoff.take() {
@@ -324,6 +337,10 @@ impl Core {
             ServerMsg::Invites { invites } => {
                 self.shared.model.lock().invites = invites;
                 self.repaint();
+            }
+            ServerMsg::Key { key } => {
+                // The owner reset the main link (maybe us): everyone connected keeps working, with this as their link.
+                self.save_main_key(key);
             }
             ServerMsg::Links { links } => {
                 let names = links.iter().map(|l| l.name.clone()).collect();

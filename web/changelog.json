@@ -1,6 +1,17 @@
 {
-  "current": "0.43.0",
+  "current": "0.44.0",
   "releases": [
+    {
+      "version": "0.44.0",
+      "date": "2026-10-11",
+      "title": "Reset the main link",
+      "items": [
+        "The owner can reset the main invite link (Settings › Invite, behind a warning), in every app. Everyone already signed in keeps working and gets the new link by itself; only people who haven't joined yet need the new one.",
+        "An OBS link only listens while you're in the call, or for 5 minutes after you leave. Meanwhile you show greyed out in the channel (\"…'s OBS is still listening\") so people know.",
+        "One Noise suppression switch, using the stronger filter (RNNoise) everywhere it can run.",
+        "Test mic in Settings › Voice now shows it's listening (the bar moves and the button says Stop test), works during a call, and says what's wrong when the mic can't be heard."
+      ]
+    },
     {
       "version": "0.43.0",
       "date": "2026-10-11",

@@ -353,6 +353,7 @@ final class AppModel {
     @ObservationIgnored private var autojoined = false
     @ObservationIgnored private var demoInvited = false
     @ObservationIgnored private var demoReset = false
+    @ObservationIgnored private var demoResetMain = false
     @ObservationIgnored private var demoWatched = false
     @ObservationIgnored private var demoCallEnded = false
     @ObservationIgnored private var demoShared = false
@@ -371,6 +372,13 @@ final class AppModel {
             if let label = DebugLaunch.current.demoInvite, !demoInvited {
                 demoInvited = true
                 client.createInvite(label: label)
+            }
+            if DebugLaunch.current.demoResetMain, !demoResetMain {
+                demoResetMain = true
+                Task {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    client.resetMainLink()
+                }
             }
             if let name = DebugLaunch.current.demoReset, !demoReset {
                 demoReset = true

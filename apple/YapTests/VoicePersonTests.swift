@@ -17,6 +17,14 @@ struct VoicePersonTests {
         #expect(!VoicePersonMenu.offered(obs, mySid: "s0", myUid: "me"), "an OBS listener has no voice to turn up")
     }
 
+    /// An OBS link whose account left the call: the spec's words, greyed
+    /// out, and no popover (PROTOCOL.md › Voice › OBS links in a call).
+    @Test func obsStillListening() {
+        #expect(ObsText.stillListening("Ada") == "Ada's OBS is still listening")
+        let obs = Session(sid: "s3", uid: "ada", client: "obs", voice: VoiceState(channelId: "lounge", muted: true, deafened: false))
+        #expect(!VoicePersonMenu.offered(obs, mySid: "s0", myUid: "ben"), "not a call member: no volume")
+    }
+
     @Test func theWebsModActions() {
         #expect(VoicePersonPopover98.modActions(me: .member, them: .member).isEmpty)
         #expect(VoicePersonPopover98.modActions(me: .mod, them: .member) == ["Reset password…", "Ban"])

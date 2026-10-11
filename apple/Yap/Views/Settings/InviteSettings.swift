@@ -8,6 +8,7 @@ struct InviteGroup: View {
     @Environment(AppModel.self) private var model
     @State private var label = ""
     @State private var showingAll = false
+    @State private var askingReset = false
 
     var body: some View {
         let client = model.client
@@ -58,12 +59,28 @@ struct InviteGroup: View {
                         .buttonStyle(.win98)
                     ShareLink(item: endpoint.inviteLink) { Text("Share…") }
                         .buttonStyle(.win98)
+                    if MainInvite.canReset(client) {
+                        Button(MainInvite.reset) { askingReset = true }
+                            .buttonStyle(.win98)
+                            .help(MainInvite.resetHelp)
+                    }
+                }
+                if let link = client.newMainLink {
+                    NewMainLink98(link: link)
                 }
             }
         }
         .onChange(of: client.mySid, initial: true) { _, sid in
             if sid != nil { client.refreshInvites() }
         }
+        .question(isPresented: $askingReset, .resetMainLink { [client = model.client] in client.resetMainLink() })
+        #if DEBUG
+        .task {
+            guard DebugLaunch.current.ask == "resetmain" else { return }
+            try? await Task.sleep(for: .seconds(1))
+            askingReset = true
+        }
+        #endif
     }
 
     private func make() {
@@ -110,6 +127,45 @@ struct CreatedInvite98: View {
     }
 }
 
+/// The main link the owner just reset, once, with Copy (everyone signed in
+/// already has it; PROTOCOL.md › Resetting the main link).
+struct NewMainLink98: View {
+    @Environment(AppModel.self) private var model
+    var link: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(MainInvite.newLink)
+                .font(Theme.chrome)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(link)
+                .font(Theme.mono)
+                .textSelection(.enabled)
+                .lineLimit(3)
+                .padding(4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.window)
+                .overlay(Bevel(style: .sunken))
+            HStack(spacing: 6) {
+                Button("Copy") {
+                    copyToPasteboard(link)
+                    model.client.notice = YapClient.Notice(text: "Invite link copied.")
+                }
+                .buttonStyle(.win98)
+                ShareLink(item: link) { Text("Share…") }
+                    .buttonStyle(.win98)
+                Spacer()
+                Button("Done") { model.client.newMainLink = nil }
+                    .buttonStyle(.win98)
+            }
+        }
+        .foregroundStyle(Theme.tooltipText)
+        .padding(8)
+        .background(Theme.tooltip)
+        .overlay(Rectangle().stroke(Color.black, lineWidth: 1))
+    }
+}
+
 struct InviteRow98: View {
     @Environment(AppModel.self) private var model
     var invite: Invite
@@ -145,6 +201,13 @@ struct InviteRow98: View {
 /// the web's warning. Everyone else makes personal links.
 enum MainInvite {
     static let warning = "The main link never expires and doesn't say who invited whom. Only share it if you mean to."
+    static let reset = "Reset main link…"
+    static let resetHelp = "A new main link; the old one stops working for anyone who hasn't joined yet"
+    static let newLink = "The new main link. Everyone already signed in has it; the old one no longer lets anyone new in."
+
+    /// Only the owner resets the main link (mods see and copy it).
+    @MainActor
+    static func canReset(_ client: YapClient) -> Bool { client.isOwner }
 
     @MainActor
     static func copy(_ endpoint: ServerEndpoint, client: YapClient) {

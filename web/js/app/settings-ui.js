@@ -74,6 +74,8 @@ const LOG_WORDS = {
   'emoji.delete': (e) => `deleted the emoji ${e.detail ?? ''}`.trim(),
   'invite.create': (e) => `made an invite link${e.detail ? ` (${e.detail})` : ''}`,
   'invite.revoke': (e) => `turned off an invite link${e.detail ? ` (${e.detail})` : ''}`,
+  // (detail YAP_KEY: the admin API went back to the server's first key)
+  'invite.resetMain': (e) => (e.detail === 'YAP_KEY' ? 'set the main link back to the server’s first one' : 'reset the main link'),
   'link.add': (e) => {
     const [, name, host] = /^(.*) → (.+)$/.exec(e.detail ?? '') ?? [];
     return name ? `added ${name} (${host}) to Places` : `added ${e.detail ?? 'a link'} to Places`;
@@ -130,7 +132,7 @@ export function openSettings(tab) {
   form.mode.value = settings.mode;
   form.vadThreshold.value = settings.vadThreshold;
   form.bitrate.value = String(settings.bitrate);
-  for (const k of ['music', 'noiseSuppression', 'rnnoise', 'echoCancellation', 'autoGain', 'sounds', 'relayOnly']) form[k].checked = settings[k];
+  for (const k of ['music', 'noiseSuppression', 'echoCancellation', 'autoGain', 'sounds', 'relayOnly']) form[k].checked = settings[k];
   // Relay-only needs a TURN relay on the server; say so instead of pretending.
   fetchIce().then((ice) => {
     const ok = hasRelay(ice);
@@ -167,6 +169,8 @@ export function openSettings(tab) {
   renderInvites(); // short again right away (fresh lists follow from the server)
   renderModLog();
   $('main-invite').hidden = !isMod();
+  $('reset-main-btn').hidden = myRole() !== 'owner'; // PROTOCOL.md › Resetting the main link
+  $('main-link-made').hidden = true;
   $('storage-field').hidden = !isMod();
   currentPushSubscription().then((sub) => ($('browser-push').checked = Boolean(sub)), () => {});
   conn?.send({ t: 'invite.list' });
@@ -256,7 +260,7 @@ async function fillDevices() {
 
 function syncSettingsVisibility() {
   const form = $('settings-form');
-  for (const el of form.querySelectorAll('[data-show-mode]')) el.hidden = el.dataset.showMode !== settings.mode;
+  for (const el of form.querySelectorAll('[data-show-mode]')) el.hidden = !el.dataset.showMode.split(' ').includes(settings.mode);
   for (const el of form.querySelectorAll('[data-hide-music]')) el.hidden = settings.music;
   for (const el of form.querySelectorAll('[data-show-music]')) el.hidden = !settings.music;
   $('music-vad-note').hidden = !(settings.music && settings.mode === 'vad');
@@ -266,20 +270,89 @@ export function renderMeter(db) {
   const pct = (v) => `${Math.max(0, Math.min(100, ((v + 80) / 80) * 100))}%`;
   const fill = $('meter-fill');
   fill.style.width = pct(db);
+  fill.parentElement.setAttribute('aria-valuenow', String(Math.round(Math.max(-80, Math.min(0, db)))));
+  if (micTest.on) micTest.levels.push(db);
   // "Hot" = loud enough to open the gate (in a noisy room that's above your line: the gate adapts).
-  fill.classList.toggle('hot', db > Math.max(settings.vadThreshold, voice.openAt));
+  fill.classList.toggle('hot', settings.mode === 'vad' && db > Math.max(settings.vadThreshold, voice.openAt));
   $('meter-mark').style.left = pct(settings.vadThreshold);
 }
 
+/**
+ * Settings › Voice › Test mic: the bar shows what your mic hears until you
+ * press Stop test (or close Settings), in any input mode, and in a call too
+ * (where the mic is already open). The line next to the button says what's
+ * happening, and what's wrong when nothing comes in.
+ */
+const micTest = { on: false, timer: null, levels: [], startedAt: 0 };
+
 export async function startMicTest() {
-  if (voice.rawStream) return;
-  state.micTest = true;
+  if (micTest.on) return stopMicTest();
+  Object.assign(micTest, { on: true, levels: [], startedAt: performance.now() });
+  renderMicTest('Opening the microphone…');
+  const inCall = Boolean(state.voiceWanted);
+  if (!inCall) state.micTest = true; // closing Settings releases the mic again
+  let error = null;
+  const onMic = ({ detail }) => !detail.ok && (error = detail.error);
+  voice.addEventListener('mic', onMic);
   try {
-    await voice.prepare();
-    if (!voice.micOk) toast('Could not open the microphone.');
-    fillDevices(); // labels appear once permission is granted
+    // A mic that's open but not reporting (half-built, or its audio paused) opens again.
+    if (voice.rawStream && (!voice.micOk || voice.stalled)) await voice.restartMic();
+    await voice.prepare(); // (resumes the audio if the browser paused it; opens the mic if it isn't)
   } catch (err) {
-    toast('Could not open the microphone.');
+    error = err;
+  } finally {
+    voice.removeEventListener('mic', onMic);
+  }
+  if (!micTest.on) return; // stopped (or Settings closed) meanwhile
+  if (!voice.micOk || !voice.rawStream) return stopMicTest(micProblem(error));
+  fillDevices(); // labels appear once permission is granted
+  renderMicTest(inCall ? 'Your mic is on (you’re in a call). Speak and watch the bar.' : 'Listening. Speak and watch the bar.');
+  clearInterval(micTest.timer);
+  micTest.timer = setInterval(checkMicTest, 1000);
+}
+
+/** While testing: say so when nothing (or nearly nothing) comes in. */
+function checkMicTest() {
+  if (!micTest.on) return;
+  const levels = micTest.levels.splice(0);
+  const secs = (performance.now() - micTest.startedAt) / 1000;
+  if (voice.silent) return renderMicTest('Your mic sends nothing but silence: is it muted (a switch, or in the system’s sound settings)?');
+  if (!levels.length && secs > 2) return renderMicTest('No sound is coming from the microphone. Try another one above.');
+  if (levels.length && Math.max(...levels) < -70 && secs > 3) return renderMicTest('Hardly hearing anything. Speak up, or pick another microphone above.');
+  if (levels.length && Math.max(...levels) >= -70) renderMicTest(state.voiceWanted ? 'Your mic is on (you’re in a call). Speak and watch the bar.' : 'Listening. Speak and watch the bar.');
+}
+
+/** Stop testing (`note` = why, if it went wrong). The mic goes again unless you're in a call. */
+export function stopMicTest(note = '') {
+  clearInterval(micTest.timer);
+  micTest.on = false;
+  if (state.micTest && !state.voiceWanted) voice.stop();
+  state.micTest = false;
+  renderMicTest(note);
+  renderMeter(state.voiceWanted && voice.rawStream ? voice.localDb : -100);
+}
+
+function renderMicTest(status) {
+  const button = $('mic-test-btn');
+  button.textContent = micTest.on ? 'Stop test' : 'Test mic';
+  button.setAttribute('aria-pressed', String(micTest.on));
+  $('mic-test-status').textContent = status;
+}
+
+/** Why the mic didn't open, in plain words. */
+function micProblem(error) {
+  switch (error?.name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return 'The browser blocked the microphone. Allow it for this site (the icon in the address bar), then press Test mic again.';
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return 'No microphone found. Plug one in, or pick another one above.';
+    case 'NotReadableError':
+    case 'AbortError':
+      return 'The microphone is busy or unavailable (another app may be using it).';
+    default:
+      return `Couldn’t open the microphone${error?.message ? ` (${error.message})` : ''}.`;
   }
 }
 
@@ -393,7 +466,6 @@ export function bindSettings() {
         return renderVoicePanel();
       case 'music':
       case 'noiseSuppression':
-      case 'rnnoise':
       case 'echoCancellation':
       case 'autoGain':
         save({ [field]: form[field].checked });
@@ -442,10 +514,7 @@ export function bindSettings() {
     renderMeter(voice.localDb);
   });
 
-  dialog.addEventListener('close', () => {
-    if (state.micTest && !state.voiceWanted) voice.stop();
-    state.micTest = false;
-  });
+  dialog.addEventListener('close', () => stopMicTest());
 }
 
 /** Square-crop to 256 px (animated GIF/WebP kept as-is if small enough). */
@@ -518,10 +587,30 @@ export function renderAvatarSettings() {
   document.querySelector('[data-action="remove-avatar"]').hidden = !me?.avatar;
 }
 
+const mainLink = () => (settings.key ? `${location.origin}/#key=${encodeURIComponent(settings.key)}` : location.origin);
+
 export function copyInvite() {
-  const link = settings.key ? `${location.origin}/#key=${encodeURIComponent(settings.key)}` : location.origin;
+  const link = mainLink();
   navigator.clipboard.writeText(link).then(
     () => toast('Invite link copied.'),
     () => copyByHand('Invite link', link),
+  );
+}
+
+/** The main key changed (`key`; app.js saved it). The owner who just reset it sees the new link, ready to copy. */
+export function onMainKey() {
+  if (!state.resettingMain) return;
+  state.resettingMain = false;
+  if (!$('settings-dialog').open) return toast('The main link was reset. Settings › Invite has the new one.');
+  $('main-link').value = mainLink();
+  $('main-link-made').hidden = false;
+  $('main-link').select();
+}
+
+export function copyMainLink() {
+  const link = $('main-link').value || mainLink();
+  navigator.clipboard.writeText(link).then(
+    () => toast('New main link copied.'),
+    () => copyByHand('The new main link', link),
   );
 }

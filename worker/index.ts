@@ -51,11 +51,15 @@ export default {
           return new Response('Expected a WebSocket upgrade.', { status: 426 });
         }
         const access = await keyAccess(env, key);
-        if (!access) return new Response('Invalid invite key.', { status: 401 });
-        // Tell the Hub which personal invite this was (never trust the client's copy).
+        // Tell the Hub how this socket got in (never trust the client's copy): the main key
+        // (the Hub checks it against the current one), a personal invite (which one), or a
+        // wrong or old key: then the socket may only say hello with a device token, so
+        // devices that are signed in keep working after the main link is reset
+        // (PROTOCOL.md › Resetting the main link).
         const headers = new Headers(request.headers);
         headers.delete('X-Yap-Invite');
-        if (access !== true) headers.set('X-Yap-Invite', access);
+        headers.set('X-Yap-Access', access === true ? 'main' : access ? 'invite' : 'token');
+        if (access && access !== true) headers.set('X-Yap-Invite', access);
         // One server for now. Multiple servers later = one Hub per name.
         return hub(env).fetch(new Request(request, { headers }));
       }
@@ -96,7 +100,7 @@ export default {
       // opening the socket (a browser can't read a failed upgrade's status).
       case '/api/check':
         return Response.json({
-          ok: Boolean(await keyAccess(env, key)),
+          ok: Boolean(await keyAccess(env, key, true)),
           keyRequired: Boolean(env.YAP_KEY),
           protocol: PROTOCOL_VERSION,
         });

@@ -150,7 +150,8 @@ fn hint_label(ui: &egui::Ui, p: &Pal, at: Pos2, max_w: f32, hint: &Hint) {
 
 /// Who's in a voice channel, under it: speaking rings, "connecting", the
 /// LIVE badge, connection hints, mute / deafen marks; click someone for
-/// their volume. (Not OBS links: they listen without showing up.)
+/// their volume. (Not OBS links: they listen without showing up, unless
+/// their account has left: `obs_listening`.)
 pub fn voice_members(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, channel_id: &str, joined: bool, acts: &mut Vec<Act>) {
     for s in m.voice_members(channel_id) {
         let me = Some(&s.sid) == m.sid.as_ref();
@@ -209,6 +210,40 @@ pub fn voice_members(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, chann
             app.volume_ask = None;
         }
     }
+    obs_listening(app, ui, m, p, channel_id);
+}
+
+/// Someone who left the call while their OBS link still listens (PROTOCOL.md ›
+/// Voice › OBS links in a call): their name greyed out under the channel,
+/// "Rosa's OBS is still listening". An in-between state, not a call member:
+/// a faded picture, no ring, no marks, no volume on click.
+fn obs_listening(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, channel_id: &str) {
+    for uid in m.obs_listening(channel_id) {
+        let user = m.users.get(uid);
+        let name = user.map(|u| u.name.as_str()).unwrap_or("Someone");
+        let (rect, resp) = super::row(ui, ROW_H, ("obs", uid));
+        let c = pos2(rect.left() + SUB_X, rect.center().y);
+        super::avatar(ui, &app.images, &m.config.server, c, SUB_AVATAR, face(user), false, p);
+        // Faded into the list's own background.
+        let [r, g, b, _] = p.window.to_array();
+        ui.painter().rect_filled(Rect::from_center_size(c, vec2(SUB_AVATAR + 2.0, SUB_AVATAR + 2.0)), 0.0, Color32::from_rgba_unmultiplied(r, g, b, 150));
+        // "Rosa's OBS is still listening", grey italics (like "reconnecting…"), cut short with "…" if narrow.
+        let at_x = c.x + SUB_GAP;
+        let text = format!("{name}{OBS_LISTENING}");
+        let mut job = egui::text::LayoutJob::single_section(text, egui::TextFormat { font_id: theme::font(theme::ui()), color: p.gray, italics: true, ..Default::default() });
+        job.wrap = egui::text::TextWrapping { max_width: (rect.right() - 6.0 - at_x).max(20.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+        let galley = ui.painter().layout_job(job);
+        ui.painter().galley(pos2(at_x, rect.center().y - galley.size().y / 2.0), galley, p.gray);
+        theme::tip(resp, obs_listening_tip(name));
+    }
+}
+
+/// After the name, on an OBS link's greyed row (the spec's words: "<name>'s OBS is still listening").
+pub const OBS_LISTENING: &str = "'s OBS is still listening";
+
+/// The row's tooltip (the web's words).
+pub fn obs_listening_tip(name: &str) -> String {
+    format!("{name} left the call, but their OBS link is still listening. It stops within 5 minutes unless they come back.")
 }
 
 /// Places: the server's links (its board, if it has one; anyone can add an

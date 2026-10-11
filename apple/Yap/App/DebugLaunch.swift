@@ -34,6 +34,10 @@ import UIKit
 ///   YAP_LAST_READ=0 | id:ms,id:ms                  read marks to start from (the in-memory store has none, so a
 ///                                                  scripted launch starts caught up): 0 = nothing read anywhere
 ///   YAP_ASK=ping | archive                         ask the open channel's question (the ping note, Archive…?)
+///   YAP_ASK=resetmain                              Settings › Invite asks "Reset main link?" (owner; with
+///                                                  YAP_SCREEN=settings YAP_SETTINGS_PAGE=invite)
+///   YAP_DEMO_RESET_MAIN=1                          once online, reset the main link for real (owner; a throwaway
+///                                                  local server: its old key stops working) to show the new link
 ///   YAP_SCREEN=members                             the People sheet
 ///   YAP_VAULT_PASSCODE=…                           unlock the encrypted Personal space once online
 ///   YAP_SEARCH=query                               search from the open channel (Win98: the Find window)
@@ -98,6 +102,7 @@ struct DebugLaunch {
     var demoMicCheck: String?
     var draft: String?
     var demoReset: String?
+    var demoResetMain = false
     var orientation: String?
     var watch: String?
     var screenFull = false
@@ -145,6 +150,7 @@ struct DebugLaunch {
         launch.demoMicCheck = env["YAP_DEMO_MICCHECK"]
         launch.draft = env["YAP_DRAFT"]?.replacingOccurrences(of: "\\n", with: "\n")
         launch.demoReset = env["YAP_DEMO_RESET"]
+        launch.demoResetMain = env["YAP_DEMO_RESET_MAIN"] == "1"
         launch.orientation = env["YAP_ORIENTATION"]
         launch.watch = env["YAP_WATCH"]
         launch.screenFull = env["YAP_SCREEN_FULL"] == "1"

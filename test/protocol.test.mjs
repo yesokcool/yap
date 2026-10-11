@@ -100,6 +100,10 @@ class Client {
   }
 }
 
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+/** [code, reason] once the server closes this client's socket. */
+const closeOf = (c) => new Promise((resolve) => c.ws.addEventListener('close', (e) => resolve([e.code, e.reason]), { once: true }));
+
 /** A test that can't run here says so (and why) instead of passing without checking anything. */
 class Skip extends Error {}
 const skip = (why) => {
@@ -131,8 +135,21 @@ await test('/api/check reports key state', async () => {
 });
 
 if (KEY) {
-  await test('wrong key cannot open a socket', async () => {
-    await assert.rejects(new Client('Intruder').open('nope'));
+  // PROTOCOL.md › Resetting the main link: signed-in devices with an old key keep working, nobody else gets in.
+  await test('a wrong key opens a socket that may only say hello with a device token; anything else closes it (4003)', async () => {
+    const tries = [
+      { t: 'typing', channelId: 'general' },
+      { t: 'hello', v: 1, signup: { name: `Intruder ${RUN}`, pin: TEST_PASSWORD, color: '#ff8800' } },
+      { t: 'hello', v: 1, login: { name: `Intruder ${RUN}`, pin: TEST_PASSWORD } },
+      { t: 'hello', v: 1, token: 'not-a-device-token' },
+    ];
+    for (const first of tries) {
+      const c = await new Client('Intruder').open('nope');
+      const closed = closeOf(c);
+      c.send(first);
+      assert.deepEqual(await closed, [4003, 'wrong invite key'], JSON.stringify(first));
+      assert.deepEqual(c.inbox, [], 'and nothing else');
+    }
   });
 }
 
@@ -492,6 +509,9 @@ await test('OBS links: listen-only token can join voice (shown as obs) and nothi
   assert.equal(ready.key, undefined, 'no main key for OBS links');
   obs.send({ t: 'send', channelId: 'general', body: 'hi from obs' });
   assert.equal((await obs.next((m) => m.t === 'error' && m.re === 'send')).code, 'forbidden');
+  // It listens where its account is (next test).
+  a.send({ t: 'voice.join', channelId: 'lounge' });
+  await a.next((m) => m.t === 'voice' && m.sid === a.ready.sid && m.channelId === 'lounge');
   obs.send({ t: 'voice.join', channelId: 'lounge', muted: false });
   const joined = await b.next((m) => m.t === 'session.join' && m.session.sid === ready.sid);
   assert.equal(joined.session.client, 'obs', 'everyone can see it is an OBS link');
@@ -507,6 +527,69 @@ await test('OBS links: listen-only token can join voice (shown as obs) and nothi
   again.send({ t: 'hello', v: 1, client: 'web', token });
   assert.equal((await again.next((m) => m.t === 'error')).code, 'bad_token');
   again.close();
+  a.send({ t: 'voice.leave' });
+  await a.next((m) => m.t === 'voice' && m.sid === a.ready.sid && m.channelId === null);
+});
+
+// PROTOCOL.md › Voice › OBS links in a call. The test server runs with TEST_OBS_GRACE (seconds) instead of 5 minutes.
+await test('OBS links follow their account: refused unless it is in that channel; after it leaves they keep listening for a while, then the server takes them out', async () => {
+  a.send({ t: 'obs.create' });
+  const { token } = await a.next((m) => m.t === 'obs.created');
+  const listen = async (name) => {
+    const c = await new Client(name).open();
+    c.send({ t: 'hello', v: 1, client: 'obs', token });
+    c.ready = await c.next((m) => m.t === 'ready');
+    return c;
+  };
+  const joinLounge = (c) => c.send({ t: 'voice.join', channelId: 'lounge', muted: true });
+  const refused = async (c) => {
+    joinLounge(c);
+    const err = await c.next((m) => m.t === 'error' && m.re === 'voice.join');
+    assert.equal(err.code, 'not_in_voice');
+    assert.match(err.message, /^Waiting for .+ to join Lounge\.$/);
+  };
+  const obs = await listen('obs');
+  await refused(obs);
+  assert.ok(!b.inbox.some((m) => m.t === 'session.join' && m.session.sid === obs.ready.sid), 'nobody saw it');
+  // Its account joins: now it may listen.
+  a.send({ t: 'voice.join', channelId: 'lounge' });
+  await a.next((m) => m.t === 'voice' && m.sid === a.ready.sid && m.channelId === 'lounge');
+  joinLounge(obs);
+  await b.next((m) => m.t === 'voice' && m.sid === obs.ready.sid && m.channelId === 'lounge');
+  await obs.next((m) => m.t === 'voice' && m.sid === obs.ready.sid && m.channelId === 'lounge');
+  // Its account leaves: it keeps listening (everyone can see an OBS link alone in the channel)…
+  const left = Date.now();
+  a.send({ t: 'voice.leave' });
+  await b.next((m) => m.t === 'voice' && m.sid === a.ready.sid && m.channelId === null);
+  // …and an OBS page that reconnects meanwhile may come back.
+  const back = await listen('obs again');
+  joinLounge(back);
+  await b.next((m) => m.t === 'voice' && m.sid === back.ready.sid && m.channelId === 'lounge');
+  // Then the server takes them both out.
+  const out = await b.next((m) => m.t === 'voice' && m.sid === obs.ready.sid && m.channelId === null, 20_000).catch(() => null);
+  if (!out) skip('start the server with --var TEST_OBS_GRACE:4 to test the OBS links\' 5 minutes end to end');
+  const grace = Date.now() - left;
+  assert.ok(grace >= 1000, 'not at once');
+  await b.next((m) => m.t === 'voice' && m.sid === back.ready.sid && m.channelId === null, 5000);
+  assert.equal((await obs.next((m) => m.t === 'voice' && m.sid === obs.ready.sid)).channelId, null, 'the OBS page hears it too');
+  await refused(obs);
+  // The account comes back: so may the OBS link, at once.
+  a.send({ t: 'voice.join', channelId: 'lounge' });
+  await a.next((m) => m.t === 'voice' && m.sid === a.ready.sid && m.channelId === 'lounge');
+  joinLounge(obs);
+  await b.next((m) => m.t === 'voice' && m.sid === obs.ready.sid && m.channelId === 'lounge');
+  // Coming back in time stops the countdown: leave, rejoin at once, and it's still there after the grace.
+  a.send({ t: 'voice.leave' });
+  await a.next((m) => m.t === 'voice' && m.sid === a.ready.sid && m.channelId === null);
+  a.send({ t: 'voice.join', channelId: 'lounge' });
+  await a.next((m) => m.t === 'voice' && m.sid === a.ready.sid && m.channelId === 'lounge');
+  await pause(grace + 1500);
+  assert.ok(!b.inbox.some((m) => m.t === 'voice' && m.sid === obs.ready.sid && m.channelId === null), 'still listening');
+  a.send({ t: 'obs.revoke' });
+  await a.next((m) => m.t === 'obs.revoked');
+  a.send({ t: 'voice.leave' });
+  await a.next((m) => m.t === 'voice' && m.sid === a.ready.sid && m.channelId === null);
+  for (const c of [obs, back]) c.close();
 });
 
 await test('home-screen sign-in pass: works once, gives the new app its own token', async () => {
@@ -2134,7 +2217,6 @@ if (ADMIN) {
 }
 
 // ── Extras (v0.36): PROTOCOL.md › Extras ────────────────────────────────
-const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 const sendErr = async (who, re) => (await who.next((m) => m.t === 'error' && m.re === re)).code;
 /** A mono 16-bit WAV: `ms` of a 440 Hz sine at amplitude `amp` (0–1). */
 function wav(ms = 800, amp = 0.9, rate = 24000) {
@@ -2465,6 +2547,69 @@ await test('hangs: checked; everyone sees; only the maker cancels; at the time e
   again.close();
   B.send({ t: 'when.set', slots: [] });
 });
+
+// ── Resetting the main link (PROTOCOL.md › Resetting the main link) ──────
+const check = async (key) => (await (await fetch(`${BASE}/api/check`, { headers: { 'X-Yap-Key': key } })).json()).ok;
+if (KEY && ADMIN) {
+  await test('main link: only the owner resets it; everyone connected gets the new key; old links stop for newcomers, signed-in devices and personal links keep working', async () => {
+    try {
+      B.send({ t: 'invite.resetMain' });
+      assert.equal(await sendErr(B, 'invite.resetMain'), 'forbidden', 'only the owner');
+      A.send({ t: 'invite.create', label: `made before the reset ${RUN}` });
+      const personal = (await A.next((m) => m.t === 'invite.created')).key;
+      A.send({ t: 'invite.resetMain' });
+      const { key } = await A.next((m) => m.t === 'key');
+      assert.match(key, /^[A-Za-z0-9_-]{32}$/, 'fits a WebSocket subprotocol');
+      assert.notEqual(key, KEY);
+      assert.equal((await B.next((m) => m.t === 'key')).key, key, 'everyone connected gets it');
+      A.send({ t: 'modlog' });
+      const [entry] = (await A.next((m) => m.t === 'modlog')).entries;
+      assert.deepEqual([entry.action, entry.actor], ['invite.resetMain', A.uid], 'the mod log says so');
+      assert.equal(await check(key), true, 'the new link works at once');
+      assert.equal(await check(KEY), false, 'the old one is wrong now');
+      assert.equal(await check(personal), true, 'personal links keep working');
+
+      // A signed-in device that still has the old key connects anyway, and is handed the new one.
+      const old = new Client(BOB);
+      old.token = B.token;
+      await old.open(KEY);
+      const ready = await old.hello();
+      assert.equal(ready.key, key, 'ready.key = the new main key');
+      old.send({ t: 'history', channelId: 'general' });
+      await old.next((m) => m.t === 'history', 5000);
+      old.close();
+
+      // Without a device token, the old key gets nobody in: sign-up, sign-in, anything else.
+      for (const first of [
+        { t: 'hello', v: 1, signup: { name: `Late ${RUN}`, pin: TEST_PASSWORD, color: '#ff8800' } },
+        { t: 'hello', v: 1, login: { name: nameOf(B), pin: TEST_PASSWORD } },
+        { t: 'history', channelId: 'general' },
+      ]) {
+        const c = await new Client('old link').open(KEY);
+        const closed = closeOf(c);
+        c.send(first);
+        assert.deepEqual(await closed, [4003, 'wrong invite key'], JSON.stringify(first));
+      }
+
+      // The new main key and the personal link both sign people in as before.
+      for (const k of [key, personal]) {
+        const c = await new Client('new link').open(k);
+        c.send({ t: 'hello', v: 1, login: { name: nameOf(B), pin: TEST_PASSWORD }, client: 'test' });
+        const r = await c.next((m) => m.t === 'ready' || m.t === 'error');
+        assert.equal(r.t, 'ready', `${k === key ? 'new main key' : 'personal link'}: ${r.message ?? ''}`);
+        assert.equal(r.key, key);
+        c.send({ t: 'account.signout' }); // (that sign-in's own device token goes again)
+        await closeOf(c);
+      }
+    } finally {
+      // Back to the test server's own key, for whatever runs next (e2e, the backup round trip).
+      const res = await admin('/api/admin/main-key', { method: 'DELETE' });
+      assert.equal(res.status, 200);
+    }
+    assert.equal((await A.next((m) => m.t === 'key')).key, KEY, 'the admin API can go back to YAP_KEY; everyone hears');
+    assert.equal(await check(KEY), true);
+  });
+}
 A.close();
 B.close();
 

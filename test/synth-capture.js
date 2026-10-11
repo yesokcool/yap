@@ -66,6 +66,7 @@
   const realUserMedia = md.getUserMedia.bind(md);
   md.getUserMedia = async (constraints = {}) => {
     if (!constraints.audio) return realUserMedia(constraints);
+    window.__micAsked = constraints.audio; // (what the page asked for: the noise switch test reads it)
     const stream = constraints.video ? await realUserMedia({ video: constraints.video }) : new MediaStream();
     stream.addTrack(micTrack());
     return stream;

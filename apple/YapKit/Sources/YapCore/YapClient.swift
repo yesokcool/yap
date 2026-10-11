@@ -133,6 +133,11 @@ public final class YapClient {
     public internal(set) var invites: [Invite] = []
     /// The invite I just made, with its one-time link.
     public var createdInvite: CreatedInvite?
+    /// The owner just reset the main link here: the new one, to copy
+    /// (everyone's apps already got it; PROTOCOL.md › Resetting the main link).
+    public var newMainLink: String?
+    /// Waiting for the `key` that answers my `invite.resetMain`.
+    @ObservationIgnored var mainResetAsked = false
     /// The moderation log, after `refreshModLog`.
     public internal(set) var modLog: [ModLogEntry]?
     /// I signed in with an old PIN, a guessable password or a temporary

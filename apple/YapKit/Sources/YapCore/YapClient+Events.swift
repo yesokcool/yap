@@ -71,6 +71,8 @@ extension YapClient {
             }
         case .invites(let list):
             invites = list
+        case .key(let key):
+            mainKeyReset(key)
         case .links(let list):
             links = list
         case .modlog(let entries):
@@ -214,12 +216,9 @@ extension YapClient {
         // Let in just now (we were in the waiting room).
         let admitted = if case .waiting = phase { true } else { false }
         if let token = ready.token { credentials.token = token }
-        // Keep the main key: a personal invite we came in with may be revoked later.
-        if let key = ready.key, !key.isEmpty, var endpoint, endpoint.key != key {
-            endpoint.key = key
-            self.endpoint = endpoint
-            credentials.endpoint = endpoint
-        }
+        // Keep the main key: a personal invite we came in with may be revoked
+        // later, and the main link may have been reset while we were away.
+        if let key = ready.key { adoptMainKey(key) }
         links = ready.links
         uploadToken = ready.uploadToken
         resumeKey = ready.resumeKey

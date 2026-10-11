@@ -56,6 +56,13 @@ extension Question {
                  action: "Turn off", danger: true, perform: { _ in perform() })
     }
 
+    /// Owner only, Settings › Invite (PROTOCOL.md › Resetting the main link).
+    static func resetMainLink(perform: @escaping () -> Void) -> Question {
+        Question(title: "Reset main link?",
+                 text: "The old link stops working for anyone who hasn't joined yet. Everyone already signed in keeps working, and their apps get the new link by themselves. Personal invite links keep working.",
+                 action: "Reset link", danger: true, perform: { _ in perform() })
+    }
+
     static func resetPassword(_ name: String, perform: @escaping () -> Void) -> Question {
         Question(title: "Reset \(name)’s password?", text: "They get a temporary password to sign in with; their old one stops working.",
                  action: "Reset password", danger: true, perform: { _ in perform() })

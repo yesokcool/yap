@@ -729,6 +729,7 @@ public struct ModLogEntry: Codable, Sendable, Hashable, Identifiable {
         case "emoji.delete": return detail.map { "deleted the emoji \($0)" } ?? "deleted the emoji"
         case "invite.create": return "made an invite link" + (detail.map { " (\($0))" } ?? "")
         case "invite.revoke": return "turned off an invite link" + (detail.map { " (\($0))" } ?? "")
+        case "invite.resetMain": return "reset the main link"
         case "link.add":
             if let detail, let arrow = detail.range(of: " → ", options: .backwards), arrow.lowerBound > detail.startIndex {
                 return "added \(detail[..<arrow.lowerBound]) (\(detail[arrow.upperBound...])) to Places"

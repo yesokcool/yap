@@ -7,7 +7,7 @@ import { esc } from '../format.js';
 import { $, conn, isMod, state } from './state.js';
 import { avatar, hangWhen, holdFocus } from './ui.js';
 import { VIEWS, watchParty } from './places.js';
-import { voiceMember } from './voice-ui.js';
+import { obsListening, voiceMember } from './voice-ui.js';
 import { isUnread, updateTitle } from './chat.js';
 import { inviteWarning } from './people.js';
 import { unreadElsewhere } from './extras.js';
@@ -52,8 +52,11 @@ export function renderChannels() {
   $('voice-channels').innerHTML = channels
     .filter((c) => c.kind === 'voice')
     .map((c) => {
-      // An OBS link listens without showing up (the maintainer: OBS can record anything anyway).
-      const members = [...state.sessions.values()].filter((s) => s.voice?.channelId === c.id && s.client !== 'obs');
+      // An OBS link listens without showing up (the maintainer: OBS can record anything anyway)…
+      const here = [...state.sessions.values()].filter((s) => s.voice?.channelId === c.id);
+      const members = here.filter((s) => s.client !== 'obs');
+      // …unless its account left: then the account shows greyed, so people know it's still listening.
+      const obsAlone = [...new Set(here.filter((s) => s.client === 'obs' && !members.some((m) => m.uid === s.uid)).map((s) => s.uid))];
       const joined = state.voiceChannel === c.id;
       return `
         <li class="channel-row">
@@ -62,7 +65,7 @@ export function renderChannels() {
           </button>
           <button class="icon-btn tiny row-action" data-action="archive-channel" data-id="${esc(c.id)}" title="Archive channel" aria-label="Archive ${esc(c.name)}">${icon('archive')}</button>
         </li>
-        ${members.length ? `<li><ul class="voice-members">${members.map(voiceMember).join('')}</ul></li>` : ''}`;
+        ${members.length || obsAlone.length ? `<li><ul class="voice-members">${members.map(voiceMember).join('')}${obsAlone.map(obsListening).join('')}</ul></li>` : ''}`;
     })
     .join('');
   refocus();

@@ -77,6 +77,8 @@ pub enum Cmd {
     CreateInvite(String),
     ListInvites,
     RevokeInvite(String),
+    /// Owner only: reset the main invite link (`invite.resetMain`).
+    ResetMainLink,
     /// Sidebar Places.
     AddLink { name: String, url: String },
     RemoveLink(String),

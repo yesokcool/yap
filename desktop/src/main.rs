@@ -77,6 +77,10 @@ OPTIONS (headless test mode):
   --send-image FILE    Send a picture (shrunk/re-encoded to fit 1.9 MB)
   --add-link NAME=URL  Add a sidebar Place (https only); logs LINKS updates
   --make-invite LABEL  Make a personal invite link (prints INVITE <label> <link>)
+  --reset-main-link    Owner only: reset the main invite link once in. Every app
+                       connected saves the new key and logs KEY saved sha256:…
+                       (never the key); OBSLISTEN lines say whose OBS link listens
+                       in a voice channel without them (the greyed rows)
   --channel-bitrate N  On joining voice, set the channel's quality (0 = personal)
   --reply-to TEXT      Reply to the first message from someone else containing TEXT
   --reply-body TEXT    ...with this (default: got it)
@@ -188,6 +192,7 @@ fn main() {
             "--send-image" => h.send_image = Some(need(&mut args, "--send-image")),
             "--add-link" => h.add_link = Some(need(&mut args, "--add-link")),
             "--make-invite" => h.make_invite = Some(need(&mut args, "--make-invite")),
+            "--reset-main-link" => h.reset_main_link = true,
             "--reply-to" => h.reply_to = Some(need(&mut args, "--reply-to")),
             "--reply-body" => h.reply_body = Some(need(&mut args, "--reply-body")),
             "--vault" => h.vault = Some(need(&mut args, "--vault")),

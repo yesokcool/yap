@@ -93,11 +93,14 @@ export function onVoice(msg) {
       }
     }
   } else if (state.voiceChannel) {
-    if (msg.channelId === state.voiceChannel && prev !== state.voiceChannel) {
+    if (msg.channelId === state.voiceChannel && prev !== state.voiceChannel && session?.client === 'obs') {
+      // An OBS link listens without showing up: no chime, and it never counts as its account
+      // coming back (their kept connection and held-back leave chime are theirs alone).
+      callPerson(msg.sid, 'joined');
+    } else if (msg.channelId === state.voiceChannel && prev !== state.voiceChannel) {
       const uid = session?.uid;
-      // The same call back under a new session: no chimes (V7: nor when anyone's straight back),
-      // and none for an OBS link, which listens without showing up.
-      let quiet = resumed || session?.client === 'obs';
+      // The same call back under a new session: no chimes (V7: nor when anyone's straight back).
+      let quiet = resumed;
       if (!resumed) {
         // A plain join by someone whose old connection we were keeping: they
         // couldn't resume it (or their app can't), so it's dead weight now.
@@ -208,7 +211,8 @@ export function dropGhost(sid, { quiet = false } = {}) {
   clearGhost(sid);
   state.sessions.delete(sid);
   voice.drop(sid);
-  if (!quiet && state.voiceChannel && ![...state.sessions.values()].some((s) => s.uid === uid && s.voice?.channelId === state.voiceChannel)) sounds.peerLeave();
+  // (Their OBS link listening on doesn't count as them still being here.)
+  if (!quiet && state.voiceChannel && ![...state.sessions.values()].some((s) => s.uid === uid && s.client !== 'obs' && s.voice?.channelId === state.voiceChannel)) sounds.peerLeave();
   renderChannels();
   renderVoicePanel();
   renderMembers();
@@ -380,6 +384,20 @@ export function voiceMember(session) {
       ${note ? `<span class="vq ${note.kind}" title="${esc(note.title)}">${esc(note.text)}</span>` : ''}
       ${session.voice.screen ? `<button class="live-badge" data-action="${me ? 'share-screen' : 'watch-screen'}" data-sid="${esc(session.sid)}" title="${me ? 'You’re sharing your screen (click to stop)' : `Watch ${esc(user?.name ?? 'their')}'s screen`}">LIVE</button>` : ''}
       <span class="flags" ${flag ? `role="img" aria-label="${session.voice.deafened ? 'deafened' : 'muted'}"` : ''}>${flag}</span>
+    </li>`;
+}
+
+/**
+ * Someone's OBS link alone in a voice channel: they left, but it listens on for
+ * up to 5 minutes (PROTOCOL.md › Voice › OBS links in a call). Shown as them,
+ * greyed: an in-between state, not a call member (no volume, no ring).
+ */
+export function obsListening(uid) {
+  const user = state.users.get(uid);
+  const name = user?.name ?? 'Someone';
+  return `
+    <li class="voice-member obs-listening" data-obs-uid="${esc(uid)}" title="${esc(name)} left the call, but their OBS link is still listening. It stops within 5 minutes unless they come back.">
+      ${avatar(user, 'sm')}<span class="name">${esc(name)}'s OBS is still listening</span>
     </li>`;
 }
 

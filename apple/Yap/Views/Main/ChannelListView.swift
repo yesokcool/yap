@@ -163,6 +163,10 @@ struct ChannelListView: View {
                 VoiceMemberRow(session: session)
                     .modifier(PlainRow())
             }
+            ForEach(client.obsStillListening(in: channel.id)) { session in
+                ObsListeningRow98(session: session)
+                    .modifier(PlainRow())
+            }
         }
         NewRow(title: "New voice channel…") { newChannelKind = .voice }
 
@@ -456,6 +460,41 @@ struct VoiceMemberRow: View {
         .voiceHintHelp(hint, name: user?.name ?? "They")
         .liveBadgeAction(session)
         .voicePersonMenu(session)
+    }
+}
+
+/// Someone's OBS link still listening after they left the call (the server
+/// keeps it up to 5 minutes, PROTOCOL.md › Voice › OBS links in a call):
+/// their name greyed out, "Ada's OBS is still listening". An in-between
+/// state, not a call member: no volume menu, no speaking ring, not counted.
+struct ObsListeningRow98: View {
+    @Environment(AppModel.self) private var model
+    var session: Session
+    /// The call sheet's bigger rows.
+    var large = false
+
+    var body: some View {
+        let user = model.client.user(session.uid)
+        let name = user?.name ?? "Someone"
+        HStack(spacing: large ? 8 : 5) {
+            Avatar(user: user, size: large ? 28 : 14)
+                .saturation(0)
+                .opacity(0.5)
+            Text(ObsText.stillListening(name))
+                .font(large ? Theme.chat : Theme.chrome)
+                .foregroundStyle(Theme.grayText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+            Image(systemName: "tv")
+                .font(.system(size: large ? 12 : 10))
+                .foregroundStyle(Theme.grayText)
+        }
+        .padding(.leading, large ? 6 : 28)
+        .padding(.trailing, 6)
+        .padding(.vertical, large ? 4 : 2)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(ObsText.stillListening(name))
     }
 }
 

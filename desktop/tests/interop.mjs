@@ -12,7 +12,10 @@
 // password, choosing one), the waiting room (only the owner and mods hear
 // about newcomers), then voice in `lounge` with audio flowing in both
 // directions, in both join orders, and an OBS link listening to native
-// without showing up (no chimes).
+// without showing up (no chimes) while its account is in the call, and
+// greyed out while it isn't; last, the owner resets the main link (every
+// connected app saves the new key; a device with the old key and a device
+// token still gets in; a sign-in with the old key is turned away).
 //
 //   YAP_URL=http://localhost:8788 YAP_KEY=testkey YAP_ADMIN_KEY=testadmin \
 //     YAP_BIN=desktop/target/release/yap node desktop/tests/interop.mjs
@@ -383,6 +386,8 @@ const patchedPct = (a, b) => +((100 * (b.concealed - a.concealed)) / Math.max(1,
 
 const results = [];
 const evidence = {};
+/** How the native app logs a key it saved (`KEY saved sha256:…`): never the key itself. */
+const keyFp = (k) => `sha256:${crypto.createHash('sha256').update(k).digest('hex').slice(0, 8)}`;
 async function test(name, fn) {
   // YAP_ONLY=<regex>: run just the matching tests (while iterating).
   if (process.env.YAP_ONLY && !new RegExp(process.env.YAP_ONLY).test(name)) return;
@@ -397,8 +402,8 @@ async function test(name, fn) {
 // The server has a waiting room: newcomers wait until the owner or a mod lets
 // them in. A native "doorman" (the owner on a fresh server, else made a mod
 // through the admin API) admits everyone for the length of the test.
-// (Killed at the end; its --duration only has to outlast the whole suite, ~7 minutes now.)
-const doorman = native(process.env.YAP_DOORMAN_NAME ?? 'Doorman', null, ['--approve-all', '--duration', '900']);
+// (Killed at the end; its --duration only has to outlast the whole suite, ~8 minutes now.)
+const doorman = native(process.env.YAP_DOORMAN_NAME ?? 'Doorman', null, ['--approve-all', '--duration', '1200']);
 await doorman.waitFor(/ready, sid|PENDING uid/, 15000);
 const pendingUid = doorman.lines.map((l) => l.match(/PENDING uid (\S+)/)?.[1]).find(Boolean);
 if (pendingUid) await admit(pendingUid, 'mod');
@@ -864,7 +869,7 @@ await test('places + invites: native adds a link (web sidebar shows it); a newco
     c.on('exit', () => resolve(o));
   });
   assert.match(out, /ready, sid/, 'newcomer got in (the doorman let them in)');
-  assert.match(out, /keeping the server's main invite key/, 'newcomer adopted the main key');
+  assert.match(out, new RegExp(`KEY saved ${keyFp(KEY)}`), 'newcomer adopted the main key');
   await doorman.waitFor(new RegExp(`join request from New${RUN} \\(\\S+\\) invited by ${nativeName} \\(for New${RUN}\\)`), 5000);
   // The inviter is a member: no join request, but join.resolved.user says who joined and whose link.
   await n.waitFor(new RegExp(`JOINED New${RUN} joined — invited by ${nativeName}$`), 5000);
@@ -883,9 +888,9 @@ await test('places + invites: native adds a link (web sidebar shows it); a newco
   evidence.invites = { link: link.replace(/key=(yi_.{4}).*/, 'key=$1…'), joined: true, usedBy: doorman.lines.filter((l) => l.includes(`Neu${RUN}`) && /also used by/.test(l)), inviterSaw: n.lines.filter((l) => /JOINED/.test(l)).map((l) => l.replace(/^\[\+\s*[\d.]+s\]\s*/, '')) };
 });
 
-/** Run `yap --headless …` to the end; resolves to everything it printed. */
-const runNative = (a) => new Promise((resolve) => {
-  const c = spawn(BIN, KEY ? [...a, '--key', KEY] : a, { stdio: ['ignore', 'pipe', 'pipe'] });
+/** Run `yap --headless …` to the end (with the invite key, or `key`); resolves to everything it printed. */
+const runNative = (a, key = KEY) => new Promise((resolve) => {
+  const c = spawn(BIN, key ? [...a, '--key', key] : a, { stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   c.stdout.on('data', (d) => (out += d));
   c.stderr.on('data', (d) => (out += d));
@@ -1048,17 +1053,23 @@ async function voiceScenario(label, nativeFirst) {
 await test('voice: native joins first, web offers, native answers; audio both ways', () => voiceScenario('nativeFirst', true));
 await test('voice: web joins first, native offers, web answers; audio both ways', () => voiceScenario('webFirst', false));
 
-// An OBS link (the web's /obs page, listen-only) listens without showing up:
-// native still connects to it and sends it audio, but no join or leave chime
-// (they're logged as CHIME lines whether or not sounds are on); the call
-// report still names it.
-await test("OBS link: native connects to it and it hears native, with no join or leave chime; the call report names it", async () => {
+// An OBS link (the web's /obs page, listen-only) listens without showing up
+// while its account is in the call: native still connects to it and sends it
+// audio, but no join or leave chime (they're logged as CHIME lines whether or
+// not sounds are on); the call report still names it. Its account leaving
+// leaves it listening (a newer server: for 5 minutes), and native shows the
+// account greyed out (OBSLISTEN lines); back in the call, invisible again.
+await test("OBS link: native connects to it and it hears native, with no join or leave chime; the call report names it; while its account is out of the call it shows greyed out, and not once they're back", async () => {
   const reportFile = path.join(OUT, 'call-report-obs.txt');
-  const n = native(`Obs${RUN}`, null, ['--join-voice', 'lounge', '--duration', '24', '--call-report', reportFile]);
+  const n = native(`Obs${RUN}`, null, ['--join-voice', 'lounge', '--duration', '45', '--call-report', reportFile]);
   await n.waitFor(/voice joined lounge/);
+  // The account is in the call first (a newer server only lets its OBS link listen then).
+  await web.click('button.channel.voice:has-text("Lounge")');
+  await web.waitForFunction(() => [...yap.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'), null, { timeout: 20000 });
   await web.evaluate(() => { yap.state.obsToken = null; yap.ui.send({ t: 'obs.create' }); });
   const token = await web.waitForFunction(() => yap.state.obsToken, null, { timeout: 8000 }).then((h) => h.jsonValue());
   const obs = await web.context().newPage();
+  const greyed = new RegExp(`OBSLISTEN Lounge: ${webName}$`);
   try {
     await obs.goto(`${BASE}/obs#${new URLSearchParams({ key: KEY, listen: token, channel: 'lounge' })}`);
     await obs.click('#start');
@@ -1076,17 +1087,28 @@ await test("OBS link: native connects to it and it hears native, with no join or
     evidence.obs = { bytesFromNative: bytes };
     assert.ok(bytes >= 20000, `the OBS link received ${bytes} bytes of native's voice`);
     await obs.waitForTimeout(3000); // long enough for native's call report to sample it (the codec line)
+    assert.ok(!n.lines.some((l) => greyed.test(l)), 'its account is in the call: the OBS link stays invisible');
+    // The account leaves: the OBS link listens on, and native shows them greyed out.
+    await web.click('[data-action="leave-voice"]');
+    await n.waitFor(greyed, 8000);
+    const stillListening = await obs.evaluate(() => yapObs.state.inCall);
+    // Back in the call: invisible again.
+    await web.click('button.channel.voice:has-text("Lounge")');
+    await n.waitFor(/OBSLISTEN none$/, 8000);
+    evidence.obs = { ...evidence.obs, stillListening, rows: n.lines.filter((l) => /OBSLISTEN/.test(l)).map((l) => l.replace(/^\[\+\s*[\d.]+s\]\s*/, '')) };
   } finally {
     await obs.close();
   }
   // A lost connection's leave chime waits 5 s: give it longer.
   await new Promise((r) => setTimeout(r, 7000));
-  const chimes = n.lines.filter((l) => / CHIME (join|leave)/.test(l));
+  const chimes = n.lines.filter((l) => / CHIME (join|leave)/.test(l)).map((l) => l.match(/CHIME (join|leave)/)[1]);
+  await web.click('[data-action="leave-voice"]');
+  await web.waitForFunction(() => yap.voice.peers.size === 0, null, { timeout: 5000 }).catch(() => {});
   await n.done;
   await new Promise((r) => setTimeout(r, 500));
   const report = fs.existsSync(reportFile) ? fs.readFileSync(reportFile, 'utf8') : '';
   evidence.obs = { ...evidence.obs, chimes, report: report.split('\n').filter((l) => /OBS/.test(l)) };
-  assert.deepEqual(chimes, [], 'no join or leave chime for an OBS link');
+  assert.deepEqual(chimes, ['join', 'leave', 'join'], 'chimes for the web user joining, leaving and coming back; none for the OBS link');
   assert.match(report, new RegExp(`\\n${webName}'s OBS\\n  Connection: [^\\n]*\\n  Codec: (red\\+)?opus out`), 'the call report names it, with the codec we sent it');
 });
 
@@ -1233,6 +1255,60 @@ await test("screen: a browser watches the desktop's share (LIVE badge; H.264 pic
   assert.deepEqual(st.element && [st.element.w, st.element.h], [1280, 720], "the web's player shows it at 1280 × 720");
   assert.ok(st.soundBytes > 2000, `the share's sound arrives on its own track (${st.soundBytes} bytes)`);
   assert.ok(n.lines.some((l) => /capture and encoder off/.test(l)), 'nobody watching: no encoding');
+});
+
+// ── Resetting the main link ───────────────────────────────────────────────
+// Last, because it changes the server's key; the admin API puts YAP_KEY back
+// at the end (`DELETE /api/admin/main-key`), so the suite can run again.
+// PROTOCOL.md › HTTP › Resetting the main link.
+let newKey = null;
+await test('main link reset: the owner resets it; connected apps (native and web) save the new key; a device with the old key and a device token still gets in and saves it; a sign-in with the old key is turned away (4003) and one with the new key works; the admin API puts the first key back', async () => {
+  const fp = keyFp;
+  // A device that signed in before the reset, then was off while it happened.
+  const before = await runNative(['--headless', '--server', BASE, '--name', `Stale${RUN}`, '--password', TEST_PASSWORD, '--duration', '3']);
+  const staleToken = before.match(/TOKEN (\S+)/)?.[1];
+  assert.ok(staleToken && /ready, sid/.test(before), 'a device signed in before the reset');
+  // The owner (made so through the admin API), and a member who's connected through it.
+  const made = await runNative(['--headless', '--server', BASE, '--name', `Owner${RUN}`, '--password', TEST_PASSWORD, '--duration', '3']);
+  const ownerUid = made.match(/ACCOUNT uid=(\S+)/)?.[1];
+  assert.ok(ownerUid, 'the owner-to-be signed in');
+  await admit(ownerUid, 'owner');
+  const member = native(`Member${RUN}`, null, ['--duration', '90']);
+  let saved = null;
+  try {
+    await member.waitFor(/ready, sid/, 15000);
+    const owner = native(`Owner${RUN}`, null, ['--reset-main-link', '--duration', '6']);
+    await owner.waitFor(/KEY saved sha256:/, 10000);
+    saved = owner.lines.find((l) => /KEY saved/.test(l)).match(/sha256:\w+/)[0];
+    await owner.done;
+    assert.notEqual(saved, fp(KEY), 'a new key');
+    await member.waitFor(new RegExp(`KEY saved ${saved}`), 5000);
+    newKey = await web.waitForFunction((old) => yap.settings.key !== old && yap.settings.key, KEY, { timeout: 5000 }).then((h) => h.jsonValue(), () => null);
+    assert.equal(newKey && fp(newKey), saved, 'the web page saved the same new key');
+    // The device that was off: the old key and its token get it in, and it saves the new key.
+    const stale = await runNative(['--headless', '--server', BASE, '--token', staleToken, '--duration', '3']);
+    assert.match(stale, /ready, sid/, 'the old key plus a device token still connects');
+    assert.match(stale, new RegExp(`KEY saved ${saved}`), 'and saves the new key');
+    assert.doesNotMatch(stale, /BadKey/);
+    // Someone new with the old link: turned away ("The invite key changed…").
+    const late = await runNative(['--headless', '--server', BASE, '--name', `Late${RUN}`, '--password', TEST_PASSWORD, '--duration', '4']);
+    assert.match(late, /status BadKey/, 'the old link no longer signs anyone in (4003)');
+    assert.doesNotMatch(late, /ready, sid|PENDING/);
+    // With the new link they get in (the doorman, who saved it too, lets them in).
+    const fresh = await runNative(['--headless', '--server', BASE, '--name', `Late${RUN}`, '--password', TEST_PASSWORD, '--duration', '5'], newKey);
+    assert.match(fresh, /ready, sid/, 'the new link works');
+    evidence.mainLinkReset = { saved, memberSaved: true, webSaved: true, stale: stale.match(/KEY saved \S+/)?.[0], late: late.match(/status BadKey .*/)?.[0], fresh: true };
+  } finally {
+    // The server's own key again, whatever happened (connected apps get it the same way).
+    if (saved) {
+      const back = await fetch(`${BASE}/api/admin/main-key`, { method: 'DELETE', headers: { Authorization: `Bearer ${ADMIN}` } });
+      await member.waitFor(new RegExp(`KEY saved ${fp(KEY)}`), 5000).catch(() => {});
+      evidence.mainLinkReset = { ...evidence.mainLinkReset, back: back.status === 200 && member.lines.some((l) => l.includes(`KEY saved ${fp(KEY)}`)) };
+    }
+    member.child.kill();
+    await member.done;
+  }
+  assert.ok(evidence.mainLinkReset.back, 'the admin API put YAP_KEY back, and the member saved it');
 });
 
 await browser2.close();

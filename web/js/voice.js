@@ -3,8 +3,11 @@ import { negotiatedVoice, readCallStats } from './call-report.js';
 
 /**
  * RNNoise (the noise remover the desktop app uses too), as an AudioWorklet
- * with WebAssembly. Loaded only when someone turns it on. Assumes 48 kHz,
- * which is why the audio graph runs at 48 kHz.
+ * with WebAssembly: what Noise suppression uses wherever it can run. Where
+ * it can't (no WebAssembly, e.g. Safari's Lockdown Mode, or it didn't load),
+ * the browser's own noise suppression steps in. Loaded the first time the
+ * mic opens with Noise suppression on. Assumes 48 kHz, which is why the
+ * audio graph runs at 48 kHz.
  */
 const NOISE = new URL('../vendor/noise/', import.meta.url);
 let rnnoiseBinary = null;
@@ -44,8 +47,9 @@ async function rnnoiseNode(ctx) {
  *         or went), 'screen-local' (our share started, stopped or changed),
  *         'viewers' (who watches our share changed).
  *
- * The mic's path: getUserMedia (the browser's echo cancellation, noise
- * suppression, gain) → RNNoise if on → the transmit gate (gate-worklet.js,
+ * The mic's path: getUserMedia (the browser's echo cancellation and gain, and
+ * its noise suppression only where RNNoise can't run) → RNNoise (Noise
+ * suppression) → the transmit gate (gate-worklet.js,
  * on the audio thread: voice activity / push-to-talk with fades, a release
  * tail and a short pre-roll) → the track every peer sends. Mute and deafen
  * disable that track from here, so they hold even if the audio thread stalls.
@@ -163,6 +167,7 @@ export class Voice extends EventTarget {
   #ctx = null;
   #out = null; // playback graph for volume past 100%
   #denoise = null; // RNNoise node, when on
+  #rnnoiseBroken = false; // it failed to load here: the browser's noise suppression instead
   #source = null;
   #gate = null; // the transmit gate (AudioWorkletNode 'yap-gate')
   #gateSent = {}; // what the gate was last told
@@ -376,11 +381,24 @@ export class Voice extends EventTarget {
   }
 
   async #openMic() {
+    const ctx = this.#ctx;
+    if (!ctx) return;
     const music = settings.music;
+    // Noise suppression (off in music mode) = RNNoise wherever it runs. It's loaded before the
+    // mic opens, so the browser's own filter is asked for only where RNNoise can't run (never both).
+    let denoise = null;
+    if (!music && settings.noiseSuppression && !this.#rnnoiseBroken) {
+      try {
+        denoise = await rnnoiseNode(ctx);
+      } catch (err) {
+        if (this.#ctx !== ctx) return; // stopped meanwhile (that's not RNNoise's fault)
+        console.warn("RNNoise can't run here; using the browser's noise suppression", err);
+        this.#rnnoiseBroken = true;
+      }
+    }
     const audio = {
       echoCancellation: music ? false : settings.echoCancellation,
-      // RNNoise replaces the browser's own noise suppression (not both).
-      noiseSuppression: music || settings.rnnoise ? false : settings.noiseSuppression,
+      noiseSuppression: !music && settings.noiseSuppression && !denoise,
       autoGainControl: music ? false : settings.autoGain,
       channelCount: music ? 2 : 1,
       sampleRate: 48000,
@@ -397,48 +415,55 @@ export class Voice extends EventTarget {
         try {
           stream = await navigator.mediaDevices.getUserMedia({ audio });
         } catch (err2) {
+          denoise?.destroy();
           return this.#micFailed(err2);
         }
       } else {
+        denoise?.destroy();
         return this.#micFailed(err);
       }
     }
+    if (this.#ctx !== ctx) {
+      // Stopped (Settings closed, the call left) while the browser was asking: let the mic go again.
+      for (const track of stream.getTracks()) track.stop();
+      denoise?.destroy();
+      return;
+    }
     this.#releaseMic();
     this.rawStream = stream;
-    const ctx = this.#ctx;
+    this.#denoise = denoise;
     const channels = music ? 2 : 1;
-    this.#source = ctx.createMediaStreamSource(stream);
-    this.#gate = new AudioWorkletNode(ctx, 'yap-gate', {
-      numberOfInputs: 1,
-      numberOfOutputs: 1,
-      channelCount: channels,
-      channelCountMode: 'explicit',
-      outputChannelCount: [channels],
-      processorOptions: this.#gateSettings(),
-    });
-    this.#gateSent = this.#gateSettings();
-    this.#gate.port.onmessage = (e) => this.#onLevel(e.data);
-    this.#dest = ctx.createMediaStreamDestination();
-    this.#dest.channelCount = channels;
-    // Also into the speakers at zero volume, so the graph is always pulled.
-    const hush = ctx.createGain();
-    hush.gain.value = 0;
-    this.#gate.connect(this.#dest);
-    this.#gate.connect(hush).connect(ctx.destination);
-    this.#hush = hush;
-    this.rnnoise = false;
-    if (settings.rnnoise && !music) {
+    try {
+      this.#source = ctx.createMediaStreamSource(stream);
+      this.#gate = new AudioWorkletNode(ctx, 'yap-gate', {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        channelCount: channels,
+        channelCountMode: 'explicit',
+        outputChannelCount: [channels],
+        processorOptions: this.#gateSettings(),
+      });
+      this.#gateSent = this.#gateSettings();
+      this.#gate.port.onmessage = (e) => this.#onLevel(e.data);
+      this.#dest = ctx.createMediaStreamDestination();
+      this.#dest.channelCount = channels;
+      // Also into the speakers at zero volume, so the graph is always pulled.
+      const hush = ctx.createGain();
+      hush.gain.value = 0;
+      this.#gate.connect(this.#dest);
+      this.#gate.connect(hush).connect(ctx.destination);
+      this.#hush = hush;
       // mic → RNNoise → gate; voice activity hears the cleaned audio.
-      try {
-        this.#denoise = await rnnoiseNode(ctx);
-        this.#source.connect(this.#denoise).connect(this.#gate);
-        this.rnnoise = true;
-      } catch (err) {
-        console.warn('RNNoise unavailable; sending the plain mic', err);
-        this.#denoise = null;
-      }
+      if (denoise) this.#source.connect(denoise).connect(this.#gate);
+      else this.#source.connect(this.#gate);
+    } catch (err) {
+      // (Firefox, for one, won't connect a mic at another sample rate.) A half-built mic would sit
+      // there open and silent, and everything that checks `rawStream` would think it's fine.
+      console.warn("couldn't connect the microphone to the audio graph", err);
+      this.#releaseMic();
+      return this.#micFailed(err);
     }
-    if (!this.rnnoise) this.#source.connect(this.#gate);
+    this.rnnoise = Boolean(denoise);
     this.sendTrack = this.#dest.stream.getAudioTracks()[0];
     this.sendTrack.contentHint = music ? 'music' : 'speech';
     const raw = stream.getAudioTracks()[0];

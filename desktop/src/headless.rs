@@ -58,6 +58,8 @@ pub struct Args {
     pub add_link: Option<String>,
     /// Make a personal invite link with this label (prints `INVITE <link>`).
     pub make_invite: Option<String>,
+    /// Owner only: reset the main invite link once in (everyone connected logs `KEY saved …`).
+    pub reset_main_link: bool,
     /// Set the voice channel's quality for everyone (bits/s, or 0 = personal).
     pub channel_bitrate: Option<u32>,
     /// Reply (with `reply_body`) to the first message from someone else containing this.
@@ -248,6 +250,8 @@ async fn run_async(args: Args) -> i32 {
     // Sends the server asked us to slow down for / refused, and texts given back.
     let (mut send_retries, mut sends_refused) = (0usize, 0usize);
     let mut restored: Vec<String> = Vec::new();
+    // Whose OBS link listens in a voice channel without them (the greyed rows), as last logged.
+    let mut obs_rows = String::new();
 
     loop {
         tokio::select! {
@@ -305,6 +309,10 @@ async fn run_async(args: Args) -> i32 {
                             }
                             if let Some(label) = &args.make_invite {
                                 let _ = cmd.send(Cmd::CreateInvite(label.clone()));
+                            }
+                            if args.reset_main_link {
+                                let _ = cmd.send(Cmd::ResetMainLink);
+                                println!("{} resetting the main link", ts(start));
                             }
                             if let Some(p) = &args.ping {
                                 let _ = cmd.send(Cmd::Ping(p.clone()));
@@ -640,6 +648,12 @@ async fn run_async(args: Args) -> i32 {
                     println!("{} toggling mute", ts(start));
                     let _ = cmd.send(Cmd::ToggleMute);
                 }
+                // The greyed "<name>'s OBS is still listening" rows, when they change.
+                let rows = obs_listening_rows(&shared);
+                if rows != obs_rows {
+                    println!("{} OBSLISTEN {}", ts(start), if rows.is_empty() { "none" } else { rows.as_str() });
+                    obs_rows = rows;
+                }
                 // A refused message's text, which the window would put back in the message box.
                 for (channel, text) in std::mem::take(&mut shared.model.lock().composer_restore) {
                     println!("{} RESTORED #{channel} {text:?}", ts(start));
@@ -766,6 +780,20 @@ async fn run_async(args: Args) -> i32 {
         }
     }
     0
+}
+
+/// The greyed rows under each voice channel (`Model::obs_listening`):
+/// "Lounge: Rosa, Ada; Games: Ben", or empty.
+fn obs_listening_rows(shared: &Arc<core::Shared>) -> String {
+    let m = shared.model.lock();
+    let mut rows = Vec::new();
+    for c in m.channels.iter().filter(|c| c.is_voice()) {
+        let names: Vec<String> = m.obs_listening(&c.id).iter().map(|uid| m.user_name(uid)).collect();
+        if !names.is_empty() {
+            rows.push(format!("{}: {}", c.name, names.join(", ")));
+        }
+    }
+    rows.join("; ")
 }
 
 /// `--send-gif`: once /api/config arrives, search KLIPY and send the first hit.
