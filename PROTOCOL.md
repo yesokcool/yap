@@ -911,6 +911,8 @@ registering the transport-cc interceptor for video sections only, since
 webrtc-rs refuses an edited local description. A native client built on another stack must do the
 same, or native ↔ native calls pad again.)*
 
+A listen-only page (OBS) also adds `a=ptime:10` to its voice section.
+
 Also cap your own sender: `encodings[0].maxBitrate = <your setting>`,
 `priority`/`networkPriority = "high"`. Net effect: each direction runs at the
 lower of the two people's settings. Default 128 kbps; offer 64/96/128/256/510.
@@ -1050,6 +1052,20 @@ no chimes); while only the OBS link is there, the account's name in that
 channel **greyed out** (an in-between state, not a call member: no volume, no
 ring), with "<name>'s OBS is still listening". The OBS page itself says
 "Paused: waiting for <name> to join <channel>." while it can't listen.
+
+**Playing it.** The OBS page connects to everyone in the call except other
+OBS links (its own account included) and plays each straight from an
+`<audio>` element at full volume: no mic, gate, audio graph, per-person volume
+or limiter (OBS sets the volume). Every audio receiver asks for the shortest
+jitter buffer (`jitterBufferTarget = 0`, else `playoutDelayHint = 0`), and its
+descriptions add `a=ptime:10` to the voice section after the Opus fmtp:
+libwebrtc senders then make 10 ms Opus frames on that one connection (100
+packets/s, ~25 kbps more in headers); an app that ignores ptime keeps 20 ms,
+which still works. RED stays as negotiated (it measured no added delay). While
+it listens it also plays a 20 Hz hum at −60 dBFS: Chromium calls a page silent
+below −72.25 dBFS, and OBS's browser (CEF) then stops capturing it after a
+couple of seconds, cutting the start of the next words. Measured (headless
+Chromium, localhost): a click to the OBS page ~48 → ~38 ms.
 
 ### Keeping calls across reconnects
 

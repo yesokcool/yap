@@ -206,6 +206,15 @@ louder than that: every client plays at `gain × your volume` through a
 
 ## Gotchas & lessons
 
+- **OBS's browser stops capturing a quiet page.** CEF (OBS's browser source)
+  stops its audio capture ~2–4 s after Chromium marks the page silent (under
+  −72.25 dBFS for 2 s) and starts a new one at the next sound, cutting the
+  first words. A page that must stay captured plays a −60 dBFS 20 Hz hum.
+  Also: `jitterBufferTarget` is a floor, not a cap; a remote `a=ptime:10`
+  makes a libwebrtc sender use 10 ms Opus frames (RED included); in headless
+  Chromium a failed `getDisplayMedia` glitches every audio stream for the rest
+  of the session, and `--disable-audio-output` breaks WebAudio → WebRTC.
+
 - **An RTP check by payload type misses RED.** The impairment proxy treated
   only payload types 96–127 as RTP, so Chrome's RED (63) skipped the loss and
   every RED number looked perfect (2026-10-11). Tell RTCP apart by RFC 5761

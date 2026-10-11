@@ -11,6 +11,20 @@
  * enforces that too: PROTOCOL.md › Voice › OBS links in a call): otherwise
  * it says "Paused: waiting for <name> to join <channel>." and joins again by
  * itself as soon as its account is back.
+ *
+ * Straight through, with as little delay as it can (2026-10-11): it still
+ * connects to each person (voice is peer to peer), but that's all it takes
+ * from a call. No mic, no gate, no audio graph, no per-person volume or
+ * limiter: each person's sound plays from an <audio> element of its own, at
+ * full volume (OBS sets the volume). Every audio receiver asks for the shortest
+ * jitter buffer, and its descriptions ask for 10 ms packets (voice.js ›
+ * listenOnly). RED stays as negotiated: it measured no added delay. Who's
+ * speaking comes from the packets' own audio level (getSynchronizationSources),
+ * not from listening to the sound. Measured (headless Chromium, localhost):
+ * a click plays ~38 ms after it leaves its sender, from ~48 ms; a talker's
+ * first sound comes out ~18 ms sooner (92 ms from 110, always-on). While it
+ * listens it also keeps itself audible (keepAudible), so OBS never stops
+ * capturing it in a pause.
  */
 import { Connection } from './conn.js';
 import { Voice } from './voice.js';
@@ -29,6 +43,7 @@ const state = { sid: null, uid: null, users: new Map(), sessions: new Map(), cha
 const voice = new Voice({
   signal: (to, data) => conn.send({ t: 'signal', to, data }),
   uidOf: (sid) => state.sessions.get(sid)?.uid,
+  listenOnly: true,
 });
 // Like the app: the key in the subprotocol, or in the address when it has characters a subprotocol can't carry.
 const conn = new Connection(socketUrl(key), keyProtocols(key));
@@ -39,7 +54,50 @@ function note(text) {
   $('note').textContent = text ?? '';
 }
 
-/** Mute everyone but `only` (when set). */
+/**
+ * Keeps the page audible while it listens. Chromium calls a page silent once
+ * what it plays stays under -72.25 dBFS (its kSilenceThresholdDBFS) for 2 s,
+ * and OBS's browser (CEF) stops capturing the page's sound 2 s after that,
+ * then starts again at the next sound: in OBS only, the first moment of
+ * everyone's first words after a pause came out cut and glitchy (2026-10-11).
+ * Pauses in a call are that quiet (encoded silence from a closed gate, or
+ * noise suppression: measured -84 to -94 dBFS). So the page also plays a
+ * 20 Hz hum at -60 dBFS, far below what anyone can hear, from an <audio>
+ * element of its own (no audio graph), looping a 1 s WAV that ends where it
+ * starts. Only while it listens: Paused lets CEF stop.
+ */
+function keepAudible() {
+  const rate = 48000;
+  const amp = 32767 * 10 ** (-60 / 20) * Math.SQRT2; // -60 dBFS RMS
+  const wav = new DataView(new ArrayBuffer(44 + rate * 2));
+  const ascii = (at, s) => [...s].forEach((c, i) => wav.setUint8(at + i, c.charCodeAt(0)));
+  ascii(0, 'RIFF');
+  wav.setUint32(4, 36 + rate * 2, true);
+  ascii(8, 'WAVEfmt ');
+  wav.setUint32(16, 16, true);
+  wav.setUint16(20, 1, true); // PCM
+  wav.setUint16(22, 1, true); // mono
+  wav.setUint32(24, rate, true);
+  wav.setUint32(28, rate * 2, true);
+  wav.setUint16(32, 2, true);
+  wav.setUint16(34, 16, true);
+  ascii(36, 'data');
+  wav.setUint32(40, rate * 2, true);
+  for (let i = 0; i < rate; i++) wav.setInt16(44 + i * 2, Math.round(amp * Math.sin((2 * Math.PI * 20 * i) / rate)), true);
+  const hum = new Audio(URL.createObjectURL(new Blob([wav], { type: 'audio/wav' })));
+  hum.id = 'keep-audible';
+  hum.loop = true;
+  document.body.append(hum);
+  return {
+    element: hum,
+    on: () => hum.paused && hum.play().catch(() => {}),
+    off: () => hum.pause(),
+  };
+}
+const hum = keepAudible();
+globalThis.yapObs.hum = hum.element;
+
+/** Mute everyone but `only` (when set): their <audio> element, not a gain. */
 function applyOnly() {
   if (!only) return;
   for (const sid of voice.peers.keys()) {
@@ -51,9 +109,13 @@ function applyOnly() {
 /** Not listening: its account isn't in the channel (and wasn't for the last 5 minutes). */
 function pause() {
   state.paused = true;
+  hum.off();
   const name = state.users.get(state.uid)?.name ?? 'your account';
   note(`Paused: waiting for ${name} to join ${state.channels.get(channelId)?.name ?? 'the voice channel'}.`);
 }
+
+/** Someone with a voice to play: not another OBS link (one per person on a stream: they'd only connect to each other for silence). */
+const talks = (session) => session.client !== 'obs';
 
 /** Its account is in the channel (not just another OBS link of theirs). */
 const accountIn = () => [...state.sessions.values()].some((s) => s.uid === state.uid && s.client !== 'obs' && s.voice?.channelId === channelId);
@@ -85,7 +147,7 @@ async function join() {
     const ice = await fetch('/api/ice', { headers: { 'X-Yap-Key': key } })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((j) => j.iceServers, () => FALLBACK_ICE);
-    await voice.prepare(ice, { listenOnly: true });
+    await voice.prepare(ice);
     conn.send({ t: 'voice.join', channelId, muted: true, deafened: false });
   } finally {
     state.joining = false;
@@ -123,7 +185,8 @@ function handle(msg) {
         if (msg.channelId === channelId && !state.inCall) {
           state.inCall = true;
           state.paused = false;
-          voice.enter([...state.sessions.values()].filter((x) => x.sid !== state.sid && x.voice?.channelId === channelId).map((x) => x.sid));
+          hum.on(); // (before anyone's voice arrives, so OBS is already capturing)
+          voice.enter([...state.sessions.values()].filter((x) => x.sid !== state.sid && x.voice?.channelId === channelId && talks(x)).map((x) => x.sid));
           note('');
         } else if (!msg.channelId && state.inCall) {
           // Its account didn't come back in time: the server took it out.
@@ -140,7 +203,7 @@ function handle(msg) {
     }
     case 'signal': {
       const from = state.sessions.get(msg.from);
-      if (state.inCall && from?.voice?.channelId === channelId) voice.handleSignal(msg.from, msg.data);
+      if (state.inCall && from?.voice?.channelId === channelId && talks(from)) voice.handleSignal(msg.from, msg.data);
       return;
     }
     case 'error':

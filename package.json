@@ -33,5 +33,5 @@
     "typescript": "^7.0.2",
     "wrangler": "^4.147.0"
   },
-  "version": "0.44.0"
+  "version": "0.45.0"
 }

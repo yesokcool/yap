@@ -133,6 +133,24 @@ function preferAudio(transceiver, { red }) {
 /** `?red=0` in the page's address: the voice goes as plain Opus (for measuring what RED does; not a setting). */
 const RED_DEFAULT = !/(?:^\?|&)red=0(?:&|$)/.test(globalThis.location?.search ?? '');
 
+/**
+ * Ask a receiver for the shortest jitter buffer it can do (listen-only pages: an OBS link only
+ * plays the call, so it wants the sound as soon as it can have it). `jitterBufferTarget` (ms) is
+ * in Chrome since 124, so in OBS's browser source (Chromium 127); older Chromes only had
+ * `playoutDelayHint` (s). It's the buffer's floor, not a cap: on a jittery network libwebrtc still
+ * holds as much as it needs. (Measured on a clean network: no difference from leaving it unset,
+ * since libwebrtc already sits at its floor there, ~30 ms held for a 20 ms target. It's asked for
+ * anyway, so nothing (a default, an A/V sync) can raise that floor for an OBS link.)
+ */
+function shortestBuffer(receiver) {
+  try {
+    if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 0;
+    else if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0;
+  } catch (err) {
+    console.warn('jitter buffer target not applied', err);
+  }
+}
+
 export class Voice extends EventTarget {
   mySid = null;
   iceServers = [];
@@ -191,12 +209,18 @@ export class Voice extends EventTarget {
   /** Sharers whose screen you asked to see. */
   #watching = new Set();
 
-  constructor({ signal, uidOf, resumable = () => false, fetchIce = null }) {
+  /**
+   * `listenOnly` (an OBS link): straight through. Never a mic or an audio graph; each person plays
+   * from their own <audio> element at full volume (no per-person gain or limiter: OBS sets the
+   * volume), and every connection asks for the shortest jitter buffer and 10 ms packets.
+   */
+  constructor({ signal, uidOf, resumable = () => false, fetchIce = null, listenOnly = false }) {
     super();
     this.signal = signal; // (toSid, data) => void
     this.uidOf = uidOf; // (sid) => uid
     this.resumable = resumable; // (sid) => does that session keep calls across reconnects?
     this.fetchIce = fetchIce; // async () => iceServers (fresh relay credentials for ICE restarts)
+    this.listenOnly = listenOnly;
     navigator.mediaDevices?.addEventListener?.('devicechange', () => {
       clearTimeout(this.#deviceTimer);
       this.#deviceTimer = setTimeout(() => this.#devicesChanged(), 500); // they arrive in bursts
@@ -358,10 +382,10 @@ export class Voice extends EventTarget {
     return this.#ctx;
   }
 
-  /** Get the mic and audio graph ready. Call from a user gesture. */
-  /** `listenOnly`: never open the mic (OBS links). */
-  async prepare(iceServers, { listenOnly = false } = {}) {
+  /** Get the mic and audio graph ready. Call from a user gesture. (Listen-only: just the ICE servers.) */
+  async prepare(iceServers) {
     if (iceServers) this.iceServers = iceServers;
+    if (this.listenOnly) return;
     if (!this.#ctx) {
       this.#ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
       this.#ctx.onstatechange = () => {
@@ -371,7 +395,7 @@ export class Voice extends EventTarget {
       await this.#ctx.audioWorklet.addModule(new URL('./gate-worklet.js', import.meta.url));
     }
     await this.#ctx.resume();
-    if (!this.rawStream && !listenOnly) await this.#openMic();
+    if (!this.rawStream) await this.#openMic();
   }
 
   /** Re-open the mic after a device or processing change. */
@@ -1072,6 +1096,7 @@ class Peer {
     this.applyOutput();
 
     this.pc.ontrack = ({ track, transceiver }) => {
+      if (voice.listenOnly && track.kind === 'audio') shortestBuffer(transceiver.receiver);
       // The voice is always the first audio transceiver (some clients send it
       // with a stream id, so that can't tell them apart); anything else — the
       // video, a tab's audio — is a screen share.
@@ -1106,7 +1131,13 @@ class Peer {
       // Adding the transceiver fires negotiationneeded → we send the offer (RED first, then Opus).
       const voiceTransceiver = this.pc.addTransceiver(voice.outTrack ?? 'audio', { direction: 'sendrecv' });
       preferAudio(voiceTransceiver, { red: voice.red });
+      if (voice.listenOnly) shortestBuffer(voiceTransceiver.receiver);
     }
+  }
+
+  /** How our descriptions are tuned (tuneOpus): a listen-only page asks for 10 ms packets. */
+  get #tuning() {
+    return this.voice.listenOnly ? { ptime: 10 } : {};
   }
 
   /**
@@ -1183,7 +1214,7 @@ class Peer {
       this.#makingOffer = true;
       const offer = await this.pc.createOffer();
       if (this.pc.signalingState !== 'stable') return;
-      await this.pc.setLocalDescription({ type: 'offer', sdp: tuneOpus(offer.sdp) });
+      await this.pc.setLocalDescription({ type: 'offer', sdp: tuneOpus(offer.sdp, this.#tuning) });
       this.send({ sdp: this.pc.localDescription.toJSON() });
     } catch (err) {
       console.warn('offer failed', err);
@@ -1215,7 +1246,7 @@ class Peer {
             if (t.receiver.track.kind === 'audio') preferAudio(t, { red: t === tr && this.voice.red });
           }
           const answer = await this.pc.createAnswer();
-          await this.pc.setLocalDescription({ type: 'answer', sdp: tuneOpus(answer.sdp) });
+          await this.pc.setLocalDescription({ type: 'answer', sdp: tuneOpus(answer.sdp, this.#tuning) });
           this.send({ sdp: this.pc.localDescription.toJSON() });
         }
         this.applySenderParams();
@@ -1331,6 +1362,13 @@ class Peer {
    * followed by a limiter so a boosted shout can't clip or blast your ears.
    */
   applyOutput({ force = false } = {}) {
+    if (this.voice.listenOnly) {
+      // Straight through: the element plays it as it comes, at full volume, to the default output
+      // (OBS captures the page's sound and sets the volume itself). Off = `&only=` someone else.
+      this.audio.volume = 1;
+      this.audio.muted = this.voice.deafened || (this.proximity ?? 1) === 0;
+      return;
+    }
     const uid = this.voice.uidOf(this.sid);
     const level = Math.max(0, (settings.volumes[uid] ?? 1) * (this.proximity ?? 1));
     if (level > 1.001 && this.audio.srcObject) {
@@ -1486,8 +1524,16 @@ const TWCC = /^a=(?:rtcp-fb:\d+ transport-cc|extmap:\d+(?:\/\w+)? http:\/\/www\.
  * when it's lossy) and gains nothing, since Opus runs at a fixed target.
  * Video (screen sharing) keeps it. An answer can't add back what the offer
  * left out, so this works whoever offers.
+ *
+ * `ptime` (a listen-only page: 10): ask for packets that short on the voice
+ * (`a=ptime`). The other side's encoder then makes 10 ms Opus frames instead of
+ * 20 ms (libwebrtc follows the far side's ptime; an app that doesn't just keeps
+ * 20 ms): sound waits for a shorter frame before it goes out. Measured Ada →
+ * her OBS page (headless Chromium, 16 runs in pairs): ~11 ms sooner (median
+ * ~48 → ~38 ms; sooner in 15 of 16), for 100 packets a second instead of 50
+ * (~25 kbps more in headers, on that one connection).
  */
-export function tuneOpus(sdp) {
+export function tuneOpus(sdp, { ptime = null } = {}) {
   const eol = sdp.includes('\r\n') ? '\r\n' : '\n';
   const [head, ...sections] = sdp.split(`${eol}m=`);
   let audio = 0;
@@ -1498,6 +1544,7 @@ export function tuneOpus(sdp) {
     return tuneAudio(body, eol, {
       'sprop-stereo': (voice ? settings.music : sending) ? '1' : '0',
       maxaveragebitrate: String(voice ? callBitrate() : screenAudioBitrate()),
+      ptime: voice ? ptime : null,
     });
   });
   return [head, ...tuned].join(`${eol}m=`);
@@ -1527,6 +1574,12 @@ function tuneAudio(body, eol, own) {
   } else {
     const rtpmap = lines.findIndex((line) => line.toLowerCase().startsWith(`a=rtpmap:${pt} opus/48000`));
     lines.splice(rtpmap + 1, 0, `a=fmtp:${pt} ${join(want)}`);
+  }
+  if (own.ptime) {
+    // One a=ptime, right after the Opus parameters.
+    const kept = lines.filter((line) => !line.startsWith('a=ptime:'));
+    kept.splice(kept.findIndex((line) => line.startsWith(`a=fmtp:${pt} `)) + 1, 0, `a=ptime:${own.ptime}`);
+    return kept.join(eol);
   }
   return lines.join(eol);
 }

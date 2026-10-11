@@ -1,6 +1,15 @@
 {
-  "current": "0.44.0",
+  "current": "0.45.0",
   "releases": [
+    {
+      "version": "0.45.0",
+      "date": "2026-10-11",
+      "title": "A cleaner OBS link",
+      "items": [
+        "In OBS, the first words after a pause no longer come out cut or glitchy (OBS's browser stopped listening during silence; the OBS link now keeps it listening with an inaudible tone).",
+        "The OBS link plays the call with less delay: straight through, with the shortest buffer and smaller packets."
+      ]
+    },
     {
       "version": "0.44.0",
       "date": "2026-10-11",
