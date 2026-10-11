@@ -37,8 +37,11 @@ pub struct Args {
     /// Write the call report here at the end (the call is over by then: "you quit Yap").
     pub call_report: Option<String>,
     pub approve_all: bool,
-    /// Sign in with name + PIN (with `signup`: create the account).
+    /// Sign in with name + password (`--password`, or `--pin` as before; an
+    /// old 6-digit PIN signs in too). With `signup`: create the account.
     pub pin: Option<String>,
+    /// Once in: change the password to this (the sign-in one as the current).
+    pub set_password: Option<String>,
     pub signup: bool,
     pub token: Option<String>,
     /// Play through the default speakers instead of discarding (device test).
@@ -187,7 +190,7 @@ async fn run_async(args: Args) -> i32 {
     let name = cfg.name.clone();
     let shared = core::Shared::new(cfg, config_path, Arc::new(|| {}));
     if args.pin.is_none() && args.token.is_none() {
-        eprintln!("--pin or --token is needed (accounts sign in with a name and PIN)");
+        eprintln!("--password or --token is needed (accounts sign in with a name and password)");
         return 2;
     }
     {
@@ -255,6 +258,17 @@ async fn run_async(args: Args) -> i32 {
                         println!("{} ready, sid {sid}", ts(start));
                         if !did_ready {
                             did_ready = true;
+                            {
+                                // What we signed in with, and whether the "Choose a password" prompt would show.
+                                let m = shared.model.lock();
+                                let prompt = m.password_prompt().map(|r| format!("{r:?}")).unwrap_or_else(|| "none".into());
+                                println!("{} ACCOUNT uid={} secret={} weak={} prompt={prompt} role={}", ts(start), m.config.uid, m.secret_kind, m.weak_pin, m.users.get(&m.config.uid).map(|u| u.role.as_str()).unwrap_or("?"));
+                            }
+                            if let Some(new) = &args.set_password {
+                                let current = args.pin.clone();
+                                let _ = cmd.send(Cmd::SetPassword { password: new.clone(), current });
+                                println!("{} changing the password", ts(start));
+                            }
                             let (text_id, voice_id) = {
                                 let m = shared.model.lock();
                                 let find = |want: &str, kind: &str| m.channels.iter()
@@ -405,15 +419,19 @@ async fn run_async(args: Args) -> i32 {
                         if *s == Status::Pending {
                             println!("{} PENDING uid {}", ts(start), shared.model.lock().config.uid);
                         }
-                        // `--pin` without `--signup`: sign in, or create the account if there's none.
-                        if *s == Status::SignIn
+                    }
+                    // `--password` without `--signup`: sign in, or create the account if there's none
+                    // (a wrong name or password both say `bad_login`; signing up then finds out which).
+                    CoreEvent::Error { code, message } => {
+                        println!("{} {ev:?}", ts(start));
+                        if code == "bad_login"
                             && !args.signup
                             && !tried_signup
+                            && shared.model.lock().status == Status::SignIn
                             && let Some(pin) = &args.pin
-                            && d.contains("Wrong name or PIN")
                         {
                             tried_signup = true;
-                            println!("{} no such account; signing up", ts(start));
+                            println!("{} no such account ({message}); signing up", ts(start));
                             let (name, color) = {
                                 let m = shared.model.lock();
                                 (m.config.name.clone(), m.config.color.clone())

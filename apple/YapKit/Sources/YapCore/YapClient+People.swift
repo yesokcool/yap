@@ -106,10 +106,20 @@ extension YapClient {
         sessions.removeValue(forKey: sid)
     }
 
+    /// Every session in a voice channel, OBS links included: the call
+    /// connects to all of them (an OBS link has to hear it). What people see
+    /// is `voiceRoster(in:)`.
     public func voiceSessions(in channelId: String) -> [Session] {
         sessions.values.filter { $0.voice?.channelId == channelId }.sorted { a, b in
             (users[a.uid]?.name ?? "", a.sid) < (users[b.uid]?.name ?? "", b.sid)
         }
+    }
+
+    /// Who shows in a voice channel (its rows, the call sheet, every count):
+    /// everyone but OBS links, which listen without showing up (the web's
+    /// `s.client !== 'obs'`).
+    public func voiceRoster(in channelId: String) -> [Session] {
+        voiceSessions(in: channelId).filter { !$0.isListener }
     }
 
     /// Everyone here, A–Z. There's no online/offline (PROTOCOL.md ›
@@ -132,7 +142,8 @@ extension YapClient {
     public func deny(_ uid: String) { send(.memberDeny(uid: uid)) }
     public func ban(_ uid: String) { send(.memberBan(uid: uid)) }
     public func setRole(_ uid: String, mod: Bool) { send(.memberRole(uid: uid, role: mod ? "mod" : "member")) }
-    public func resetPin(for uid: String) { send(.memberResetPin(uid: uid)) }
+    /// Owner/mods: a temporary password for them comes back as `pinReset`.
+    public func resetPassword(for uid: String) { send(.memberResetPin(uid: uid)) }
 
     public func updateProfile(name: String? = nil, color: String? = nil) {
         if let name { credentials.name = name }

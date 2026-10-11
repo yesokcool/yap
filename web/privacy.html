@@ -30,7 +30,7 @@
     <div class="log-window">
       <div class="title-bar"><img class="title-icon" src="icon.svg" alt=""><span class="title-text">Privacy</span></div>
       <div class="log-body">
-        <p class="updated">Last updated 6 October 2026</p>
+        <p class="updated">Last updated 11 October 2026</p>
         <p>Yap is a small chat for a group of friends, run by one of them on their own server. It's free, open-source software, not a business: there are no ads, no analytics, no tracking, and nothing is ever sold. This page explains in plain words what Yap keeps and who can see it. It describes Yap as it comes; whoever runs this server can tell you if they changed anything.</p>
 
         <h2>The short version</h2>
@@ -55,12 +55,13 @@
           <tr><td>Your screen, when you share it (and its sound, while Share sound is on)</td><td>Only the people in your voice channel who choose to watch it, sent directly between devices; never stored</td></tr>
           <tr><td>That you're typing (not in your Personal space)</td><td>Every member, for a few seconds</td></tr>
           <tr><td>Your Personal space</td><td>Only you (and, unless encrypted, the server)</td></tr>
+          <tr><td>Someone waiting to be let in: their name, picture and whose invite link they used</td><td>The owner and mods (they let people in, and get a push about it)</td></tr>
           <tr><td>The mod log (who let someone in, banned, made an invite…)</td><td>Every member; it never contains message text</td></tr>
         </table>
 
         <h2>What Yap stores</h2>
         <ul>
-          <li><b>Your account:</b> name, color, picture, role, and your PIN as a salted, scrambled hash (nobody can read your PIN back, not even whoever runs the server).</li>
+          <li><b>Your account:</b> name, color, picture, role, and your password as a salted, scrambled hash (nobody can read your password back, not even whoever runs the server). An account from before passwords may still have a 6-digit PIN, stored the same way, until you choose a password.</li>
           <li><b>Your devices:</b> a sign-in token for each device (stored scrambled), what kind of browser or app it is (like "Chrome on Windows"), and when it was added and last connected. That's for account security: you can see this list in Settings › Account, and nobody else can.</li>
           <li><b>What you post:</b> messages, pictures, reactions (doodle reactions too), poll votes, custom emojis, drawings, soundboard clips, and earlier versions of messages you edited (until you delete the message). Everyone can see who voted for what in a poll.</li>
           <li><b>Small extras:</b> your Space character and where you last stood, your When's good times (wiped weekly) and hangs you planned, your away message (until it ends), your join chime, invite links you made (only a scrambled copy of the link), and your notification settings — including your quiet hours and the time zone they're in, so pushes stay quiet at your night.</li>

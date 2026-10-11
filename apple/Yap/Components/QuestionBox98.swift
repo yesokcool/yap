@@ -30,24 +30,18 @@ struct QuestionBox98: View {
                             .foregroundStyle(Theme.text)
                             .fixedSize(horizontal: false, vertical: true)
                         if let value = question.value {
-                            // Something to pass on: in a sunken box to select, with Copy beside it.
-                            HStack(spacing: 6) {
-                                Text(value)
-                                    .font(.system(size: 17, weight: .bold, design: .monospaced))
-                                    .foregroundStyle(Theme.text)
-                                    .textSelection(.enabled)
-                                    .speechSpellsOutCharacters()
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 3)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(Theme.window)
-                                    .overlay(Bevel(style: .sunken))
-                                Button(copied ? "Copied" : question.copyLabel) {
-                                    copyToPasteboard(value)
-                                    copied = true
+                            // Something to pass on: in a sunken box to select, with Copy beside
+                            // it, or under it when the whole value wouldn't fit beside (a
+                            // temporary password is longer than the old PIN was): never cut short.
+                            ViewThatFits(in: .horizontal) {
+                                HStack(spacing: 6) {
+                                    valueBox(value)
+                                    copyButton(value)
                                 }
-                                .buttonStyle(.win98)
-                                .fixedSize()
+                                VStack(alignment: .trailing, spacing: 6) {
+                                    valueBox(value)
+                                    copyButton(value)
+                                }
                             }
                         }
                         if let field = question.field {
@@ -90,6 +84,28 @@ struct QuestionBox98: View {
         .onAppear { if question.field != nil { typing = true } }
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
+    }
+
+    private func valueBox(_ value: String) -> some View {
+        Text(value)
+            .font(.system(size: 17, weight: .bold, design: .monospaced))
+            .foregroundStyle(Theme.text)
+            .textSelection(.enabled)
+            .speechSpellsOutCharacters()
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.window)
+            .overlay(Bevel(style: .sunken))
+    }
+
+    private func copyButton(_ value: String) -> some View {
+        Button(copied ? "Copied" : question.copyLabel) {
+            copyToPasteboard(value)
+            copied = true
+        }
+        .buttonStyle(.win98)
+        .fixedSize()
     }
 
     /// Return presses the default button (the Mac; iPad keyboards).

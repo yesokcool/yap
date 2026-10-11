@@ -34,8 +34,9 @@ import {
   type ServerMessage,
   type Session,
   type User,
+  type WeakReason,
 } from './protocol';
-import { devicesOf, onHandoff, onHello, onObsCreate, onObsRevoke, onResetPin, onRevokeDevice, onSetPin, onSignOut, onSignOutOthers, onVaultSet, resetPin, vaultOf } from './hub-accounts';
+import { WAITING, WEAK, devicesOf, onHandoff, onHello, onObsCreate, onObsRevoke, onResetPin, onRevokeDevice, onSetPin, onSignOut, onSignOutOthers, onVaultSet, resetPin, setTestPin, vaultOf } from './hub-accounts';
 import { DB_LIMIT_BYTES, addChannels, addEmoji, archiveChannels, checkInvite, invites, links, mergeUsers, modLog, onApprove, onBan, onChannelArchive, onChannelBitrate, onChannelCreate, onClaimOwner, onEmojiDelete, onEmojiRename, onInviteCreate, onInviteRevoke, onLinkAdd, onLinkRemove, onRole, onStats, setRole, stats, unarchiveChannels, unmergeUser, type AddEmojiResult } from './hub-admin';
 import { exportPage, importBackup } from './hub-backup';
 import { addDrawing, gallery, onDrawClear, onDrawSeg, onDrawState, onDrawStroke, onDrawUndo, onDrawWipe } from './hub-draw';
@@ -178,7 +179,7 @@ export class Hub extends DurableObject<Env> {
     }
     const me = ws.deserializeAttachment() as Attachment;
     try {
-      if (me.pending) throw new ClientError('pending', 'Waiting for someone to let you in.');
+      if (me.pending) throw new ClientError('pending', WAITING);
       if (me.listen && !LISTEN_ALLOWED.has(msg.t)) throw new ClientError('forbidden', 'This is a listen-only (OBS) link.');
       if (msg.t === 'hello') return await onHello(this, ws, me, msg);
       if (!me.hello) throw new ClientError('no_hello', 'Send hello first.');
@@ -304,7 +305,8 @@ export class Hub extends DurableObject<Env> {
           return this.onCursor(ws, me, msg);
         case 'notify.settings': return onNotifySettings(this, ws, me, msg);
         case 'ping':
-          this.limit(me.uid, 'ping', 2, 1 / 30);
+          // One a minute per person (the maintainer, 2026-10-11).
+          if (!this.allow(me.uid, 'ping', 1, 1 / 60)) throw new ClientError('slow_down', 'You can ping again in a minute.');
           return onPing(this, me, msg);
         case 'draw.state': return onDrawState(this, ws);
         case 'draw.gallery': return this.send(ws, { t: 'draw.gallery', gallery: gallery(this) });
@@ -393,7 +395,8 @@ export class Hub extends DurableObject<Env> {
       users: this.users(),
       sessions: [...this.sessions().filter((s) => s.voice || s.view || s.watching), toSession(updated)],
       emojis: this.emojis(),
-      pending: this.pendingUsers(),
+      // The waiting room is for the owner and mods (they let people in); everyone else gets [].
+      pending: this.isMod(me.uid) && !me.listen ? this.pendingUsers() : [],
       build: BUILD,
       ...(this.env.YAP_KEY && !me.listen ? { key: this.env.YAP_KEY } : {}),
       links: links(this),
@@ -409,11 +412,18 @@ export class Hub extends DurableObject<Env> {
     if (this.isNewMember(me.uid)) this.broadcast({ t: 'user', user: this.user(me.uid)! }, ws);
   }
 
-  /** Whether you have a PIN, whether it's guessable (known from your last sign-in) and PIN vs password. One read. */
-  private secretInfo(uid: string): { hasPin: boolean; weakPin?: boolean; secretKind?: 'pin' | 'password' } {
+  /**
+   * Whether you have a password, PIN vs password, and whether to ask you once to
+   * choose a (better) one: an old PIN, a guessable password (known from your
+   * last sign-in) or a temporary one from a reset (users.weak_secret). One read.
+   */
+  private secretInfo(uid: string): { hasPin: boolean; weakPin?: boolean; weakReason?: WeakReason; secretKind?: 'pin' | 'password' } {
     const row = this.sql.exec<{ weak_secret: number | null; secret_kind: string | null; pin_hash: string | null }>('SELECT weak_secret, secret_kind, pin_hash FROM users WHERE id = ?', uid).toArray()[0];
     if (!row?.pin_hash) return { hasPin: false };
-    return { hasPin: true, ...(row.weak_secret ? { weakPin: true } : {}), secretKind: row.secret_kind === 'password' ? 'password' : 'pin' };
+    // (No secret_kind: a PIN from before the column existed.)
+    const secretKind = row.secret_kind === 'password' ? 'password' : 'pin';
+    const weakReason: WeakReason | null = secretKind === 'pin' ? 'pin' : row.weak_secret === WEAK.temporary ? 'temporary' : row.weak_secret ? 'guessable' : null;
+    return { hasPin: true, ...(weakReason ? { weakPin: true, weakReason } : {}), secretKind };
   }
 
   private isNewMember(uid: string): boolean {
@@ -625,6 +635,10 @@ export class Hub extends DurableObject<Env> {
   // so the Worker's stub keeps calling these on Hub.
   async resetPin(uid: string) {
     return resetPin(this, uid);
+  }
+
+  async setTestPin(uid: string, pin: string) {
+    return setTestPin(this, uid, pin);
   }
 
   async addDrawing(input: { sid: string; ut: string; media: string }): Promise<{ ok: boolean; drawing?: SavedDrawing; message?: string }> {

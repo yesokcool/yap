@@ -154,9 +154,9 @@ pub struct Model {
     pub token: Option<String>,
     /// What the next hello should be when there's no token.
     pub auth: Option<Auth>,
-    /// Legacy account without a PIN: nudge to set one.
+    /// An account with no password at all (`ready.needsPin`): nudge to set one.
     pub needs_pin: bool,
-    /// A temporary PIN we reset for someone (owner/mod): (name, pin).
+    /// A temporary password we reset for someone (owner/mod): (name, password).
     pub pin_reset: Option<(String, String)>,
     /// Sidebar Places from the server (`ready.links` / `links`); None = not sent (older server).
     pub links: Option<Vec<Link>>,
@@ -180,9 +180,17 @@ pub struct Model {
     pub vault_error: Option<String>,
     /// Bumped when a vault operation finishes (ok: `vault_error` is None).
     pub vault_seq: u64,
-    /// Your PIN is easy to guess (a gentle "change it" bar); "pin" or "password".
+    /// `ready.weakPin`: you signed in with an old PIN, a guessable password or
+    /// a temporary one (the "Choose a password" prompt); `ready.weakReason`,
+    /// which of those (None from an older server); and `ready.secretKind`,
+    /// "pin" or "password".
     pub weak_pin: bool,
+    pub weak_reason: Option<WeakReason>,
     pub secret_kind: String,
+    /// Bumped when the server answers a password change (`account` or an
+    /// error about `account.pin`); the error, if it was one.
+    pub password_seq: u64,
+    pub password_error: Option<String>,
     /// Settings › Account: your signed-in devices (once asked).
     pub devices: Option<Vec<crate::protocol::Device>>,
     /// "New sign-in: …. Not you?" until dismissed.
@@ -389,10 +397,41 @@ pub struct SpaceModel {
     pub gallery_loaded: bool,
 }
 
+/// How the next hello signs in. `pin` is the wire's name for the password
+/// (an old 6-digit PIN still works for signing in).
 #[derive(Clone, Debug)]
 pub enum Auth {
     Login { name: String, pin: String },
     Signup { name: String, pin: String, color: String },
+}
+
+/// Why the "Choose a password" prompt shows (`ready.weakReason`): its words
+/// differ, and Later puts off each one on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WeakReason {
+    /// Still on an old 6-digit PIN.
+    Pin,
+    /// Signed in with a temporary password from an owner/mod reset.
+    Temporary,
+    /// A password that's easy to guess (set before the rules got stricter).
+    Guessable,
+}
+
+impl WeakReason {
+    /// The wire's word (`ready.weakReason`), also what Later saves in the config.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WeakReason::Pin => "pin",
+            WeakReason::Temporary => "temporary",
+            WeakReason::Guessable => "guessable",
+        }
+    }
+
+    /// `ready.weakReason`; None for anything else (a newer server's new reason
+    /// falls back like an older server's missing one).
+    pub fn from_wire(s: &str) -> Option<Self> {
+        [WeakReason::Pin, WeakReason::Temporary, WeakReason::Guessable].into_iter().find(|r| r.as_str() == s)
+    }
 }
 
 impl Model {
@@ -462,7 +501,10 @@ impl Model {
             vault_error: None,
             vault_seq: 0,
             weak_pin: false,
+            weak_reason: None,
             secret_kind: "pin".into(),
+            password_seq: 0,
+            password_error: None,
             devices: None,
             signin_alert: None,
             search: None,
@@ -659,6 +701,20 @@ impl Model {
         everyone || uids.contains(&self.config.uid)
     }
 
+    /// The "Choose a password" prompt, and why (PROTOCOL.md › Identity): with
+    /// `ready.weakPin`, for `ready.weakReason` (an older server doesn't say: an
+    /// old PIN if that's what you signed in with, else a guessable password),
+    /// unless Later put that reason off on this device. Each reason is put off
+    /// on its own, so a reset's temporary password still asks after a PIN's
+    /// prompt was put off.
+    pub fn password_prompt(&self) -> Option<WeakReason> {
+        if !self.weak_pin || self.needs_pin {
+            return None;
+        }
+        let reason = self.weak_reason.unwrap_or(if self.secret_kind == "pin" { WeakReason::Pin } else { WeakReason::Guessable });
+        (!self.config.password_later.iter().any(|r| r == reason.as_str())).then_some(reason)
+    }
+
     /// Are we the owner or a mod (delete anyone's messages, ban, cancel any hang…)?
     pub fn am_moderator(&self) -> bool {
         self.users.get(&self.config.uid).is_some_and(|u| u.role == "owner" || u.role == "mod")
@@ -666,6 +722,15 @@ impl Model {
 
     pub fn user_name(&self, uid: &str) -> String {
         self.users.get(uid).map(|u| u.name.clone()).unwrap_or_else(|| "Unknown".into())
+    }
+
+    /// Who shows under a voice channel: everyone in it but OBS links, which
+    /// listen without showing up (no row, no chimes; the call still connects
+    /// to them, and the call report names them). A–Z.
+    pub fn voice_members(&self, channel_id: &str) -> Vec<&Session> {
+        let mut members: Vec<&Session> = self.sessions.values().filter(|s| !s.is_obs() && s.voice.as_ref().is_some_and(|v| v.channel_id == channel_id)).collect();
+        members.sort_by_cached_key(|s| self.user_name(&s.uid).to_lowercase());
+        members
     }
 
     pub fn emojis_by_name(&self) -> HashMap<String, Emoji> {
@@ -797,5 +862,85 @@ mod draw_tests {
         assert_eq!(d.wipe(0), 2);
         assert_eq!(d.strokes.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["d"]);
         assert_eq!(d.wipe(0), 0, "an empty layer stays empty");
+    }
+}
+
+#[cfg(test)]
+mod password_tests {
+    use super::*;
+
+    /// The prompt (PROTOCOL.md › Identity): only with `ready.weakPin`, never
+    /// for an account with no password at all (it has its own bar), in the
+    /// words `ready.weakReason` picks, and Later puts off one reason at a time.
+    #[test]
+    fn the_password_prompt() {
+        let mut m = Model::new(Config::default());
+        assert_eq!(m.password_prompt(), None, "nothing weak");
+        m.weak_pin = true;
+        // An older server: no weakReason, so what you signed in with decides.
+        m.secret_kind = "pin".into();
+        assert_eq!(m.password_prompt(), Some(WeakReason::Pin));
+        m.secret_kind = "password".into();
+        assert_eq!(m.password_prompt(), Some(WeakReason::Guessable));
+        // The server says why.
+        m.weak_reason = Some(WeakReason::Temporary);
+        assert_eq!(m.password_prompt(), Some(WeakReason::Temporary));
+        m.secret_kind = "pin".into();
+        m.weak_reason = Some(WeakReason::Pin);
+        assert_eq!(m.password_prompt(), Some(WeakReason::Pin));
+        // Later on the PIN's prompt: not again on this device…
+        m.config.password_later.push("pin".into());
+        assert_eq!(m.password_prompt(), None, "put off on this device");
+        // …but a reset's temporary password still asks, once.
+        m.secret_kind = "password".into();
+        m.weak_reason = Some(WeakReason::Temporary);
+        assert_eq!(m.password_prompt(), Some(WeakReason::Temporary), "a temporary password asks even after the PIN's Later");
+        m.config.password_later.push("temporary".into());
+        assert_eq!(m.password_prompt(), None);
+        m.weak_reason = Some(WeakReason::Guessable);
+        assert_eq!(m.password_prompt(), Some(WeakReason::Guessable));
+        m.needs_pin = true;
+        assert_eq!(m.password_prompt(), None, "no password at all: the other bar");
+    }
+
+    #[test]
+    fn weak_reasons_on_the_wire() {
+        for r in [WeakReason::Pin, WeakReason::Temporary, WeakReason::Guessable] {
+            assert_eq!(WeakReason::from_wire(r.as_str()), Some(r));
+        }
+        assert_eq!(WeakReason::from_wire("something-new"), None);
+    }
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// An OBS link listens without showing up (the web's sidebar.js): it isn't
+    /// listed under the channel, though it's still a session in it.
+    #[test]
+    fn obs_links_are_left_out_of_a_voice_channel() {
+        let mut m = Model::new(Config::default());
+        for (id, name) in [("u1", "Rosa"), ("u2", "ben")] {
+            m.users.insert(id.into(), serde_json::from_value(json!({ "id": id, "name": name, "color": "#5b6cff" })).unwrap());
+        }
+        let session = |sid: &str, uid: &str, client: &str, channel: Option<&str>| -> Session {
+            serde_json::from_value(json!({ "sid": sid, "uid": uid, "client": client, "voice": channel.map(|c| json!({ "channelId": c })) })).unwrap()
+        };
+        for s in [
+            session("s1", "u1", "web", Some("lounge")),
+            session("s2", "u2", "desktop", Some("lounge")),
+            session("o1", "u1", "obs", Some("lounge")),
+            session("s3", "u2", "web", Some("games")),
+            session("s4", "u1", "desktop", None),
+        ] {
+            m.sessions.insert(s.sid.clone(), s);
+        }
+        let sids = |list: Vec<&Session>| list.iter().map(|s| s.sid.clone()).collect::<Vec<_>>();
+        assert_eq!(sids(m.voice_members("lounge")), ["s2", "s1"], "A–Z by name, the OBS link left out");
+        assert_eq!(sids(m.voice_members("games")), ["s3"]);
+        assert!(m.voice_members("quiet").is_empty());
+        assert!(m.sessions["o1"].is_obs(), "still a session in the call");
     }
 }

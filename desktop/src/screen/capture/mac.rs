@@ -107,20 +107,15 @@ pub fn sources() -> Result<Vec<Source>, String> {
             id: Target::Display(display.id).id(),
             name: screen_name(index + 1, width, height),
             kind: SourceKind::Screen,
-            width,
-            height,
         });
     }
     for window in windows_of(&content) {
         let window = WindowInfo::of(&window);
         if window.is_listed(own_pid) {
-            let (width, height) = window.pixel_size(&displays);
             list.push(Source {
                 id: Target::Window(window.id).id(),
                 name: window_name(&window.title, &window.app_name),
                 kind: SourceKind::Window,
-                width,
-                height,
             });
         }
     }
@@ -1087,8 +1082,6 @@ fn picked_source(id: String, filter: &SCContentFilter) -> Source {
         id,
         name: format!("{what} picked in macOS ({width} × {height})"),
         kind,
-        width,
-        height,
     }
 }
 
@@ -1920,7 +1913,7 @@ mod tests {
         assert_eq!(rx2.try_recv().unwrap(), Ok(true));
         let leftover: Vec<String> = picker_state().picked.iter().map(|(id, _)| id.clone()).collect();
         for id in leftover {
-            release(&Source { id, name: String::new(), kind: SourceKind::Window, width: 0, height: 0 });
+            release(&Source { id, name: String::new(), kind: SourceKind::Window });
         }
         assert!(picker_state().picked.is_empty());
     }

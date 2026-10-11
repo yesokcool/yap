@@ -151,10 +151,16 @@ final class AppModel {
     var showingPeople = false
     /// The encrypted Personal space's passcode sheet.
     var vaultSheet: VaultMode?
-    /// Change PIN (from the "easy to guess" nudge).
-    var changingPin = false
-    /// The "easy to guess" nudge was dismissed for this run.
-    var weakPinDismissed = false
+    /// Change password / Set a password (from the "Choose a password" prompt).
+    var changingPassword = false
+    /// Which "Choose a password" prompts Later put off on this device, for good.
+    var passwordPromptsPutOff = PasswordPrompt.putOff() {
+        didSet { PasswordPrompt.save(passwordPromptsPutOff) }
+    }
+    /// The "Choose a password" prompt to show now, if any.
+    var passwordPrompt: YapClient.PasswordNudge? {
+        PasswordPrompt.showing(client.passwordNudge, putOff: passwordPromptsPutOff)
+    }
     /// A message to scroll to once its channel is on screen.
     var jump: JumpTarget?
     /// The screen I'm watching fills the window (Mac: the window goes full
@@ -191,7 +197,7 @@ final class AppModel {
         let launch = DebugLaunch.current
         let credentials: any CredentialStore = launch.usesMemoryStore ? MemoryCredentialStore() : DeviceCredentialStore(service: AppIdentity.keychainService)
         if let marks = launch.lastRead, let memory = credentials as? MemoryCredentialStore { memory.lastRead = marks }
-        client = YapClient(credentials: credentials, client: launch.clientLabel ?? AppIdentity.clientLabel)
+        client = YapClient(credentials: credentials, client: AppIdentity.clientLabel)
         // The last three call reports stay in the app's own data folder (screenshots: in memory).
         let reports = launch.usesMemoryStore ? nil : CallReportStore.standard
         #if os(iOS)
@@ -346,7 +352,7 @@ final class AppModel {
 
     @ObservationIgnored private var autojoined = false
     @ObservationIgnored private var demoInvited = false
-    @ObservationIgnored private var demoPinReset = false
+    @ObservationIgnored private var demoReset = false
     @ObservationIgnored private var demoWatched = false
     @ObservationIgnored private var demoCallEnded = false
     @ObservationIgnored private var demoShared = false
@@ -366,11 +372,11 @@ final class AppModel {
                 demoInvited = true
                 client.createInvite(label: label)
             }
-            if let name = DebugLaunch.current.demoPinReset, !demoPinReset {
-                demoPinReset = true
+            if let name = DebugLaunch.current.demoReset, !demoReset {
+                demoReset = true
                 Task {
                     try? await Task.sleep(for: .seconds(1.5))
-                    if let uid = client.members.first(where: { $0.name == name })?.id { client.resetPin(for: uid) }
+                    if let uid = client.members.first(where: { $0.name == name })?.id { client.resetPassword(for: uid) }
                 }
             }
             if DebugLaunch.current.previewVoiceChannel != nil { showingVoicePanel = true }
@@ -396,6 +402,7 @@ final class AppModel {
             DebugLaunch.current.applyMicCheckDemo(to: self)
             if DebugLaunch.current.wants("personal"), let personal = client.personalChannel { open(.channel(personal.id)) }
             if DebugLaunch.current.wants("members") { showingPeople = true }
+            if DebugLaunch.current.wants("password") { changingPassword = true }
             if DebugLaunch.current.wants("switcher") { showingSwitcher = true }
             if DebugLaunch.current.wants("hang") { planningHang = true }
             if DebugLaunch.current.wants("catchup") {

@@ -1,4 +1,4 @@
-//! Sign On (the invite link, name, PIN or password, color) and the waiting room.
+//! Sign On (the invite link, name, password, color) and the waiting room.
 
 use super::*;
 
@@ -6,12 +6,13 @@ pub(super) type CheckSlot = Arc<Mutex<Option<Result<crate::http::CheckResult, St
 pub struct Welcome {
     link: String,
     name: String,
-    pin: String,
+    /// The password (signing in, an old 6-digit PIN works here too).
+    password: String,
     color: String,
     /// "I'm new" (signup) vs "I have an account" (login).
     pub(super) new_account: bool,
-    /// A password (10–128 characters) instead of the 6-digit PIN.
-    password: bool,
+    /// Show what's typed in the password field.
+    show: bool,
     error: Option<String>,
     checking: Option<(CheckSlot, String, Option<String>)>,
     /// Switching servers from settings while online.
@@ -23,10 +24,10 @@ impl Welcome {
         Self {
             link: if c.server.is_empty() { String::new() } else { crate::config::invite_link(c) },
             name: c.name.clone(),
-            pin: String::new(),
+            password: String::new(),
             color: c.color.clone(),
             new_account: c.name.is_empty(),
-            password: false,
+            show: false,
             error: None,
             checking: None,
             forced: false,
@@ -42,9 +43,9 @@ impl Welcome {
     fn auth(&self) -> Auth {
         let name = self.name.trim().chars().take(32).collect::<String>();
         if self.new_account {
-            Auth::Signup { name, pin: self.pin.clone(), color: self.color.clone() }
+            Auth::Signup { name, pin: self.password.clone(), color: self.color.clone() }
         } else {
-            Auth::Login { name, pin: self.pin.clone() }
+            Auth::Login { name, pin: self.password.clone() }
         }
     }
 }
@@ -104,7 +105,7 @@ pub fn welcome(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
                 })));
                 acts.push(Act::Cmd(Cmd::Reconnect));
                 acts.push(Act::Cmd(Cmd::SignIn(app.welcome.auth())));
-                app.welcome.pin.clear();
+                app.welcome.password.clear();
                 app.welcome.forced = false;
                 app.welcome.error = None;
             }
@@ -117,19 +118,15 @@ pub fn welcome(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
     card(ui, p, "Sign On", 340.0, |ui| {
         logo(ui, p);
         ui.add_space(4.0);
-        // The web's words, following "Use a password" like the web's hint.
+        // The web's words.
         let new = app.welcome.new_account;
         note(
             ui,
-            match (need_link, new, app.welcome.password) {
-                (true, true, false) => "Paste your invite link, then pick a name friends will see and a 6-digit PIN.",
-                (true, true, true) => "Paste your invite link, then pick a name friends will see and a password of 10 or more characters.",
-                (true, false, false) => "Paste your invite link, then sign in with your name and PIN.",
-                (true, false, true) => "Paste your invite link, then sign in with your name and password.",
-                (false, true, false) => "Pick a name friends will see and a 6-digit PIN. The PIN is how you sign in on your other devices.",
-                (false, true, true) => "Pick a name friends will see and a password of 10 or more characters. It’s how you sign in on your other devices.",
-                (false, false, false) => "Sign in with your name and PIN — same you, same messages, on any device.",
-                (false, false, true) => "Sign in with your name and password — same you, same messages, on any device.",
+            match (need_link, new) {
+                (true, true) => "Paste your invite link, then pick a name friends will see and a password.",
+                (true, false) => "Paste your invite link, then sign in with your name and password.",
+                (false, true) => "Pick a name friends will see and a password. It’s how you sign in on your other devices.",
+                (false, false) => "Sign in with your name and password — same you, same messages, on any device.",
             },
             p,
         );
@@ -157,28 +154,18 @@ pub fn welcome(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
             r.request_focus();
             focus_next = false;
         }
-        let pw = app.welcome.password;
-        field_label(
-            ui,
-            match (app.welcome.new_account, pw) {
-                (true, false) => "Pick a 6-digit PIN:",
-                (true, true) => "Pick a password (10+ characters):",
-                (false, false) => "PIN:",
-                (false, true) => "Password:",
-            },
-            p,
-        );
+        field_label(ui, "Password:", p);
         ui.horizontal(|ui| {
-            let r = secret_field(ui, &mut app.welcome.pin, pw, p);
+            let r = password_field(ui, &mut app.welcome.password, app.welcome.show, p);
             submit |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if focus_next && app.welcome.pin.is_empty() {
+            if focus_next && app.welcome.password.is_empty() {
                 r.request_focus();
             }
             ui.add_space(6.0);
-            secret_toggle(ui, &mut app.welcome.password, &mut app.welcome.pin, p);
+            theme::checkbox(ui, &mut app.welcome.show, "Show", p);
         });
         if app.welcome.new_account {
-            note(ui, if pw { "You'll use your name and password to sign in on your other devices." } else { "Not a birthday or 123456: those get guessed." }, p);
+            note(ui, PASSWORD_RULE, p);
             field_label(ui, "Color:", p);
             if let Some(c) = swatches(ui, &app.welcome.color, p) {
                 app.welcome.color = c;
@@ -189,7 +176,10 @@ pub fn welcome(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
             ui.add_space(4.0);
             ui.label(theme::text(e, p.danger));
         }
-        let ok = !app.welcome.name.trim().is_empty() && secret_ok(&app.welcome.pin, app.welcome.password) && (!need_link || !app.welcome.link.trim().is_empty()) && !busy;
+        // Signing in takes whatever was set (an old PIN too); a new account's
+        // password is 8 characters or more (the server judges the rest).
+        let password_ok = if app.welcome.new_account { new_password_ok(&app.welcome.password) } else { !app.welcome.password.is_empty() };
+        let ok = !app.welcome.name.trim().is_empty() && password_ok && (!need_link || !app.welcome.link.trim().is_empty()) && !busy;
         actions(ui, |ui| {
             if app.welcome.forced && theme::button(ui, "Cancel", Btn::Normal, true, p).clicked() {
                 app.welcome.forced = false;
@@ -221,7 +211,7 @@ pub fn welcome(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
                 }
             } else {
                 acts.push(Act::Cmd(Cmd::SignIn(app.welcome.auth())));
-                app.welcome.pin.clear();
+                app.welcome.password.clear();
                 app.welcome.error = None;
             }
         }
@@ -232,7 +222,8 @@ pub fn waiting(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
     let pending = m.status == Status::Pending;
     card(ui, p, "Yap", 340.0, |ui| {
         if pending {
-            ui.label(egui::RichText::new("Waiting to be let in").font(theme::bold_font(theme::ui())).color(p.text));
+            // Only the owner and mods let people in (PROTOCOL.md › Identity › Waiting room).
+            ui.label(egui::RichText::new("Waiting for the owner or a mod to let you in.").font(theme::bold_font(theme::ui())).color(p.text));
             ui.add_space(2.0);
             // A marquee progress bar.
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), egui::Sense::hover());
@@ -250,8 +241,8 @@ pub fn waiting(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
             }
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
             ui.add_space(4.0);
-            // The web's words (its "Keep this tab open" is "Keep Yap open" here).
-            ui.label(theme::text(format!("Hang tight, {}. Everyone here just got a ping — this opens by itself as soon as someone lets you in. Keep Yap\u{a0}open.", m.config.name), p.text));
+            // (The web's "Keep this tab open" is "Keep Yap open" here.)
+            ui.label(theme::text(format!("Hang tight, {}. This opens by itself as soon as you're let in. Keep Yap\u{a0}open.", m.config.name), p.text));
         } else {
             ui.label(egui::RichText::new("You're not in").font(theme::bold_font(theme::ui())).color(p.text));
             ui.label(theme::text(&m.status_detail, p.danger));

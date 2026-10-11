@@ -241,7 +241,8 @@ pub fn chat(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec
         if theme::caption_button(ui, b, "users", "People", matches!(app.modal, Some(Modal::People { .. })), p).clicked() {
             app.modal = Some(Modal::People { open: None, ask: None });
         }
-        let waiting = m.join_requests.len();
+        // People waiting (only the owner and mods let them in).
+        let waiting = if m.am_moderator() { m.join_requests.len() } else { 0 };
         if waiting > 0 {
             // Inside the window's edge (the bevel would cut it off).
             let badge = Rect::from_center_size(b.right_top() + vec2(-5.0, 5.0), vec2(13.0, 13.0)).round();
@@ -286,7 +287,7 @@ pub fn chat(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec
         return;
     }
 
-    // Information bars: connection lost, set a PIN, people in the waiting room…
+    // Information bars: connection lost, choose a password, people in the waiting room…
     if super::sections::has_bars(app, m) {
         egui::Panel::top("chat-bars").resizable(false).show_separator_line(false).frame(egui::Frame::new()).show(ui, |ui| super::sections::bars(app, ui, m, acts));
     }

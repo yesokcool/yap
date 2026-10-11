@@ -3,7 +3,10 @@
 //   node --experimental-strip-types --no-warnings test/worker.test.mjs
 import assert from 'node:assert/strict';
 import nodeCrypto from 'node:crypto';
-import { deviceLabel, hashPin, isSecret, needsRehash, randomPin, verifyPin, weakSecret } from '../worker/auth.ts';
+import fs from 'node:fs';
+import { TEMP_RE, deviceLabel, hashPin, isPassword, isSecret, needsRehash, passwordRule, tempPassword, verifyPin, weakPassword } from '../worker/auth.ts';
+import COMMON_PASSWORDS from '../worker/common-passwords.ts';
+import { WORDS } from '../worker/words.ts';
 import { clamp, cleanAnchor, cleanGif, cleanImage, cleanStroke, cleanVaultWrap } from '../worker/validate.ts';
 
 // Workers have crypto.subtle.timingSafeEqual (a Cloudflare extra); Node doesn't.
@@ -28,20 +31,37 @@ const codeOf = (fn) => {
 };
 
 // ── Accounts ──────────────────────────────────────────────────────────────
-await test('guessable PINs are refused: repeats, runs, patterns, mirrors, common ones, dates', () => {
-  for (const pin of ['111111', '000000', '123456', '654321', '890123', '121212', '123123', '123321', '112233', '159753', '251299', '010203', '311299']) {
-    assert.ok(weakSecret(pin), pin);
-  }
-  for (const pin of ['582039', '482916', '246802', '730964']) assert.equal(weakSecret(pin), null, pin);
-  assert.equal(weakSecret('purple tiger river 7'), null, 'a decent password');
-  assert.ok(weakSecret('aaaaaaaaaaaa'));
-  assert.ok(weakSecret('password1234'));
-  assert.ok(weakSecret('my name is samantha!', 'Samantha'), 'no name in the password');
+await test('a new password is 8–128 characters (a 6-digit PIN isn’t one)', () => {
+  for (const ok of ['correct-horse-582039', 'abcd efg', 'x'.repeat(128), '🦊🦊🦊🦊🦊🦊🦊🦊']) assert.equal(passwordRule(ok), null, ok);
+  for (const short of ['582039', 'short', '1234567', '']) assert.equal(passwordRule(short), 'Use a password of at least 8 characters.', short);
+  assert.match(passwordRule('x'.repeat(129)), /at most 128/);
+  assert.equal(isPassword('🦊'.repeat(8)), true, 'characters, not UTF-16 units');
 });
 
-await test('a secret is 6 digits or a 10–128 character password', () => {
-  for (const ok of ['582039', 'purple tiger river 7', 'x'.repeat(128)]) assert.equal(isSecret(ok), true, ok);
-  for (const bad of ['58203', '5820391', 'short pw', 'x'.repeat(129), '']) assert.equal(isSecret(bad), false, bad);
+await test('sign-in takes a password or an old 6-digit PIN', () => {
+  for (const ok of ['582039', 'correct-horse-582039', 'purple tiger river 7', 'x'.repeat(128)]) assert.equal(isSecret(ok), true, ok);
+  for (const bad of ['58203', '5820391', 'short', 'x'.repeat(129), '']) assert.equal(isSecret(bad), false, bad);
+});
+
+await test('guessable passwords are refused: common ones, your name, one thing repeated, keyboard and number runs', () => {
+  const common = ['password', 'Password1', 'iloveyou', 'sunshine2024!', 'football', '1q2w3e4r', 'trustno1', 'superman', 'baseball1'];
+  const name = [['cleo2024', 'Cleo'], ['Cleo-12345', 'Cleo'], ['2009cleo', 'Cleo'], ['cleocleo', 'Cleo'], ['ADALOVELACE', 'Ada Lovelace'], ['lovelace1815', 'Ada Lovelace'], ['wrenna!!!', 'Wrenna'], ['ab12wrenna', 'Wrenna ab12'], ['xx-cleo-x', 'Cleo']];
+  const repeated = ['aaaaaaaa', '!!!!!!!!!!', 'abababab', 'xyzxyzxyz', '12121212'];
+  const runs = ['12345678', '87654321', '0123456789', 'qwertyuiop', 'asdfghjkl', 'qwerty12', 'qwerty123456', 'abcdefgh', 'zyxwvuts', '1qaz2wsx3edc', 'qwertzuiop', 'azertyuiop', '13579135', 'abc123def456'];
+  for (const pw of [...common, ...repeated, ...runs]) assert.match(weakPassword(pw) ?? '', /^That password is too easy to guess\./, pw);
+  for (const [pw, who] of name) assert.match(weakPassword(pw, who) ?? '', /mostly your name/, `${pw} for ${who}`);
+  const fine = ['correct-horse-582039', 'purple tiger river 7', 'maple-river-stone-42', 'my dog ate the pasta', 'Cleo plays the banjo', 'always-be-kind-71', 'deer in the meadow', 'stonewall jackson x'];
+  for (const pw of fine) assert.equal(weakPassword(pw, 'Cleo'), null, pw);
+  assert.equal(weakPassword('always sunny 42', 'Al'), null, 'a short name inside a word is fine');
+});
+
+await test('the common-password list is bundled, small and lowercase', () => {
+  const size = fs.statSync(new URL('../worker/common-passwords.ts', import.meta.url)).size;
+  assert.ok(size <= 100_000, `${size} bytes`);
+  const list = COMMON_PASSWORDS.split('\n');
+  assert.ok(list.length > 10_000, `${list.length} passwords`);
+  assert.equal(list[0], 'password', 'most common first');
+  assert.ok(list.every((pw) => pw.length >= 8 && pw === pw.toLowerCase()));
 });
 
 await test('PIN hashes: right PIN + same pepper verifies; a wrong PIN or another pepper never does', async () => {
@@ -66,12 +86,19 @@ await test('old unpeppered hashes still verify, and are flagged for an upgrade',
   assert.equal(await verifyPin('582039', 'md5$1$abc$def', 'pepper'), false, 'unknown schemes never verify');
 });
 
-await test('temporary PINs are 6 digits and never guessable', () => {
+await test('temporary passwords: three different short words and two digits, never guessable', () => {
+  assert.ok(WORDS.length >= 300 && WORDS.every((w) => /^[a-z]{3,6}$/.test(w)), 'short lowercase words');
+  assert.equal(new Set(WORDS).size, WORDS.length, 'no word twice');
+  const seen = new Set();
   for (let i = 0; i < 300; i++) {
-    const pin = randomPin();
-    assert.match(pin, /^\d{6}$/);
-    assert.equal(weakSecret(pin), null, pin);
+    const pw = tempPassword();
+    assert.match(pw, TEMP_RE);
+    assert.equal(new Set(pw.split('-').slice(0, 3)).size, 3, pw);
+    assert.equal(weakPassword(pw), null, pw);
+    assert.equal(passwordRule(pw), null, pw);
+    seen.add(pw);
   }
+  assert.ok(seen.size > 295, 'random');
 });
 
 await test('device names from the app or the browser', () => {

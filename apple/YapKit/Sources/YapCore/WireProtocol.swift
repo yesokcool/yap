@@ -70,9 +70,10 @@ public struct IceCandidatePayload: Codable, Sendable, Equatable {
 public enum HelloAuth: Sendable, Equatable {
     /// Normal reconnect with this device's token.
     case token(String)
-    /// New device / signed out: name + 6-digit PIN.
+    /// New device / signed out: name + password (or an old PIN; the wire
+    /// still calls it `pin`).
     case login(name: String, pin: String)
-    /// Brand-new person (lands in the waiting room).
+    /// Brand-new person (lands in the waiting room): `pin` is a password.
     case signup(name: String, pin: String, color: String)
 }
 
@@ -144,7 +145,6 @@ public enum ClientMessage: Encodable, Sendable {
     case memberDeny(uid: String)
     case memberBan(uid: String)
     case memberRole(uid: String, role: String)
-    case ownerClaim(key: String)
     case view(String?)
     case signal(to: String, data: SignalData)
 
@@ -216,7 +216,6 @@ public enum ClientMessage: Encodable, Sendable {
         case .memberDeny: "member.deny"
         case .memberBan: "member.ban"
         case .memberRole: "member.role"
-        case .ownerClaim: "owner.claim"
         case .view: "view"
         case .signal: "signal"
         case .pollVote: "poll.vote"
@@ -332,8 +331,6 @@ public enum ClientMessage: Encodable, Sendable {
         case let .memberRole(uid, role):
             try c.encode(uid, forKey: "uid")
             try c.encode(role, forKey: "role")
-        case let .ownerClaim(key):
-            try c.encode(key, forKey: "key")
         case let .view(view):
             if let view { try c.encode(view, forKey: "view") } else { try c.encodeNil(forKey: "view") }
         case let .signal(to, data):
@@ -401,9 +398,14 @@ public struct ReadyPayload: Decodable, Sendable {
     public var resumeKey: String?
     /// The encrypted Personal space's wrapped key; nil = encryption off.
     public var vault: VaultWrap?
-    /// My PIN is easy to guess: nudge me to change it.
+    /// I signed in with an old PIN, a guessable password or a reset's
+    /// temporary one: ask once for a password (PROTOCOL.md › Identity).
     public var weakPin: Bool = false
-    /// "pin" or "password".
+    /// Why `weakPin` (it picks the prompt's words): "pin", "temporary" (a
+    /// reset's temporary password) or "guessable". Sent only with `weakPin`;
+    /// absent on servers from before it.
+    public var weakReason: String?
+    /// What I last signed in with: "pin" or "password".
     public var secretKind: String?
     /// Every live soundboard sound and every chime someone uses (v0.36).
     public var sounds: [Sound] = []
@@ -444,6 +446,7 @@ public struct ReadyPayload: Decodable, Sendable {
         resumeKey = try? c.decodeIfPresent(String.self, forKey: "resumeKey")
         vault = try? c.decodeIfPresent(VaultWrap.self, forKey: "vault")
         weakPin = (try? c.decodeIfPresent(Bool.self, forKey: "weakPin")) ?? false
+        weakReason = try? c.decodeIfPresent(String.self, forKey: "weakReason")
         secretKind = try? c.decodeIfPresent(String.self, forKey: "secretKind")
         sounds = ((try? c.decodeIfPresent([Lenient<Sound>].self, forKey: "sounds")) ?? []).compactMap(\.value)
         hangs = ((try? c.decodeIfPresent([Lenient<Hang>].self, forKey: "hangs")) ?? []).compactMap(\.value)
@@ -463,7 +466,9 @@ public enum ServerMessage: Sendable {
     case signinAlert(Device)
     case pinReset(uid: String, pin: String)
     case joinRequest(User)
-    case joinResolved(uid: String, approved: Bool, by: String)
+    /// Someone was let in or turned away. `user` (when let in, from newer
+    /// servers): who joined, for everyone who never saw the request.
+    case joinResolved(uid: String, approved: Bool, by: String, user: User? = nil)
     case error(code: String, message: String, re: String?)
     case history(channelId: String, messages: [Message], hasMore: Bool)
     case message(Message, nonce: String?)
@@ -546,7 +551,7 @@ public enum ServerMessage: Sendable {
             case "ready":
                 message = .ready(try ReadyPayload(from: decoder))
             case "pending":
-                message = .pending(message: try optStr("message") ?? "Waiting for someone here to let you in.", uid: try optStr("uid"), token: try optStr("token"))
+                message = .pending(message: try optStr("message") ?? "Waiting for the owner or a mod to let you in.", uid: try optStr("uid"), token: try optStr("token"))
             case "account":
                 message = .account(token: try optStr("token"), kind: try? optStr("kind"))
             case "devices":
@@ -560,7 +565,8 @@ public enum ServerMessage: Sendable {
             case "join.request":
                 message = .joinRequest(try c.decode(User.self, forKey: "user"))
             case "join.resolved":
-                message = .joinResolved(uid: try str("uid"), approved: try bool("approved"), by: try optStr("by") ?? "")
+                message = .joinResolved(uid: try str("uid"), approved: try bool("approved"), by: try optStr("by") ?? "",
+                                        user: try? c.decodeIfPresent(User.self, forKey: "user"))
             case "error":
                 message = .error(code: try optStr("code") ?? "internal", message: try optStr("message") ?? "Something went wrong.", re: try optStr("re"))
             case "history":

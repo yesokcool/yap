@@ -71,6 +71,12 @@ export interface ModLogEntry {
 /** pending = waiting to be let in; banned = turned away / removed. */
 export type Role = 'owner' | 'mod' | 'member' | 'pending' | 'banned';
 
+/** Why ready.weakPin is true (it picks the "Choose a password" prompt's words): an old PIN, a temporary password from a reset, or a guessable password. */
+export type WeakReason = 'pin' | 'temporary' | 'guessable';
+
+/** Someone just let in from the waiting room (join.resolved.user). */
+export type JoinedUser = Pick<User, 'id' | 'name' | 'color' | 'invitedBy'>;
+
 export interface User {
   id: string;
   name: string;
@@ -320,8 +326,8 @@ export type ClientMessage =
   /**
    * One of (checked in this order):
    *  - `token`: a device token from an earlier sign-in (normal reconnect);
-   *  - `login`: { name, pin } — sign in on a new device;
-   *  - `signup`: { name, pin, color } — new account (then the waiting room).
+   *  - `login`: { name, pin } — sign in on a new device (`pin`: the password, or an old 6-digit PIN);
+   *  - `signup`: { name, pin, color } — new account (`pin`: a password, 8–128 characters; then the waiting room).
    * (The pre-PIN uid-only hello is gone: `pin_required`.)
    * `ready` / `pending` carry a fresh `token` whenever one was issued — store it.
    */
@@ -333,7 +339,7 @@ export type ClientMessage =
       signup?: { name: string; pin: string; color?: string };
       client?: string;
     }
-  /** `pin`: a 6-digit PIN or a password (10–128 characters). Weak ones → `weak_pin`. */
+  /** `pin`: the new password (8–128 characters, else `bad_pin`; guessable → `weak_pin`); `current`: your password or old PIN. */
   | { t: 'account.pin'; pin: string; current?: string }
   | { t: 'account.signout' }
   /** Your signed-in devices → `devices`. */
@@ -342,6 +348,7 @@ export type ClientMessage =
   | { t: 'account.revoke'; id: string }
   /** Sign out every device but this one, OBS links included → `devices`. */
   | { t: 'account.signoutOthers' }
+  /** Owner/mod: a temporary password for someone → `pin.reset`. */
   | { t: 'member.resetPin'; uid: string }
   | { t: 'history'; channelId: string; before?: number; beforeId?: string; limit?: number }
   | { t: 'send'; channelId: string; body: string; nonce?: string; gif?: Gif; image?: ImageRef; replyTo?: string; poll?: { options: string[] } }
@@ -461,7 +468,7 @@ export type ServerMessage =
    * personal invite keep working if that invite is revoked later.
    * `storageWarning` (owner/mods): a database is over 80% full.
    */
-  | { t: 'ready'; v: number; sid: string; uid: string; token?: string; needsPin: boolean; notify: { mode: NotifyMode; topic: string | null; quiet?: QuietHours | null }; channels: Channel[]; users: User[]; sessions: Session[]; emojis: Emoji[]; pending: User[]; build?: { app: string; style: string }; key?: string; links?: Link[]; storageWarning?: boolean; uploadToken?: string; resumeKey?: string; vault?: VaultWrap | null; weakPin?: boolean; secretKind?: 'pin' | 'password'; sounds?: Sound[]; hangs?: Hang[] }
+  | { t: 'ready'; v: number; sid: string; uid: string; token?: string; needsPin: boolean; notify: { mode: NotifyMode; topic: string | null; quiet?: QuietHours | null }; channels: Channel[]; users: User[]; sessions: Session[]; emojis: Emoji[]; pending: User[]; build?: { app: string; style: string }; key?: string; links?: Link[]; storageWarning?: boolean; uploadToken?: string; resumeKey?: string; vault?: VaultWrap | null; weakPin?: boolean; weakReason?: WeakReason; secretKind?: 'pin' | 'password'; sounds?: Sound[]; hangs?: Hang[] }
   | { t: 'poll'; id: string; channelId: string; votes: string[][] }
   /** Play this clip (someone in your voice channel pressed it). */
   | { t: 'sound'; id: string; sid: string; uid: string }
@@ -493,17 +500,19 @@ export type ServerMessage =
   | { t: 'space.game'; sid: string; g: string; d: unknown }
   | { t: 'personal.plain'; notes: { id: string; body: string; gif?: Gif; image?: ImageRef }[] }
   | { t: 'when'; uid: string; slots: number[] }
-  /** Instead of `ready` for a newcomer: wait until a member lets you in (then `ready` arrives). */
+  /** Instead of `ready` for a newcomer: wait until the owner or a mod lets you in (then `ready` arrives). */
   | { t: 'pending'; message: string; uid: string; token?: string }
-  /** PIN set/changed; `token` when this device didn't have one yet. */
+  /** Password set/changed (`kind` is always "password" now); `token` is never sent any more. */
   | { t: 'account'; hasPin: boolean; token?: string; kind?: 'pin' | 'password' }
   | { t: 'devices'; devices: Device[] }
   /** Someone signed in to your account on a new device (sent to your other devices). */
   | { t: 'signin.alert'; device: Device }
-  /** To the owner/mod who reset someone's PIN: tell them this temporary PIN. */
+  /** To the owner/mod who reset someone's password: the temporary one to pass on ("maple-river-stone-42"). */
   | { t: 'pin.reset'; uid: string; pin: string }
+  /** Someone's waiting to be let in (owner and mods only). */
   | { t: 'join.request'; user: User }
-  | { t: 'join.resolved'; uid: string; approved: boolean; by: string }
+  /** `user` (when let in): who joined, for everyone who never saw the request ("Cleo joined — invited by Ada"). */
+  | { t: 'join.resolved'; uid: string; approved: boolean; by: string; user?: JoinedUser }
   | { t: 'view'; sid: string; view: string | null }
   | { t: 'cursor'; sid: string; view: string; a: CursorAnchor | null }
   | { t: 'notify'; mode: NotifyMode; topic: string | null; quiet?: QuietHours | null }

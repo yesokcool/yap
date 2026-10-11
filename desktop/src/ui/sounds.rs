@@ -5,7 +5,7 @@
 //! clip's loudness and caps how loud it ever plays.
 
 use super::dialogs::{actions, field_label, note, window};
-use super::{Act, App, theme, theme::Pal};
+use super::{Act, theme, theme::Pal};
 use crate::audio::decode::{self, Decoded};
 use crate::core::{Cmd, Model, Preview};
 use eframe::egui::{self, Rect, Sense, pos2, vec2};
@@ -84,7 +84,7 @@ fn seconds(s: f32) -> String {
 }
 
 /// The dialog's inside (drawn in a Modal by `dialogs::modals`).
-pub fn show(_app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>, u: &mut Upload, keep: &mut bool) {
+pub fn show(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>, u: &mut Upload, keep: &mut bool) {
     if u.decoded.is_none() {
         let done = u.slot.lock().take();
         if let Some(r) = done {

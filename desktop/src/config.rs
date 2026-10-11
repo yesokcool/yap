@@ -30,7 +30,7 @@ pub enum InputMode {
 pub enum ThemePref {
     System,
     Light,
-    /// "Midnight", the default (like the web client).
+    /// "Charcoal", the default (like the web client).
     #[default]
     Dark,
 }
@@ -98,6 +98,10 @@ pub struct Config {
     /// Settings › Voice › "Hide my IP address in calls": voice only through
     /// the server's TURN relay (when it has one), like the web's `relayOnly`.
     pub relay_only: bool,
+    /// "Choose a password" prompts Later put off on this device, for good, by
+    /// `ready.weakReason` ("pin", "temporary", "guessable"), like the web's
+    /// `passwordLater`: putting off one doesn't put off the others.
+    pub password_later: Vec<String>,
 }
 
 /// Settings › Look › Size limits.
@@ -139,6 +143,7 @@ impl Default for Config {
             sound_mute: false,
             saved_note_seen: false,
             relay_only: false,
+            password_later: Vec::new(),
         }
     }
 }
@@ -372,6 +377,26 @@ mod tests {
         assert_eq!(parse_invite("http://localhost:8788"), ("http://localhost:8788".into(), None));
         assert_eq!(parse_invite("localhost:8788/"), ("http://localhost:8788".into(), None));
         assert_eq!(parse_invite("yap.example.dev?key=k1"), ("https://yap.example.dev".into(), Some("k1".into())));
+    }
+
+    /// The prompts Later put off are a new field: a config from an older
+    /// version (no such key, or the unreleased `password_prompt_done`) still
+    /// loads, everything kept, with nothing put off; what Later saves stays.
+    #[test]
+    fn password_prompts_put_off() {
+        let dir = std::env::temp_dir().join(format!("yap-prompt-test-{}", random_hex(6)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"server":"https://chat.example.com","name":"Ada","uid":"u1","bitrate":96000,"relay_only":true,"password_prompt_done":true}"#).unwrap();
+        let mut c = Config::load(&path);
+        assert_eq!((c.name.as_str(), c.uid.as_str(), c.bitrate, c.relay_only), ("Ada", "u1", 96_000, true), "an old config loads whole");
+        assert!(c.password_later.is_empty(), "nothing put off on this device yet");
+        c.password_later.push("pin".into());
+        c.save(&path);
+        let again = Config::load(&path);
+        assert_eq!(again.password_later, ["pin"], "Later is remembered, for that reason only");
+        assert_eq!(again.name, "Ada");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

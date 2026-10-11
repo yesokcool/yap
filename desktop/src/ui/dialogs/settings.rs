@@ -13,10 +13,8 @@ pub struct SettingsState {
     asked_invites: bool,
     asked_modlog: bool,
     name: String,
-    pin_current: String,
-    pin_new: String,
-    /// The new secret is a password (not a PIN).
-    pin_password: bool,
+    /// Account › Change password / Set a password.
+    password: PasswordForm,
     asked_devices: bool,
     devices: DeviceLists,
     /// Profile › Away message: the draft and its "until" choice.
@@ -55,9 +53,7 @@ impl SettingsState {
             asked_invites: false,
             asked_modlog: false,
             name: c.name.clone(),
-            pin_current: String::new(),
-            pin_new: String::new(),
-            pin_password: false,
+            password: PasswordForm::default(),
             asked_devices: false,
             devices,
             away_text: String::new(),
@@ -563,7 +559,7 @@ pub(super) fn log_words(m: &Model, e: &crate::protocol::ModLogEntry) -> String {
             "owner" => format!("made {who} the owner"),
             other => format!("made {who} {other}"),
         },
-        "member.resetPin" => format!("reset {who}'s PIN"),
+        "member.resetPin" => format!("reset {who}'s password"),
         "member.merge" => format!("merged a duplicate account into {who}'s"),
         "member.unmerge" => "split a merged account back out".into(),
         "owner.claim" => "became the owner".into(),
@@ -601,7 +597,7 @@ pub(super) fn mods_tab(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act
         st.asked_modlog = true;
         acts.push(Act::Cmd(Cmd::ModLog));
     }
-    ui.label(theme::text("New people wait in a waiting room until someone here lets them in. The owner and mods can also ban people and delete any message.", p.gray));
+    ui.label(theme::text("New people wait in a waiting room until the owner or a mod lets them in. The owner and mods can also ban people, delete any message and reset passwords.", p.gray));
     ui.add_space(4.0);
     // The five newest, then "Show all N" (no box scrolling inside the scrolling tab).
     let (shown, more) = short_list(st, "modlog", &m.modlog);
@@ -676,11 +672,11 @@ pub(super) fn look_tab(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act
 pub(super) fn account_tab(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>, st: &mut SettingsState, keep: &mut bool) {
     theme::group(ui, "Account", p, |ui| {
         ui.label(theme::text(format!("Signed in as {} on {}", m.config.name, m.config.server), p.text));
-        note(ui, "On another phone or computer, choose “I have an account” and sign in with your name and PIN.", p);
+        note(ui, "On another phone or computer, choose “I have an account” and sign in with your name and password.", p);
         ui.add_space(4.0);
         if st.confirm_signout {
             // Asked once, like the web (it's easy to undo, but not by accident).
-            ui.label(theme::text("Sign out of Yap on this computer? You can sign back in with your name and PIN.", p.text));
+            ui.label(theme::text("Sign out of Yap on this computer? You can sign back in with your name and password.", p.text));
             ui.horizontal_wrapped(|ui| {
                 if theme::button(ui, "Sign out", Btn::Danger, true, p).clicked() {
                     acts.push(Act::Cmd(Cmd::SignOut));
@@ -735,30 +731,16 @@ pub(super) fn account_tab(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, 
             }
         });
     });
-    let has_password = m.secret_kind == "password";
-    let title = if m.needs_pin { "Set a PIN or password" } else if has_password { "Change password" } else { "Change PIN" };
+    // "Set a password" while there's none or it's still an old PIN.
+    let title = if m.needs_pin || m.secret_kind == "pin" { "Set a password" } else { "Change password" };
+    st.password.poll(m);
     theme::group(ui, title, p, |ui| {
-        if m.weak_pin {
-            ui.label(theme::text("Your PIN is easy to guess. Pick a new one (not a birthday, a pattern or 123456), or use a password.", p.danger));
-        }
-        egui::Grid::new("pin-grid").num_columns(2).spacing(vec2(8.0, 4.0)).show(ui, |ui| {
-            if !m.needs_pin {
-                ui.label(theme::text("Current:", p.text));
-                secret_field(ui, &mut st.pin_current, has_password, p);
-                ui.end_row();
-            }
-            ui.label(theme::text("New:", p.text));
-            ui.horizontal(|ui| {
-                secret_field(ui, &mut st.pin_new, st.pin_password, p);
-                ui.add_space(6.0);
-                secret_toggle(ui, &mut st.pin_password, &mut st.pin_new, p);
-            });
-            ui.end_row();
-        });
-        let ok = secret_ok(&st.pin_new, st.pin_password) && (m.needs_pin || !st.pin_current.is_empty());
-        if theme::button(ui, if st.pin_password { "Save password" } else { "Save PIN" }, Btn::Normal, ok, p).clicked() {
-            let current = (!m.needs_pin).then(|| std::mem::take(&mut st.pin_current));
-            acts.push(Act::Cmd(Cmd::SetPin { pin: std::mem::take(&mut st.pin_new), current }));
+        let enter = st.password.fields(ui, m, p, false);
+        ui.add_space(2.0);
+        let ok = st.password.ready(m);
+        let label = if st.password.waiting.is_some() { "Saving…" } else { "Save password" };
+        if (theme::button_sized(ui, label, Btn::Normal, ok, vec2(100.0, 23.0), p).clicked() || enter) && ok {
+            st.password.submit(m, acts);
         }
     });
     devices_group(ui, m, p, acts, st);
@@ -817,7 +799,7 @@ pub(super) fn devices_group(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Ve
         } else if theme::button_sized(ui, "Sign out everywhere else…", Btn::Normal, others > 0, vec2(160.0, 23.0), p).clicked() {
             st.confirm_others = true;
         }
-        note(ui, "Don't recognize one? Sign it out, then change your PIN.", p);
+        note(ui, "Don't recognize one? Sign it out, then change your password.", p);
     });
 }
 

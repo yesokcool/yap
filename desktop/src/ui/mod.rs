@@ -140,8 +140,11 @@ pub enum Act {
     Vault(dialogs::VaultMode),
     /// Hide the "New sign-in" bar.
     DismissSigninAlert,
-    /// Open Settings on a tab (e.g. Account, from the weak-PIN bar).
+    /// Open Settings on a tab.
     OpenSettings(usize),
+    /// Later on the "Choose a password" prompt: not again on this device, for
+    /// that reason.
+    PasswordLater(crate::core::WeakReason),
     /// Settings › Account, asking "Sign out everywhere else?" (the sign-in alert).
     AskSignOutOthers,
     ClearPinReset,
@@ -150,7 +153,7 @@ pub enum Act {
     /// Stop the sounds playing now (the soundboard was muted).
     StopSounds,
     /// Screenshot aid (debug builds): put the model in a state the server
-    /// would (a sign-in alert, the weak-PIN bar, a hang starting).
+    /// would (a sign-in alert, the "Choose a password" prompt, a hang starting).
     DebugModel(Box<dyn FnOnce(&mut Model)>),
 }
 
@@ -172,7 +175,7 @@ pub struct App {
     settings: Option<dialogs::SettingsState>,
     emoji_picker: Option<String>,
     volume_popup: Option<(String, Pos2)>,
-    /// The popup is asking "really reset their PIN / ban them?".
+    /// The popup is asking "really reset their password / ban them?".
     volume_ask: Option<(String, dialogs::Ask)>,
     body_cache: HashMap<String, Arc<Vec<markup::Block>>>,
     /// Lowercase display names, longest first (for @mention highlights).
@@ -224,8 +227,6 @@ pub struct App {
     pub voice_more_opened: f64,
     /// The "hang is starting" notice was closed (this hang).
     pub hang_dismissed: Option<String>,
-    /// The "your PIN is easy to guess" bar was closed (this run).
-    pub weak_pin_dismissed: bool,
     /// The panel on the right: Search or Pinned.
     pub side: Option<side::Side>,
     /// Where that panel floats over the chat this frame (a narrow window), if it does.
@@ -363,7 +364,6 @@ impl App {
             hang_dismissed: None,
             notes: HashMap::new(),
             notes_key: None,
-            weak_pin_dismissed: false,
             debug_vault: None,
             side: None,
             side_float: None,
@@ -573,6 +573,13 @@ impl App {
                 Act::AskSignOutOthers => {
                     self.settings = Some(dialogs::SettingsState::new(&self.shared.model.lock().config).asking_signout_others());
                     self.modal = Some(dialogs::Modal::Settings);
+                }
+                Act::PasswordLater(reason) => {
+                    let mut m = self.shared.model.lock();
+                    if !m.config.password_later.iter().any(|r| r == reason.as_str()) {
+                        m.config.password_later.push(reason.as_str().into());
+                        m.config_dirty = true;
+                    }
                 }
                 Act::ClearPinReset => self.shared.model.lock().pin_reset = None,
                 Act::ClearOpenUrl => self.shared.model.lock().open_url = None,

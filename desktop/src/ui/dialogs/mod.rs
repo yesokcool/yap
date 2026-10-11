@@ -1,7 +1,7 @@
 //! The dialogs, as 98-style windows: `Modal` and `modals()`, which shows the open one; the chrome
 //! they share (frame, title bar, buttons row, fields, notes, color swatches);
 //! and the small ones inline (new channel, confirmations, ping, add a place,
-//! set a PIN, the emoji upload). The bigger ones have files of their own:
+//! choose a password, the emoji upload). The bigger ones have files of their own:
 //! `welcome` (Sign On, the waiting room), `settings`, `people`, `vault`,
 //! `update`, `viewer` and `emoji`.
 
@@ -37,8 +37,9 @@ pub enum Modal {
     ConfirmDelete { id: String },
     ConfirmArchive { id: String, name: String },
     EmojiUpload(EmojiUpload),
-    /// "Set a PIN" (an account from before PINs): a 6-digit PIN or a password.
-    SetPin { pin: String, confirm: String, password: bool },
+    /// "Choose a password" (the once-per-device prompt) / "Set a password"
+    /// (an account with no password at all).
+    Password(PasswordForm),
     /// A picture full size inside the app (encrypted ones only open here).
     Viewer(Viewer),
     /// Draw a doodle reaction.
@@ -53,7 +54,7 @@ pub enum Modal {
     Update,
     AddLink { name: String, url: String },
     /// Everyone, A–Z (no online/offline, on purpose); `open`: whose controls
-    /// are showing; `ask`: asking "really reset their PIN / ban them?".
+    /// are showing; `ask`: asking "really reset their password / ban them?".
     People { open: Option<String>, ask: Option<(String, people::Ask)> },
     /// The Personal space passcode: set up, unlock, change, start over.
     Vault(VaultDialog),
@@ -129,35 +130,103 @@ pub fn note(ui: &mut egui::Ui, text: impl Into<String>, p: &Pal) {
     ui.label(egui::RichText::new(text).font(theme::font(theme::small())).color(p.gray));
 }
 
-fn pin_field(ui: &mut egui::Ui, pin: &mut String, p: &Pal) -> egui::Response {
-    let r = theme::field(ui, egui::TextEdit::singleline(pin).password(true).char_limit(6).hint_text("6 digits").desired_width(100.0), p);
-    pin.retain(|c| c.is_ascii_digit());
-    r
+/// New passwords: 8–128 characters (PROTOCOL.md › Identity; the server also
+/// turns away guessable ones, in its own words).
+const PASSWORD_MIN: usize = 8;
+const PASSWORD_MAX: usize = 128;
+/// Under every new password.
+const PASSWORD_RULE: &str = "8 characters or more.";
+
+/// A password field: masked unless `show`. Any characters (an old 6-digit PIN
+/// still signs in here too).
+fn password_field(ui: &mut egui::Ui, value: &mut String, show: bool, p: &Pal) -> egui::Response {
+    theme::field(ui, egui::TextEdit::singleline(value).password(!show).char_limit(PASSWORD_MAX).desired_width(200.0), p)
 }
 
-/// A PIN (6 digits, number pad) or, with `password`, a password (10–128 characters).
-fn secret_field(ui: &mut egui::Ui, value: &mut String, password: bool, p: &Pal) -> egui::Response {
-    if password {
-        theme::field(ui, egui::TextEdit::singleline(value).password(true).char_limit(128).hint_text("10+ characters").desired_width(200.0), p)
-    } else {
-        pin_field(ui, value, p)
+/// Long enough for a new password (the server judges the rest).
+fn new_password_ok(value: &str) -> bool {
+    (PASSWORD_MIN..=PASSWORD_MAX).contains(&value.chars().count())
+}
+
+/// Choosing or changing your password (Settings › Account, and the "Choose
+/// a password" dialog): what's typed, Show, and the server's answer.
+#[derive(Default)]
+pub struct PasswordForm {
+    current: String,
+    new: String,
+    show: bool,
+    /// Sent; waiting for `password_seq` to move past this.
+    waiting: Option<u64>,
+    /// What the server said ("That password is too easy to guess.").
+    error: Option<String>,
+}
+
+impl PasswordForm {
+    /// Did the server answer? `Some(true)`: saved (the fields are emptied);
+    /// `Some(false)`: turned away, its words in `error`.
+    fn poll(&mut self, m: &Model) -> Option<bool> {
+        let sent = self.waiting?;
+        if m.password_seq == sent {
+            return None;
+        }
+        self.waiting = None;
+        match &m.password_error {
+            Some(e) => {
+                self.error = Some(e.clone());
+                Some(false)
+            }
+            None => {
+                self.current.clear();
+                self.new.clear();
+                self.error = None;
+                Some(true)
+            }
+        }
     }
-}
 
-fn secret_ok(value: &str, password: bool) -> bool {
-    if password { (10..=128).contains(&value.chars().count()) } else { value.len() == 6 && value.chars().all(|c| c.is_ascii_digit()) }
-}
-
-/// "Use a password instead" / "Use a 6-digit PIN instead" (clears what's typed).
-fn secret_toggle(ui: &mut egui::Ui, password: &mut bool, value: &mut String, p: &Pal) {
-    let label = if *password { "Use a 6-digit PIN instead" } else { "Use a password instead" };
-    let r = ui.add(egui::Label::new(egui::RichText::new(label).font(theme::font(theme::small())).color(p.link).underline()).sense(egui::Sense::click()));
-    if r.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    /// Everything's there to send.
+    fn ready(&self, m: &Model) -> bool {
+        self.waiting.is_none() && new_password_ok(&self.new) && (m.needs_pin || !self.current.is_empty())
     }
-    if r.clicked() {
-        *password = !*password;
-        value.clear();
+
+    fn submit(&mut self, m: &Model, acts: &mut Vec<Act>) {
+        let current = (!m.needs_pin).then(|| self.current.clone());
+        acts.push(Act::Cmd(Cmd::SetPassword { password: self.new.clone(), current }));
+        self.waiting = Some(m.password_seq);
+        self.error = None;
+    }
+
+    /// The fields: Current password ("Current password or PIN" while on a
+    /// PIN; none for an account with no password), New password with its rule
+    /// and Show, then the server's answer. Returns whether Enter was pressed
+    /// in one; `focus`: put the cursor in the first empty one.
+    fn fields(&mut self, ui: &mut egui::Ui, m: &Model, p: &Pal, focus: bool) -> bool {
+        let mut enter = false;
+        let mut focus = focus && ui.memory(|mem| mem.focused().is_none());
+        if !m.needs_pin {
+            field_label(ui, if m.secret_kind == "pin" { "Current password or PIN:" } else { "Current password:" }, p);
+            let r = password_field(ui, &mut self.current, self.show, p);
+            enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if focus && self.current.is_empty() {
+                r.request_focus();
+                focus = false;
+            }
+        }
+        field_label(ui, "New password:", p);
+        ui.horizontal(|ui| {
+            let r = password_field(ui, &mut self.new, self.show, p);
+            enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if focus && self.new.is_empty() {
+                r.request_focus();
+            }
+            ui.add_space(6.0);
+            theme::checkbox(ui, &mut self.show, "Show", p);
+        });
+        note(ui, PASSWORD_RULE, p);
+        if let Some(e) = &self.error {
+            ui.label(theme::text(e, p.danger));
+        }
+        enter
     }
 }
 
@@ -165,29 +234,28 @@ fn text_field(ui: &mut egui::Ui, value: &mut String, limit: usize, hint: &str, p
     theme::field(ui, egui::TextEdit::singleline(value).char_limit(limit).hint_text(hint).desired_width(f32::INFINITY), p)
 }
 
-/// Dialogs float over the desktop: nothing behind them is dimmed.
-fn backdrop(_p: &Pal) -> Color32 {
-    Color32::TRANSPARENT
-}
-
 pub fn modals(app: &mut App, ctx: &egui::Context, m: &Model, p: &Pal, acts: &mut Vec<Act>) {
     if app.welcome.forced {
         return;
     }
-    if let Some((name, pin)) = &m.pin_reset {
-        egui::Modal::new(egui::Id::new("pin-reset")).frame(dialog_frame(p)).backdrop_color(backdrop(p)).show(ctx, |ui| {
-            window(ui, p, "Temporary PIN", None, 320.0, None, |ui| {
-                ui.label(theme::text(format!("{name}'s temporary PIN:"), p.text));
-                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), egui::Sense::hover());
-                theme::panel(ui.painter(), r, p, p.window, Bevel::Sunken);
-                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, pin, theme::mono(24.0), p.text);
-                note(ui, "Give it to them privately; they can change it in Settings.", p);
+    if let Some((name, password)) = &m.pin_reset {
+        // Dialogs float over the desktop: nothing behind them is dimmed (egui dims by default).
+        egui::Modal::new(egui::Id::new("pin-reset")).frame(dialog_frame(p)).backdrop_color(Color32::TRANSPARENT).show(ctx, |ui| {
+            window(ui, p, "Temporary password", None, 340.0, None, |ui| {
+                // The web's words: "Cleo's temporary password: maple-river-stone-42. Send it to Cleo; …"
+                let plain = || egui::TextFormat { font_id: theme::font(theme::ui()), color: p.text, ..Default::default() };
+                let mut job = egui::text::LayoutJob::default();
+                job.append(&format!("{name}'s temporary password: "), 0.0, plain());
+                job.append(password, 0.0, egui::TextFormat { font_id: theme::mono(theme::ui() + 1.0), color: p.text, background: p.window, ..Default::default() });
+                job.append(&format!(". Send it to {name}; they'll choose their own after signing in."), 0.0, plain());
+                job.wrap.max_width = ui.available_width();
+                theme::job_label(ui, job);
                 actions(ui, |ui| {
                     if primary_button(ui, "Done", p, true).clicked() {
                         acts.push(Act::ClearPinReset);
                     }
                     if theme::button(ui, "Copy", Btn::Normal, true, p).clicked() {
-                        acts.push(Act::Copy(pin.clone(), "PIN copied."));
+                        acts.push(Act::Copy(password.clone(), "Password copied."));
                     }
                 });
             });
@@ -197,7 +265,7 @@ pub fn modals(app: &mut App, ctx: &egui::Context, m: &Model, p: &Pal, acts: &mut
     let Some(modal) = app.modal.take() else { return };
     let mut keep = true;
     let mut modal = modal;
-    let resp = egui::Modal::new(egui::Id::new("modal")).frame(dialog_frame(p)).backdrop_color(backdrop(p)).show(ctx, |ui| match &mut modal {
+    let resp = egui::Modal::new(egui::Id::new("modal")).frame(dialog_frame(p)).backdrop_color(Color32::TRANSPARENT).show(ctx, |ui| match &mut modal {
         Modal::Settings => settings(app, ui, m, p, acts, &mut keep),
         Modal::Share(d) => share(ui, m, p, acts, d, &mut keep),
         Modal::People { open, ask } => people(app, ui, m, p, acts, open, ask, &mut keep),
@@ -309,59 +377,35 @@ pub fn modals(app: &mut App, ctx: &egui::Context, m: &Model, p: &Pal, acts: &mut
             });
             keep &= k;
         }
-        Modal::SetPin { pin, confirm, password } => {
+        Modal::Password(form) => {
             let mut k = true;
-            let pw = *password;
-            window(ui, p, if pw { "Set a password" } else { "Set a PIN" }, None, 340.0, Some(&mut k), |ui| {
+            // Saved: the dialog's done (the core says "Password saved…").
+            if form.poll(m) == Some(true) {
+                keep = false;
+            }
+            let title = if m.needs_pin { "Set a password" } else { "Choose a password" };
+            window(ui, p, title, Some("lock"), 340.0, Some(&mut k), |ui| {
                 ui.label(theme::text(
-                    if pw {
-                        "Yap has real accounts now. Pick a password (10 or more characters) so you can sign in on your other devices as yourself."
-                    } else {
-                        "Yap has real accounts now. Pick a 6-digit PIN so you can sign in on your other devices as yourself."
-                    },
+                    if m.needs_pin { "Set a password so you can sign in on your other devices as yourself." } else { "You sign in with your name and this password on your other devices." },
                     p.text,
                 ));
-                field_label(ui, if pw { "New password (10+ characters):" } else { "New PIN (6 digits):" }, p);
-                let r1 = ui.horizontal(|ui| {
-                    let r = secret_field(ui, pin, pw, p);
-                    ui.add_space(6.0);
-                    let before = *password;
-                    secret_toggle(ui, password, confirm, p);
-                    if *password != before {
-                        pin.clear();
-                    }
-                    r
-                }).inner;
-                // Ready to type, and Enter saves (like the other dialogs).
-                if ui.memory(|mem| mem.focused().is_none()) {
-                    r1.request_focus();
-                }
-                field_label(ui, "Same again:", p);
-                let r2 = secret_field(ui, confirm, *password, p);
-                let enter = (r1.lost_focus() || r2.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let complete = secret_ok(confirm, *password);
-                if complete && pin != confirm {
-                    ui.label(theme::text("Those don't match.", p.danger));
-                }
-                if *password && !pin.is_empty() && pin.chars().count() < 10 {
-                    note(ui, format!("{} more character{} to go.", 10 - pin.chars().count(), if 10 - pin.chars().count() == 1 { "" } else { "s" }), p);
-                }
-                let ok = secret_ok(pin, *password) && pin == confirm;
+                let enter = form.fields(ui, m, p, true);
+                let ok = form.ready(m);
                 actions(ui, |ui| {
-                    if theme::button(ui, "Later", Btn::Normal, true, p).clicked() {
+                    if theme::button(ui, "Cancel", Btn::Normal, true, p).clicked() {
                         keep = false;
                     }
-                    if (primary_button(ui, if *password { "Save password" } else { "Save PIN" }, p, ok).clicked() || enter) && ok {
-                        acts.push(Act::Cmd(Cmd::SetPin { pin: std::mem::take(pin), current: None }));
-                        keep = false;
+                    let label = if form.waiting.is_some() { "Saving…" } else { "Save password" };
+                    if (primary_button(ui, label, p, ok).clicked() || enter) && ok {
+                        form.submit(m, acts);
                     }
                 });
             });
             keep &= k;
         }
         Modal::Viewer(v) => viewer(app, ui, p, acts, v, &mut keep),
-        Modal::Doodle(d) => super::doodle::show(app, ui, m, p, acts, d, &mut keep),
-        Modal::SoundUpload(u) => super::sounds::show(app, ui, m, p, acts, u, &mut keep),
+        Modal::Doodle(d) => super::doodle::show(ui, m, p, acts, d, &mut keep),
+        Modal::SoundUpload(u) => super::sounds::show(ui, m, p, acts, u, &mut keep),
         Modal::Switcher(sw) => super::extras::switcher(app, ui, m, p, acts, sw, &mut keep),
         Modal::PlanHang(d) => super::extras::plan_hang(app, ui, m, p, acts, d, &mut keep),
         Modal::EmojiUpload(up) => {
@@ -425,3 +469,62 @@ pub fn modals(app: &mut App, ctx: &egui::Context, m: &Model, p: &Pal, acts: &mut
     }
 }
 
+
+#[cfg(test)]
+mod password_form_tests {
+    use super::*;
+
+    fn model(kind: &str, needs: bool) -> Model {
+        let mut m = Model::new(Config::default());
+        m.secret_kind = kind.into();
+        m.needs_pin = needs;
+        m
+    }
+
+    /// No PIN rules any more: 8–128 characters of anything is a new password.
+    #[test]
+    fn new_passwords_are_eight_or_more() {
+        assert!(!new_password_ok("582039"), "a 6-digit PIN can't be set any more");
+        assert!(!new_password_ok("seven77"));
+        assert!(new_password_ok("correct-horse-582039"));
+        assert!(!new_password_ok("ünïcödé"), "7 characters (11 bytes): counted as characters");
+        assert!(new_password_ok("ünïcödé!"));
+        assert!(new_password_ok(&"x".repeat(128)));
+        assert!(!new_password_ok(&"x".repeat(129)));
+    }
+
+    /// Save needs the current password (or PIN) unless there's none, and goes
+    /// once; the server's answer comes back through `password_seq`.
+    #[test]
+    fn the_form_waits_for_the_server() {
+        let mut m = model("pin", false);
+        let mut f = PasswordForm { new: "correct-horse-582039".into(), ..Default::default() };
+        assert!(!f.ready(&m), "the current PIN is needed to change it");
+        f.current = "582039".into();
+        assert!(f.ready(&m));
+        let mut acts = Vec::new();
+        f.submit(&m, &mut acts);
+        assert!(matches!(&acts[..], [Act::Cmd(Cmd::SetPassword { password, current: Some(c) })] if password == "correct-horse-582039" && c == "582039"));
+        assert!(!f.ready(&m), "not twice");
+        assert_eq!(f.poll(&m), None, "no answer yet");
+        // Turned away: the server's words, the fields kept.
+        m.password_error = Some("That password is too easy to guess.".into());
+        m.password_seq += 1;
+        assert_eq!(f.poll(&m), Some(false));
+        assert_eq!(f.error.as_deref(), Some("That password is too easy to guess."));
+        assert_eq!(f.new, "correct-horse-582039");
+        // Again, saved: the fields empty out.
+        f.submit(&m, &mut acts);
+        m.password_error = None;
+        m.password_seq += 1;
+        assert_eq!(f.poll(&m), Some(true));
+        assert!(f.new.is_empty() && f.current.is_empty() && f.error.is_none());
+        // An account with no password at all: no current one to give.
+        let m = model("pin", true);
+        let mut f = PasswordForm { new: "correct-horse-582039".into(), ..Default::default() };
+        assert!(f.ready(&m));
+        let mut acts = Vec::new();
+        f.submit(&m, &mut acts);
+        assert!(matches!(&acts[..], [Act::Cmd(Cmd::SetPassword { current: None, .. })]));
+    }
+}

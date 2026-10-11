@@ -159,7 +159,7 @@ struct ChannelListView: View {
         ForEach(client.voiceChannels) { channel in
             VoiceChannelRow(channel: channel, archive: { archiving = channel })
                 .modifier(PlainRow())
-            ForEach(client.voiceSessions(in: channel.id)) { session in
+            ForEach(client.voiceRoster(in: channel.id)) { session in
                 VoiceMemberRow(session: session)
                     .modifier(PlainRow())
             }
@@ -415,24 +415,13 @@ struct VoiceChannelRow: View {
     }
 }
 
-/// Someone in a voice channel, indented under it (an OBS listener as
-/// "📺 Name's OBS").
+/// Someone in a voice channel, indented under it (an OBS link listens
+/// without a row: `voiceRoster`).
 struct VoiceMemberRow: View {
     @Environment(AppModel.self) private var model
     var session: Session
 
     var body: some View {
-        if session.isListener {
-            ListenerRow98(session: session)
-                .padding(.leading, 28)
-                .padding(.trailing, 6)
-                .padding(.vertical, 2)
-        } else {
-            person
-        }
-    }
-
-    private var person: some View {
         let user = model.client.user(session.uid)
         let speaking = model.voice.engine.speaking.contains(session.sid)
         let inMyCall = model.voice.channelId != nil && session.voice?.channelId == model.voice.channelId

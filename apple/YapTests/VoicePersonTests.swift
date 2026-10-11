@@ -19,9 +19,9 @@ struct VoicePersonTests {
 
     @Test func theWebsModActions() {
         #expect(VoicePersonPopover98.modActions(me: .member, them: .member).isEmpty)
-        #expect(VoicePersonPopover98.modActions(me: .mod, them: .member) == ["Reset PIN", "Ban"])
+        #expect(VoicePersonPopover98.modActions(me: .mod, them: .member) == ["Reset password…", "Ban"])
         #expect(VoicePersonPopover98.modActions(me: .mod, them: .owner).isEmpty, "nobody bans the owner")
-        #expect(VoicePersonPopover98.modActions(me: .owner, them: .member) == ["Make mod", "Reset PIN", "Ban"])
-        #expect(VoicePersonPopover98.modActions(me: .owner, them: .mod) == ["Remove mod", "Reset PIN", "Ban"])
+        #expect(VoicePersonPopover98.modActions(me: .owner, them: .member) == ["Make mod", "Reset password…", "Ban"])
+        #expect(VoicePersonPopover98.modActions(me: .owner, them: .mod) == ["Remove mod", "Reset password…", "Ban"])
     }
 }

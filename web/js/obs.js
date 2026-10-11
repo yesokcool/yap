@@ -5,8 +5,8 @@
  *   /obs#key=<invite key>&listen=<listen-only token>&channel=<voice channel id>
  *        [&only=<name>]   play just one person (one source per person)
  *        [&overlay=0]     audio only, nothing drawn
- * The token can only listen (the server enforces it), and everyone in the
- * call sees "📺 <name>'s OBS" while it's connected.
+ * The token can only listen (the server enforces it); the apps leave it out
+ * of the channel list and its chimes (2026-10-11).
  */
 import { Connection } from './conn.js';
 import { Voice } from './voice.js';

@@ -4,7 +4,7 @@
 //           message, then a backup into <dir>
 //   verify: against a brand-new, EMPTY server: restore <dir>'s backup, back
 //           the restored server up again, and check both backups hold exactly
-//           the same rows and media; then the account signs in with its PIN.
+//           the same rows and media; then the account signs in with its password.
 //   YAP_URL=… YAP_KEY=testkey YAP_ADMIN_KEY=testadmin node test/roundtrip.test.mjs seed|verify <dir>
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -25,7 +25,8 @@ if (!['seed', 'verify'].includes(mode) || !dir || !ADMIN) {
 }
 const admin = (p, init = {}) => fetch(`${BASE}${p}`, { ...init, headers: { ...init.headers, Authorization: `Bearer ${ADMIN}` } });
 const rid = () => Math.random().toString(36).slice(2, 8);
-const PIN = '582039';
+// The made-up password every suite signs up with.
+const PASSWORD = 'correct-horse-582039';
 
 /** One WebSocket client: send, and wait for the first message matching a test. */
 async function connect() {
@@ -96,10 +97,10 @@ async function test(name, fn) {
 }
 
 if (mode === 'seed') {
-  await test('seed: a member with a PIN and a message of their own, then a full backup', async () => {
+  await test('seed: a member with a password and a message of their own, then a full backup', async () => {
     const name = `Roundtrip ${rid()}`;
     const c = await connect();
-    c.send({ t: 'hello', v: 1, client: 'test', signup: { name, pin: PIN, color: '#336699' } });
+    c.send({ t: 'hello', v: 1, client: 'test', signup: { name, pin: PASSWORD, color: '#336699' } });
     const first = await c.next((m) => m.t === 'pending' || m.t === 'ready' || m.t === 'error');
     assert.notEqual(first.t, 'error', first.message);
     if (first.t === 'pending') {
@@ -111,7 +112,7 @@ if (mode === 'seed') {
     const message = (await c.next((m) => m.t === 'message' && m.nonce === 'rt')).message;
     c.close();
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'account.json'), JSON.stringify({ name, pin: PIN, uid: first.uid, message }));
+    fs.writeFileSync(path.join(dir, 'account.json'), JSON.stringify({ name, pin: PASSWORD, uid: first.uid, message }));
     tool('backup.mjs', [], { YAP_BACKUP_DIR: dir });
     const backup = readSnapshot(snapshotIn(dir));
     assert.equal(backup.format, 'yap-backup');
@@ -176,7 +177,7 @@ if (mode === 'verify') {
     console.log(`    (${kept.length} of ${Object.keys(mediaBefore).length} files restored; the rest nothing uses)`);
   });
 
-  await test('the restored account signs in with its name and PIN and finds its message', async () => {
+  await test('the restored account signs in with its name and password and finds its message', async () => {
     const c = await connect();
     c.send({ t: 'hello', v: 1, client: 'test', login: { name: account.name, pin: account.pin } });
     const ready = await c.next((m) => m.t === 'ready' || m.t === 'error');

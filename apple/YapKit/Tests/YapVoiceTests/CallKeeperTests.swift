@@ -371,6 +371,32 @@ final class CallKeeperTests {
         #expect(chimes.last == .peerJoined(uid: "cleo"))
     }
 
+    @Test func anOBSLinkListensWithoutChimes() {
+        // Cleo's OBS link (client "obs", which never asks to resume): it joins,
+        // offers to us like any newcomer, and goes again, without a sound.
+        func obsJoins(_ sid: String) {
+            directory.sessions[sid] = Session(sid: sid, uid: "cleo", client: "obs")
+            voice(sid, channel: "lounge", resume: false)
+            mesh.connect(sid, uid: "cleo")
+        }
+        obsJoins("s-obs")
+        voice("s-obs", channel: nil)
+        #expect(!mesh.peerSids.contains("s-obs"), "its connection closes as usual")
+        obsJoins("s-obs2")
+        voice("s-obs2", channel: nil, lost: true)
+        clock.advance(10)
+        // Our own reconnect, while another OBS link left: we let it go, quietly too.
+        obsJoins("s-obs3")
+        let ada = Session(sid: "s-ada", uid: "ada", client: "web", voice: VoiceState(channelId: "lounge", muted: false, deafened: false, resume: true))
+        let ben = Session(sid: "s-ben", uid: "ben", client: "web", voice: VoiceState(channelId: "lounge", muted: false, deafened: false, resume: true))
+        dropAndResume(readySessions: [ada, ben])
+        #expect(!mesh.peerSids.contains("s-obs3") && !keeper.isGhost("s-obs3"))
+        keeper.joined(prev: "s-me", others: ["s-ada", "s-ben"])
+        mine = "lounge"
+        clock.advance(10)
+        #expect(chimes.isEmpty, "no join or leave chime for an OBS link")
+    }
+
     @Test func leavingDropsGhostsAndHeldChimesQuietly() {
         voice("s-ada", channel: nil, lost: true)
         directory.sessions["s-ben"]?.voice?.resume = false

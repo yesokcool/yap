@@ -45,11 +45,6 @@ enum AppIdentity {
         #endif
     }
 
-    /// "1.0": the marketing version alone (the sidebar footer's "v1.0").
-    nonisolated static var shortVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
-    }
-
     /// How a call report names the app: "Yap for iPhone", "Yap for iPad", "Yap for Mac" (and "Yap Dev …").
     @MainActor static var reportName: String {
         let name = isDevBuild ? "Yap Dev" : "Yap"

@@ -31,7 +31,7 @@ enum RecentEmoji {
     }
 }
 
-/// What every skin's emoji picker lists: recents, the server's custom emoji
+/// What the emoji pickers list: recents, the server's custom emoji
 /// A–Z, and search across custom and standard emoji.
 enum EmojiBrowser {
     @MainActor

@@ -49,7 +49,7 @@ const NATIVE_CLIENT = process.env.YAP_NATIVE_CLIENT ?? 'yap-voice-test';
 const TIMEOUT_MS = Number(process.env.YAP_PEER_TIMEOUT_MS ?? 240_000);
 const RUN = Math.random().toString(36).slice(2, 6);
 const NAME = `Webby ${RUN}`;
-const PIN = '582039';
+const PASSWORD = 'correct-horse-582039';
 const VOICE_ONLY = process.env.YAP_PEER_SCENARIOS === 'voice';
 
 const IMPAIR = process.env.YAP_IMPAIR || null;
@@ -204,29 +204,29 @@ try {
   page.on('pageerror', (err) => console.log('[web] page error:', err.message));
   await page.goto(`${BASE}/#key=${encodeURIComponent(KEY)}`);
 
-  // Get online like a person would: "I'm new" → waiting room → the admin lets us in.
+  // Get online like a person would: "I'm new" with a password (one Password
+  // field, no "again" since round 6) → waiting room → the admin lets us in.
+  // The web never opens its password dialog by itself any more (only from
+  // Settings or the "Choose a password" bar), so there's nothing else to fill.
   for (let i = 0; i < 8; i++) {
     const s = await page.waitForFunction(() => {
       if (document.querySelector('#welcome-dialog')?.open) return 'welcome';
-      if (document.querySelector('#pin-dialog')?.open) return 'pin';
       const st = globalThis.yap?.state.status;
       return st === 'online' || st === 'waiting' ? st : false;
     }, null, { timeout: 20000 }).then((h) => h.jsonValue());
     if (s === 'welcome') {
       await page.click('#welcome-form label:has(input[value=signup])');
       await page.fill('#welcome-form input[name=name]', NAME);
-      await page.fill('#welcome-form input[name=pin]', PIN);
+      await page.fill('#welcome-form input[name=pin]', PASSWORD);
       await page.click('#welcome-form button[type=submit]');
       await page.waitForFunction(() => !document.querySelector('#welcome-dialog')?.open || document.querySelector('#welcome-error:not([hidden])'), null, { timeout: 10000 });
+      // Refused (e.g. the server's password rules): say so instead of timing out later.
+      const refused = await page.evaluate(() => (document.querySelector('#welcome-dialog')?.open && document.querySelector('#welcome-error:not([hidden])')?.textContent) || '');
+      if (refused) throw new Error(`sign-up refused: ${refused}`);
     } else if (s === 'waiting') {
       const uid = await page.evaluate(() => yap.settings.uid);
       await fetch(`${BASE}/api/admin/role?uid=${uid}&role=member`, { method: 'POST', headers: { Authorization: `Bearer ${ADMIN}` } });
       await page.waitForFunction(() => yap.state.status === 'online', null, { timeout: 10000 });
-    } else if (s === 'pin') {
-      await page.fill('#pin-form input[name=pin]', PIN);
-      await page.fill('#pin-form input[name=again]', PIN);
-      await page.click('#pin-form button[type=submit]');
-      await page.waitForFunction(() => !document.querySelector('#pin-dialog')?.open);
     } else {
       await page.waitForTimeout(700);
       if (await page.evaluate(() => !document.querySelector('dialog[open]'))) break;

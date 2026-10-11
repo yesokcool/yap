@@ -141,7 +141,7 @@ enum Switcher {
                                     subtitle: client.isUnread(channel) ? "unread" : nil, systemImage: "number", action: .channel(channel.id)))
         }
         for channel in client.voiceChannels {
-            let here = client.voiceSessions(in: channel.id).count
+            let here = client.voiceRoster(in: channel.id).count
             all.append(SwitcherItem(id: "v:\(channel.id)", kind: .voice, title: channel.name,
                                     subtitle: model.voice.wantedChannelId == channel.id ? "you're here" : here > 0 ? "\(here) in voice" : "voice · join",
                                     systemImage: "speaker.wave.2.fill", action: .voice(channel.id)))

@@ -776,9 +776,6 @@ public final class VoiceEngine {
 
     public func connectionState(of sid: String) -> PeerState? { peerStates[sid] }
 
-    /// Signals waiting for a socket, per connection (tests).
-    public func waitingSignals(for sid: String) -> Int { peers[sid]?.waiting ?? 0 }
-
     /// ICE restarts since the connection was last up (tests, debugging).
     public func iceRestarts(of sid: String) -> Int { peers[sid]?.restarts ?? 0 }
 }

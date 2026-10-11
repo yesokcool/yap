@@ -60,9 +60,15 @@ OPTIONS (headless test mode):
   --hear-yourself WAV  Once in voice, run Settings › Voice › Hear yourself and save
                        what came out of the codec (HEAR lines)
   --call-report FILE   At the end, write the call report there (CALLREPORT line)
-  --approve-all        Let everyone in from the waiting room (test doorman)
-  --pin PIN            Sign in with --name and this 6-digit PIN (prints TOKEN)
-  --signup             With --pin: create the account (lands in the waiting room)
+  --approve-all        Let everyone in from the waiting room (a test doorman: only
+                       the owner and mods are told someone's waiting)
+  --password P         Sign in with --name and this password (prints TOKEN); an old
+                       6-digit PIN signs in too. Without --signup, an unknown name
+                       signs up. (--pin P is the same.)
+  --signup             With --password: create the account (lands in the waiting room)
+  --set-password NEW   Once in, change the password (the sign-in one is the current):
+                       PASSWORD saved, or the server's Error. (Every sign-in logs
+                       ACCOUNT uid=… secret=… weak=… prompt=… role=… at ready.)
   --react EMOJI        With --react-to: react with this emoji
   --react-to TEXT      ...to every incoming message containing TEXT
   --ping TEXT          Ping everyone once connected
@@ -101,7 +107,7 @@ OPTIONS (headless test mode):
   --watch-screen       Watch the first person sharing in our voice channel (SCREEN
                        frames lines; the SUMMARY says how many pictures decoded, and their size)
   --delete-after SECS  Delete our last picture (else last message) SECS in (encrypted: with its blob)
-  --token TOKEN        Sign in with a device token (one of --pin / --token is needed)
+  --token TOKEN        Sign in with a device token (one of --password / --token is needed)
   --duration SECS      Exit after SECS (default: run until killed)
   --list-devices       Print audio devices and exit
   --update-check       With --server: is a newer signed release available?
@@ -169,7 +175,8 @@ fn main() {
             "--denoise" => h.denoise = true,
             "--echo-cancel" => h.echo_cancel = true,
             "--approve-all" => h.approve_all = true,
-            "--pin" => h.pin = Some(need(&mut args, "--pin")),
+            "--password" | "--pin" => h.pin = Some(need(&mut args, "--password")),
+            "--set-password" => h.set_password = Some(need(&mut args, "--set-password")),
             "--signup" => h.signup = true,
             "--token" => h.token = Some(need(&mut args, "--token")),
             "--speakers" => h.speakers = true,

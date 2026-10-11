@@ -4,7 +4,7 @@ import YapVoice
 
 /// The web's wording for the quiet notes next to people in a call
 /// (web/js/app.js › voiceNote, PROTOCOL.md › Voice › Connection hints) and
-/// for the call's own warnings. Each skin draws them its own way.
+/// for the call's own warnings, wherever the app shows them.
 enum VoiceHintText {
     /// How a note is coloured: like the web's `.vq`, `.vq.away`, `.vq.blocked`.
     enum Kind {

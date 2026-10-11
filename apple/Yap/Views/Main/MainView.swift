@@ -64,8 +64,8 @@ struct MainTabView: View {
         .sheet(item: $model.vaultSheet) { mode in
             VaultSheet98(mode: mode)
         }
-        .sheet(isPresented: $model.changingPin) {
-            ChangePinView()
+        .sheet(isPresented: $model.changingPassword) {
+            ChangePasswordView()
         }
         .modifier(ExtrasSheets98())
         .onChange(of: model.voice.isConnected) { _, connected in
@@ -150,8 +150,8 @@ struct MacRootView: View {
         .sheet(item: $model.vaultSheet) { mode in
             VaultSheet98(mode: mode)
         }
-        .sheet(isPresented: $model.changingPin) {
-            ChangePinView()
+        .sheet(isPresented: $model.changingPassword) {
+            ChangePasswordView()
         }
         .modifier(ExtrasSheets98())
         .task {
@@ -179,7 +179,7 @@ struct PeopleButton98: View {
     var titleBar = false
 
     var body: some View {
-        let waiting = model.client.waitingRoom.count
+        let waiting = JoinRequests.waiting(model.client).count
         Button { model.showingPeople = true } label: {
             if titleBar {
                 // A title bar button is too small to hang a badge off: the count sits beside the icon.

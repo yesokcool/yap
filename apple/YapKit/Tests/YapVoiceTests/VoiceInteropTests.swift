@@ -191,7 +191,7 @@ final class VoiceInteropTests {
         voice.engine.redundancy = VoiceTestEnv.redundancy
         voice.settings.mode = .openMic
         let name = "Sim \(VoiceTestEnv.run) \(Int.random(in: 100...999))"
-        client.signUp(name: name, pin: "582039", color: "#0090ff")
+        client.signUp(name: name, pin: "correct-horse-582039", color: "#0090ff")
         try await waitUntil("signed up") { if case .waiting = client.phase { true } else { client.phase == .online } }
         if case .waiting = client.phase {
             try await VoiceTestEnv.letIn(name)

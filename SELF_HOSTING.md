@@ -48,7 +48,7 @@ npm run deploy
 
 Open `https://<your address>/#key=<your YAP_KEY>` and sign up. **The first person becomes the owner.**
 
-Share that same link with friends. Newcomers wait in a waiting room until any member lets them in. Members can also make personal invite links (Settings › Invite), which you can revoke one by one.
+Share that same link with friends. Newcomers wait in a waiting room until you or a mod lets them in (you get a push). Members can also make personal invite links (Settings › Invite), which you can revoke one by one.
 
 If you ever lose owner rights, Settings › Owner & mods › "Claim owner" takes the `ADMIN_KEY`.
 

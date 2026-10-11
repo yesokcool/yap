@@ -298,7 +298,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec
         ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(WIGGLE_SECS));
     }
     sync_pages(st, ui.ctx(), m);
-    keys(app, ui, m, acts);
+    keys(app, ui, acts);
     toolbar(app, ui, m, p, acts);
     ui.add_space(6.0);
     let gallery_h = 76.0;
@@ -350,7 +350,7 @@ fn save(strokes: Vec<Stroke>, wiggle: bool, what: Export) -> Act {
     Act::Cmd(Cmd::SaveDrawing { strokes, gif, wiggle, download: matches!(what, Export::Png | Export::Gif), share: what == Export::Share, then })
 }
 
-fn keys(app: &mut App, ui: &mut egui::Ui, _m: &Model, acts: &mut Vec<Act>) {
+fn keys(app: &mut App, ui: &mut egui::Ui, acts: &mut Vec<Act>) {
     if ui.ctx().egui_wants_keyboard_input() || app.modal.is_some() {
         return;
     }

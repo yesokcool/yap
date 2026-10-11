@@ -4,7 +4,7 @@ import SwiftUI
 /// note, "Sign out of Yap on this device?" — in a Windows 98 message box
 /// (the web's `confirmSheet`, js/sheet.js: a question or warning icon, the
 /// action and Cancel centered). Something to hand on (`value`, the
-/// temporary PIN) gets the value to copy in the box.
+/// temporary password) gets the value to copy in the box.
 struct Question {
     /// A line of text to fill in (the ping note).
     struct Field {
@@ -25,7 +25,7 @@ struct Question {
     /// nil = no Cancel (just telling you something).
     var cancel: String? = "Cancel"
     var field: Field?
-    /// Something to pass on (a temporary PIN): shown on its own, selectable,
+    /// Something to pass on (a temporary password): shown on its own, selectable,
     /// with a Copy button that doesn't close the box.
     var value: String?
     var copyLabel = "Copy"
@@ -56,9 +56,9 @@ extension Question {
                  action: "Turn off", danger: true, perform: { _ in perform() })
     }
 
-    static func resetPin(_ name: String, perform: @escaping () -> Void) -> Question {
-        Question(title: "Reset \(name)’s PIN?", text: "They get a temporary PIN to sign in with; their old PIN or password stops working.",
-                 action: "Reset PIN", danger: true, perform: { _ in perform() })
+    static func resetPassword(_ name: String, perform: @escaping () -> Void) -> Question {
+        Question(title: "Reset \(name)’s password?", text: "They get a temporary password to sign in with; their old one stops working.",
+                 action: "Reset password", danger: true, perform: { _ in perform() })
     }
 
     static func ban(_ name: String, perform: @escaping () -> Void) -> Question {

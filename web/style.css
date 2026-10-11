@@ -493,6 +493,11 @@ a.channel { text-decoration: none; }
 .request-actions .btn, .home-bar .btn { white-space: nowrap; }
 .invite-warn { display: flex; align-items: center; gap: 4px; color: var(--danger); font-size: 11px; }
 .request .invite-warn { color: #800000; }
+/* The "Choose a password" prompt: on a phone its buttons move under the words. */
+#weak-bar { flex-wrap: wrap; }
+#weak-bar .prompt-words { flex: 1 1 260px; min-width: 0; }
+#weak-bar .btn { flex: none; }
+#weak-bar .prompt-words + .btn { margin-left: auto; }
 .invite-warn .icon { flex: none; width: 12px; height: 12px; }
 /* Phones: the words get the width, the buttons go on their own line. */
 @media (max-width: 480px) {
@@ -1171,7 +1176,6 @@ a.btn { text-decoration: none; }
 
 /* OBS listeners in a voice channel; OBS link settings. */
 .voice-member.obs { color: var(--gray); font-style: italic; }
-.obs-badge { width: 16px; text-align: center; font-style: normal; }
 .obs-field .inline-form + .inline-form, .obs-field .btn.small { margin-top: 4px; }
 
 /* Add to Home Screen. */

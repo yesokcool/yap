@@ -81,8 +81,9 @@ xcodebuild build -project Yap.xcodeproj -scheme Yap -destination 'platform=macOS
 
 First run: paste an invite link, like `https://chat.example.com/#key=…`
 (the `https://` is optional). There's no default server, so a bare key isn't
-enough. Then "I'm new" (name + 6-digit PIN + color, then the waiting room)
-or "I have an account". The device token and the invite key live in the
+enough. Then "I'm new" (name + password of 8 characters or more + color,
+then the waiting room until the owner or a mod lets you in) or "I have an
+account". The device token and the invite key live in the
 Keychain; name, color and read marks in UserDefaults.
 
 **Optional server features.** Minecraft status and the board are settings
@@ -153,19 +154,21 @@ first one missing):
    same device, and from there only to the people in your call who ask.
 6. TestFlight › testers: internal testers right away. External testers
    need Beta App Review, which needs a way in: Yap is invite-only, so put an
-   invite link and a test account with its PIN in the review notes.
+   invite link and a test account with its password in the review notes.
 
 ## Tests
 
 Start a local test server first, from the repo root. Any free port works;
 the tests default to 8789. `test/wrangler.test.jsonc` is the server's test
 config: a stand-in board (`test/fixtures/board`) and a Minecraft address
-that never answers.
+that never answers. `TEST_PINS` turns on the test-only
+`POST /api/admin/test-pin`, which gives an account an old 6-digit PIN
+(sign-up only makes passwords); never set it on a real server.
 
 ```sh
 npx wrangler dev -c test/wrangler.test.jsonc -c test/fixtures/board/wrangler.toml --port 8789 \
   --var YAP_KEY:testkey --var KLIPY_KEY:test --var ADMIN_KEY:testadmin \
-  --var PIN_PEPPER:testpepper --persist-to /tmp/yap-test-db
+  --var PIN_PEPPER:testpepper --var TEST_PINS:1 --persist-to /tmp/yap-test-db
 ```
 
 **Protocol client (macOS, ~3 s):** unit tests plus integration tests against
@@ -179,12 +182,14 @@ YAP_TEST_URL=http://127.0.0.1:8789 YAP_TEST_KEY=testkey YAP_TEST_ADMIN=testadmin
 
 They cover: signup → `pending` (with `uid` + token) → admin approval →
 `ready`; login on a second "device"; token reconnect; sign-out revoking only
-that device; friendly `bad_login` / `name_taken` / `bad_pin` / `bad_token`;
+that device; friendly `name_taken` / `bad_token`, and the server's own
+words for `bad_login`, `bad_pin` (a 6-digit PIN can't start an account
+any more) and `weak_pin`;
 send/receive text with formatting and `:shortcode:` conversion; typing;
 unread; history paging; delete; custom emoji token encode/decode and jumbo;
 GIF messages (and the server refusing non-KLIPY URLs); reactions; @mentions;
-pings; avatar upload/remove; the waiting room seen by members (let in, turn
-away → blocked); KLIPY request shapes against a fake KLIPY; Opus SDP tuning;
+pings; avatar upload/remove; the waiting room seen only by the owner and
+mods (let in, turn away → blocked; a member isn't told and is `forbidden`); KLIPY request shapes against a fake KLIPY; Opus SDP tuning;
 invite links (https assumed without a scheme; a bare key or a server
 without a key is refused); `/api/config` without the optional settings.
 Sessions (`SessionTests`): signing out here and being signed out from another
@@ -204,7 +209,7 @@ and the upload token (no `ut`, a wrong one or someone else's → refused, for
 (one-time link, `invitedBy` in the waiting room, the newcomer adopting the
 main key from `ready`, still getting in after the invite is turned off),
 server Places add/remove + the mod log, shared voice quality, OBS listeners
-not counting as online, skin tones, and the picture encoder (compressed ≤ 1600 px by
+neither showing up in voice nor counting as online, skin tones, and the picture encoder (compressed ≤ 1600 px by
 default, Full res keeps the original or the sharpest copy that fits, HEIC →
 JPEG, small GIFs as they are, size labels). Search and pins: the query parser (words, `from:`,
 `has:`), `search.results` / `pinned` / `pins` frames, encrypted notes
@@ -221,7 +226,9 @@ to Personal, quiet hours across devices, hangs (start the server with
 
 **Voice interop with the web client (iOS simulator, ~1 min):** the real web
 client in headless Chromium (`Tools/web-voice-peer.mjs`, needs the repo's
-`node_modules`) and the native engine on a simulator, with a synthetic mic on
+`node_modules`; it signs up through the web's Sign On form — I'm new, a
+name, the test password in its one Password field — and the admin API lets
+it in) and the native engine on a simulator, with a synthetic mic on
 both sides (the web's `getUserMedia` and `getDisplayMedia` are replaced by
 WebAudio and canvas streams, so no device is opened and the OS never asks for
 the microphone or the screen), so no hardware or permission prompts are involved:
@@ -291,6 +298,31 @@ and go), `BroadcastFeederTests` and `YapScreenLinkTests` (the extension ↔ app
 link: framing, sizes, rotation, the scaler, a real socket both ways, either
 side hanging up). ReplayKit itself can't run in a test.
 
+Round 6 added: `PasswordTests` (only a new password has a shape, 8–128
+characters, while signing in takes an old PIN; why `ready.weakPin` asks,
+from `ready.weakReason` — a PIN, a temporary password, a guessable one —
+or, from an older server or an unknown reason, from `secretKind`, until
+`account` says a password is set; the wire's `pin` names), the "joined"
+line from `join.resolved.user` for a member who never saw the request
+(`WebPolishTests`: invited by / let in by the owner, nothing for someone
+turned away or from an older server, never about yourself), a wrong
+sign-in's words (the app's `WordingTests`), and, against the dev server: a
+6-digit PIN refused at sign-up in the server's words, a guessable password
+refused, a wrong sign-in in the server's words, no going back to a PIN, a
+wrong current password, a new password signing in; an old-PIN account
+(`TEST_PINS`) signing in, asked to choose a password (`weakReason` `pin`)
+and setting one with its PIN, after which only the password works; a
+mod's reset handing out a temporary password that signs in and asks for
+your own (`temporary`, also after a relaunch, and not once your own is
+set; a member can't reset); only the owner and mods seeing the waiting
+room (a member isn't told, in `join.request` or `ready.pending`, and is
+`forbidden`), while members and their other devices still read the
+"joined" line, with "invited by" for a personal link, and the newcomer
+only "You're in". An OBS link in voice is in no row or count
+(`ParityTests`) and never chimes, also when it goes while our own socket
+is down (`CallKeeperTests`). Every suite signs up with
+`correct-horse-582039`.
+
 Round 5 added: `RedTests` (RED first in the voice only, the RED fmtp, a
 screen share's audio plain Opus, no RED without an offer of it, off taking
 it out), `RedLoopbackTests` (iOS simulator: two engines in one process with
@@ -302,9 +334,10 @@ person every 10 s, then every minute; the last three kept; a call cut
 short says so).
 
 **App target:** `xcodebuild test -project Yap.xcodeproj -scheme Yap -destination 'platform=iOS Simulator,id=<UDID>'`
-(identity, bundled font, a stored Apple/Arch skin loading as Windows 98 with light/dark kept, the status bar, edit drafts, skin tone,
+(identity, no pixel font shipping, a stored Apple/Arch skin loading as Windows 98 with light/dark kept, the status bar, edit drafts, skin tone,
 color names, away-message ends, composer suggestions, the web's words for the sign-on hint,
-the wrong-PIN help, the join bars, the questions, screen sharing's words, and who gets the voice
+the wrong-password help, the join bars and who sees them (owner and mods), the password words and
+"Choose a password"'s once-per-device memory, the questions, screen sharing's words, and who gets the voice
 roster's popover and which owner/mod actions it offers). It imports YapCore `@testable`
 for `loadDemo` / `receiveForTesting`.
 
@@ -316,8 +349,8 @@ given screen against a dev server, with no synthetic taps (pass them with the
 the Keychain isn't touched. See `Yap/App/DebugLaunch.swift`.
 
 ```sh
-node apple/Tools/seed-demo.mjs --stay 60       # Sam / Cleo / Ada / Ben, PIN 582039, a short chat
-SIMCTL_CHILD_YAP_INVITE='http://127.0.0.1:8789/#key=testkey' SIMCTL_CHILD_YAP_LOGIN='Sam:582039' \
+node apple/Tools/seed-demo.mjs --stay 60       # Sam / Cleo / Ada / Ben, password correct-horse-582039, a short chat
+SIMCTL_CHILD_YAP_INVITE='http://127.0.0.1:8789/#key=testkey' SIMCTL_CHILD_YAP_LOGIN='Sam:correct-horse-582039' \
 SIMCTL_CHILD_YAP_SCREEN='channel:general' xcrun simctl launch <UDID> <your bundle id>
 xcrun simctl io <UDID> screenshot chat.png
 ```
@@ -331,7 +364,7 @@ a picture, edits a message and makes two invite links (one turned off).
 `YAP_SCREEN=members` opens People; `YAP_VAULT_PASSCODE=…` unlocks the
 encrypted Personal space once online (the seed's passcode is "purple tiger
 river"); `YAP_DEMO_REPLY=text` starts a reply to the newest message
-containing it. `YAP_SIGNUP=Name:PIN` lands in the waiting room;
+containing it. `YAP_SIGNUP=Name:password` lands in the waiting room;
 `YAP_SYNTHETIC_AUDIO=1` + `YAP_AUTOJOIN=lounge` joins voice with the fake
 mic; `YAP_FAKE_KLIPY=1` fills the GIF picker without a key;
 `YAP_SEARCH=words` opens search from the open channel (everywhere) with
@@ -364,9 +397,10 @@ makes the Mac's Settings window that tall before the snapshot;
 `YAP_UNREAD_LAST=N` pretends the open channel's last N messages are
 new (the "New since" line, and the Jump to first unread pill when it's off
 screen); `YAP_DRAFT=text` starts the open channel's composer with that text
-(`\n` for a new line); `YAP_DEMO_PINRESET=Name` resets that (throwaway, local)
-account's PIN once online, to show the temporary PIN;
-`YAP_ORIENTATION=landscape` turns the iPhone app to landscape once it's up; `YAP_USE_PASSWORD=1` starts the sign-on form on "Use a password";
+(`\n` for a new line); `YAP_DEMO_RESET=Name` resets that (throwaway, local)
+account's password once online, to show the temporary password;
+`YAP_SCREEN=password` opens Change password (Set a password on an old PIN);
+`YAP_ORIENTATION=landscape` turns the iPhone app to landscape once it's up;
 `YAP_DEMO_CALL_ENDED=soundTaken|soundFailed|stopped|offline|channelGone` (with `YAP_AUTOJOIN` and
 `YAP_SYNTHETIC_AUDIO=1`) ends the call as if that had happened off screen; `YAP_DEMO_BURST=N` sends N
 numbered messages to the open channel at once; `YAP_DEMO_SHARE=1` shares a moving test card once in the
@@ -386,13 +420,11 @@ xcodebuild build -project Yap.xcodeproj -scheme Yap -destination 'platform=macOS
   -derivedDataPath /tmp/yap-snap CODE_SIGN_ENTITLEMENTS= ENABLE_APP_SANDBOX=NO \
   ENABLE_HARDENED_RUNTIME=NO PRODUCT_BUNDLE_IDENTIFIER=com.example.yap.snapshot \
   CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=
-YAP_INVITE='http://127.0.0.1:8789/#key=testkey' YAP_LOGIN='Sam:582039' YAP_APPEARANCE=standard \
+YAP_INVITE='http://127.0.0.1:8789/#key=testkey' YAP_LOGIN='Sam:correct-horse-582039' YAP_APPEARANCE=standard \
   YAP_SNAPSHOT=mac /tmp/yap-snap/Build/Products/Debug/Yap.app/Contents/MacOS/Yap
 ```
 
 ## Since v0.13 (web parity)
-
-Windows 98 keeps its look (new bits use its own components).
 
 - **Edit your own messages:** Edit in the message's menu, or ↑ in an empty
   composer on the Mac. The text comes into the composer (custom emoji as
@@ -427,7 +459,9 @@ Windows 98 keeps its look (new bits use its own components).
   already brought someone else in (`invite.usedBy`, PROTOCOL.md › Waiting
   room) they say so: "This link was also used by Dee — check with Ada."
   (People and the join bars above each text channel's chat.)
-- **Join bars** (the web's `renderRequests`, `JoinRequests`): one bar per
+- **Join bars** (the web's `renderRequests`, `JoinRequests`), for the owner
+  and mods only (only they let people in; a member never sees them, even
+  from an older server that still sends `join.request`): one bar per
   person waiting — "Dee wants to join · invited by Ada", the passed-on-link
   warning, Let in / Turn away — until they'd crowd the chat (iPhone: from
   two, or one during a call; Mac: three, or two), then one "3 people want
@@ -435,9 +469,14 @@ Windows 98 keeps its look (new bits use its own components).
 - **Let in:** when someone is let in, the first text channel gets a quiet
   line for this session only — "Cleo joined — invited by Ada" (or "let in
   by you") — instead of a popup (`YapClient.localNotes`, placed among the
-  messages by time by `MessageRows`); someone turned away is still a notice
-  for everyone else. The newcomer's own first look says "You're in. Say hi
-  👋", with the mention chime.
+  messages by time by `MessageRows`). The owner and mods take the name and
+  the link's maker from the waiting room; everyone else never saw the
+  request and takes them from `join.resolved.user` (servers from round 6
+  on; an older one sent members the request instead). Someone turned away
+  is still a notice for those who saw them waiting. The newcomer's own
+  first look says "You're in. Say hi 👋", with the mention chime, and no
+  "joined" line about themselves (the server sends them that
+  `join.resolved` too).
 - **Places** come from the server (`ready.links`, live `links`; a malformed
   link is skipped, not the whole list): the board opens inside, other links
   in the browser. "New place…" adds an https link; a row's menu removes it.
@@ -446,8 +485,11 @@ Windows 98 keeps its look (new bits use its own components).
   says "Sound: 256k for everyone" when someone has set one for the channel.
   In a call the engine uses the channel's bitrate, else yours
   (`VoiceController.callBitrate`), and renegotiates when it changes.
-- **OBS listeners** (`client: "obs"`) show in voice as "📺 Name's OBS",
-  secondary, no actions, and don't make that person online.
+- **OBS links** (`client: "obs"`) listen without showing up, like on the
+  web: no row under the voice channel or in the call sheet, no join or
+  leave chime, in no count (`YapClient.voiceRoster`), and they don't make
+  that person online. The call still connects to them
+  (`voiceSessions`), so OBS keeps hearing it.
 - **Owner & mods:** an Activity list (`modlog`, same wording as the web).
 - **Skin tones:** a tone row in both emoji pickers (`yap.emojiTone`, 0–5);
   picks, suggestions, reactions and typed `:shortcodes:` use it.
@@ -469,10 +511,9 @@ Windows 98 keeps its look (new bits use its own components).
 
 - **No online/offline anywhere** (PROTOCOL.md › Presence): no dots, counts,
   "last seen" or Online/Offline groups, no member column and no People tab.
-  A **People** button (iPhone: the channel list's toolbar; Mac: the window
-  toolbar / the Win98 chat pane's title bar) opens a sheet with the waiting
-  room (Let in / Turn away) and everyone A–Z with role badges and who's in
-  voice; its badge counts people waiting. The server only shows sessions in
+  A **People** button (iPhone: the channel list's toolbar; Mac: the chat
+  pane's title bar) opens a sheet with the waiting room (Let in / Turn
+  away) and everyone A–Z with role badges and who's in voice; its badge counts people waiting. The server only shows sessions in
   voice or on a shared view (`session.join` → `voice`/`view`, then
   `voice`/`view` → `session.leave`); `YapClient.members` / `voiceChannel(of:)`.
   iPhone is one navigation stack now; during a call the call bar sits at the
@@ -519,21 +560,51 @@ Windows 98 keeps its look (new bits use its own components).
   open (these two, Watch, When's good, a LIVE badge) first asks for a
   one-time pass (`device.handoff`, waiting up to 8 s for the connection)
   and adds `&handoff=…&name=…`; a web app that's already signed in ignores
-  it. Without the pass it asked for name + PIN and landed on chat.
+  it. Without the pass it asked for name + password and landed on chat.
 - **No "online" light of your own:** the connection only shows while it's
   connecting or reconnecting; the nameplate says "Profile & settings".
-- **Accounts:** sign-in and Change PIN take a password (10–128 characters)
-  via "Use a password" (text keyboard instead of the number pad); the
-  server's `weak_pin` reason is shown as is. `ready.weakPin` puts a gentle
-  "Your PIN is easy to guess — change it" bar above the nameplate;
-  `signin.alert` puts "New sign-in: <device>, just now. Not you? Sign Out
-  Everywhere Else" there. Settings › Account lists your devices
-  (`account.devices`) with Sign Out (`account.revoke`) and Sign Out
-  Everywhere Else (`account.signoutOthers`, after a confirmation). Signing
-  out forgets the Personal space key on this device. Signed out from
-  another device (the token stops working, `bad_token`): the same clean
-  slate as signing out here, and the sign-in screen says why. Test/seed PIN: 582039 (424242 is now
-  refused as weak).
+- **Accounts** (PROTOCOL.md › Identity): a name and a password of 8–128
+  characters. Sign On's **Password** field is a secure field with **Show
+  password**, filled in by password managers (`textContentType`
+  `.password` to sign in, `.newPassword` on sign-up, where "8 characters or
+  more." sits under it). Signing in takes whatever was set before, so an
+  account from before passwords still signs in with its 6-digit PIN; only a
+  new password has a shape to check (`Secret`), and the server's refusals
+  show in its words ("Use a password of at least 8 characters.", "That
+  password is too easy to guess.", "Too many wrong tries…"). A wrong
+  sign-in reads as on the web: "Wrong name or password." and under it "An
+  old PIN works here too. Forgot it? The owner or a mod can reset it." (a
+  lockout: "… Forgot your password? The owner or a mod can reset it.";
+  `AuthText.help`). The wire keeps saying `pin`.
+- **Choose a password:** `ready.weakPin` (an old PIN, a reset's temporary
+  password, or a password the server now finds guessable) puts one quiet
+  bar above the nameplate, never a popup: **Choose a password** with "Yap
+  uses passwords now. Your PIN still works until you choose one." (on a
+  PIN), "You signed in with a temporary password. Choose your own." or
+  "Your password is easy to guess. Choose a stronger one.", and the buttons
+  Choose a password and **Later**. Later puts it off on this device for good
+  (`PasswordPrompt`, UserDefaults `yap.passwordPromptLater`, kept through
+  signing out); what it puts off is that reason, so a later reset's
+  temporary password asks once more. The server says which reason
+  (`ready.weakReason`: `pin`, `temporary` or `guessable`; it remembers a
+  temporary password until you choose your own, so a relaunch asks the
+  same); from a server without it, `YapClient.passwordNudge` says `pin` if
+  you signed in with one (`ready.secretKind`), else `guessable`.
+- **Settings › Account:** **Change password…** (**Set a password…** while
+  on a PIN) asks for the **Current password** ("Current password or PIN")
+  and a **New password** ("8 characters or more."), with Show password; no
+  "again" field. `signin.alert` puts "New sign-in: <device>, just now. Not
+  you? Sign Out Everywhere Else" above the nameplate. Settings › Account
+  lists your devices (`account.devices`) with Sign Out (`account.revoke`)
+  and Sign Out Everywhere Else (`account.signoutOthers`, after a
+  confirmation). Signing out forgets the Personal space key on this device.
+  Signed out from another device (the token stops working, `bad_token`):
+  the same clean slate as signing out here, and the sign-in screen says
+  why. No "PIN" anywhere in the app's words, except "Current password or
+  PIN" and the prompt's line for someone still on one.
+- **Tests and seeds** sign up with the made-up password
+  `correct-horse-582039`. An old-PIN account for a test comes from the test
+  server's test-only switch (Tests).
 
 ## Sending, and messages the server turns away
 
@@ -668,9 +739,9 @@ long-press someone under a voice channel — or in the call sheet — for a
 small popover (`VoicePersonMenu`): their name and role, their away note,
 **Volume** 0–200 % in steps of 5 ("Past 100% boosts quiet people", the same
 setting as People › person), **Watch screen** while they share, and what the
-web offers owner and mods: **Make mod / Remove mod** (owner), **Reset PIN**
-and **Ban** (mods, not on the owner; asked first in the usual box). Your own
-row and OBS listeners have none. SwiftUI has no right-click gesture, so one
+web offers owner and mods: **Make mod / Remove mod** (owner), **Reset
+password…** and **Ban** (mods, not on the owner; asked first in the usual box). Your own
+row has none (an OBS link has no row at all). SwiftUI has no right-click gesture, so one
 local event monitor hands a right-click to the row under the pointer
 (`RightClicks`).
 
@@ -693,14 +764,7 @@ launch, so a device that used one opens in Windows 98 with its light/dark
 choice kept (LookTests). The look follows Dynamic Type up to the
 accessibility sizes and small controls keep ≥ 44 pt hit targets on iPhone.
 The sidebar's footer names the server's version (`/changelog.json` ›
-`current`); the app's own version is in Settings › About. Before the
-Apple and Arch skins went, what only they had came to Windows 98: zoom in
-the full-size picture, ⇧⌘F opening Find on Everywhere, Find searching as
-you type and again after a reconnect, ⌘F on an iPad keyboard, Return
-pressing the ✓ in Mac sheets, New poll asking before throwing away typed
-answers, the profile name saving when you leave the field, the waiting
-room's "Anyone already in Yap can let people in" line, and OBS listeners
-not counting as company in the call sheet.
+`current`); the app's own version is in Settings › About.
 
 - **Status bar (iOS):** always white (every screen has a navy title bar
   or the teal desktop on top). The iOS 27 SDK ignores run-time changes to
@@ -729,7 +793,7 @@ not counting as company in the call sheet.
   · **Quiet hours**. Owner & mods › Activity and Invite › Your links show
   five, then "Show all N" (`ShortList`); each opening of Settings starts
   short again (the Mac's Settings window resets when it closes).
-- **Questions** (delete, archive, ban, reset PIN, sign out, sign out
+- **Questions** (delete, archive, ban, reset password, sign out, sign out
   everywhere else, turn off a link, remove a place, delete a sound, cancel
   a hang, discard changes, the ping note) are asked in a Windows 98 message
   box (`.question`, the web's `confirmSheet`), in the web's words
@@ -738,10 +802,11 @@ not counting as company in the call sheet.
   centered, Cancel the default for destructive ones. On iPhone the box sits
   over the dimmed screen without sliding in; on the Mac it's the window's
   sheet.
-- **Temporary PIN** (after an owner/mod resets someone's): the web's words
-  in the box with the PIN in a selectable field and Copy PIN. Whichever
-  screen is on top shows it — the person's sheet, People, or the root
-  (`PinResetNotice`).
+- **Temporary password** (after an owner/mod's **Reset password…**): "Cleo’s
+  temporary password: maple-river-stone-42. Send it to Cleo; they’ll choose
+  their own after signing in." in the box, the password in a selectable
+  field and Copy password. Whichever screen is on top shows it — the
+  person's sheet, People, or the root (`PinResetNotice`).
 - **Reply and edit:** the reply bar quotes the first words of the message
   you're answering (or "📷 A picture", "GIF", "🔒 Encrypted note"); the
   message you're editing gets a dotted focus box and is brought into view
@@ -753,7 +818,7 @@ not counting as company in the call sheet.
 ## Design (Windows 98)
 
 Windows 98 / AIM. `Yap/App/Theme.swift` holds every color, font and metric
-(the same tokens as the web and desktop clients), so a reskin happens there;
+(the same tokens as the web and desktop clients), so the look changes there;
 `Yap/Components/Win98.swift` has the building blocks.
 
 - **Schemes:** **Charcoal** (dark, the default) and **Windows Standard**
@@ -771,7 +836,9 @@ Windows 98 / AIM. `Yap/App/Theme.swift` holds every color, font and metric
 - **Chat:** AIM lines — `(time) Name: message`, my name red, everyone else
   blue, bold. Mentions get the tooltip-yellow row, @names the selection
   color; reactions are small Win98 buttons (mine stay pushed in).
-- **People:** a Win98 window (sheet) with the waiting room and everyone A–Z
+- **People:** a Win98 window (sheet) with the waiting room (owner and mods:
+  "Only the owner and mods can let people in. Turning someone away bans
+  them.") and everyone A–Z
   in a sunken list (role, "(you)", who's in voice); the selected person is
   solid selection color. No online/offline.
 - **iPhone:** native navigation (push and sheets; the call bar under the
@@ -805,10 +872,10 @@ YapCore's `Extras.swift`, `Chimes.swift`, `WAV.swift`, `TextRules.swift`,
   every client shares (`Spoilers.regex`).
 - **▶ Watch together** under a message with a YouTube link (watch, youtu.be,
   shorts, music, m.): `watch.queue {add}` + the web's Watch page, signed in.
-- **Quick switcher:** ⌘K (Mac, iPad keyboard; the app's Go menu), a
-  magnifying glass on the iPhone channel list (Win98: the list's menu ›
-  Run…). Channels, voice (joins), places, links, people, actions; the last
-  row searches messages (`model.searchRequest` → the open channel's search).
+- **Quick switcher** (Jump to): ⌘K (Mac, iPad keyboard; the app's Go
+  menu), or Jump to… in the iPhone channel list's menu. Channels, voice
+  (joins), places, links, people, actions; the last row searches messages
+  (`model.searchRequest` → the open channel's search).
 - **Since you left:** the unread line reads "New since 9:41 PM"; a "Jump to
   first unread" pill shows while it's off screen (pages back if it's older
   than the loaded page) until you've seen it. Counts are asked for on every

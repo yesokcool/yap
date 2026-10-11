@@ -40,7 +40,7 @@ extension View {
 /// picker draws rounded pills; here they're made invisible (still the thing
 /// you tap, so the system's own picker opens) with a Win98 field drawn in
 /// their place. The Mac keeps the system's field-and-stepper.
-struct SkinnedDatePicker<Face: View>: View {
+struct DrawnDatePicker<Face: View>: View {
     var selection: Binding<Date>
     var range: ClosedRange<Date>?
     var components: DatePickerComponents

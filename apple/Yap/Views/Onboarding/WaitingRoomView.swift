@@ -1,7 +1,7 @@
 import SwiftUI
 import YapCore
 
-/// A newcomer waits here until someone already in Yap lets them in.
+/// A newcomer waits here until the owner or a mod lets them in.
 struct WaitingRoomView: View {
     @Environment(AppModel.self) private var model
     var message: String
@@ -24,8 +24,9 @@ struct WaitingRoomView: View {
                     Text("Waiting to be let in").font(Theme.chromeBold)
                     Text(AuthText.waiting(model.client.savedName))
                         .fixedSize(horizontal: false, vertical: true)
-                    // The server's line usually says the same thing again; show it only when it adds something.
-                    if !message.hasPrefix("Waiting for someone") {
+                    // The server's line usually says the same thing again (older
+                    // servers: "Waiting for someone…"); show it only when it adds something.
+                    if !message.hasPrefix("Waiting for") {
                         Text(message).foregroundStyle(Theme.grayText)
                     }
                 }

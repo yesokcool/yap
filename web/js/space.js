@@ -1403,7 +1403,7 @@ export class SpaceWorld {
     ctx.ellipse(p.x, p.y + RADIUS - 2, RADIUS * 0.9, 7, 0, 0, Math.PI * 2);
     ctx.fill();
     if (burning) drawGlow(ctx, p.x, p.y);
-    // "It" in tag: a red ring that pulses (Apple) or blinks between two sizes (the others).
+    // "It" in tag: a red ring that pulses.
     if (it) {
       const beat = (clock() % 1000) / 1000;
       ctx.strokeStyle = '#ff4d4f';

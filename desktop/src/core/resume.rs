@@ -95,17 +95,18 @@ impl Core {
         }
         let ghosts: Vec<String> = self.shared.model.lock().ghosts.keys().cloned().collect();
         for sid in ghosts {
-            let (resumable, back, uid) = {
+            let (resumable, back, uid, obs) = {
                 let m = self.shared.model.lock();
                 let ghost = m.sessions.get(&sid);
                 let uid = ghost.map(|g| g.uid.clone()).unwrap_or_default();
                 let ch = ghost.and_then(|g| g.voice.as_ref()).map(|v| v.channel_id.clone());
-                let back = m.sessions.values().any(|s| s.uid == uid && !m.ghosts.contains_key(&s.sid) && s.voice.as_ref().map(|v| &v.channel_id) == ch.as_ref());
-                (ghost.and_then(|g| g.voice.as_ref()).is_some_and(|v| v.resume), back, uid)
+                // (Their OBS link in the channel isn't them back.)
+                let back = m.sessions.values().any(|s| s.uid == uid && !s.is_obs() && !m.ghosts.contains_key(&s.sid) && s.voice.as_ref().map(|v| &v.channel_id) == ch.as_ref());
+                (ghost.and_then(|g| g.voice.as_ref()).is_some_and(|v| v.resume), back, uid, ghost.is_some_and(Session::is_obs))
             };
             if !resumable || back {
                 self.drop_ghost(&sid, true);
-                if !back {
+                if !back && !obs {
                     self.defer_leave_chime(&uid);
                 }
             }
@@ -192,12 +193,13 @@ impl Core {
         }
     }
 
-    /// They didn't come back: hang up on the kept connection (and chime, unless `quiet`).
+    /// They didn't come back: hang up on the kept connection (and chime, unless
+    /// `quiet` or it's an OBS link, which listens without showing up).
     pub(super) fn drop_ghost(&mut self, sid: &str, quiet: bool) {
         if self.shared.model.lock().ghosts.contains_key(sid) {
             self.call_person(sid, "left", if quiet { "their old connection, closed" } else { "they didn't come back" });
         }
-        let uid = {
+        let (obs, uid) = {
             let mut m = self.shared.model.lock();
             if m.ghosts.remove(sid).is_none() {
                 return;
@@ -205,16 +207,16 @@ impl Core {
             m.hints.remove(sid);
             m.speaking.remove(sid);
             m.peer_states.remove(sid);
-            m.sessions.remove(sid).map(|s| s.uid).unwrap_or_default()
+            m.sessions.remove(sid).map(|s| (s.is_obs(), s.uid)).unwrap_or_default()
         };
         self.voice.drop_peer(sid);
         *self.shared.voice_peers.lock() = self.voice.peers();
         self.emit(CoreEvent::Extra("GHOST", format!("{sid} let go")));
         let still_here = {
             let m = self.shared.model.lock();
-            m.voice_channel.as_ref().is_some_and(|ch| m.sessions.values().any(|s| s.uid == uid && s.voice.as_ref().is_some_and(|v| &v.channel_id == ch)))
+            m.voice_channel.as_ref().is_some_and(|ch| m.sessions.values().any(|s| s.uid == uid && !s.is_obs() && s.voice.as_ref().is_some_and(|v| &v.channel_id == ch)))
         };
-        if !quiet && !still_here {
+        if !quiet && !obs && !still_here {
             self.leave_chime();
         }
         self.repaint();

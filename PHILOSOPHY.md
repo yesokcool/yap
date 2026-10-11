@@ -22,7 +22,7 @@ to type, and a room to talk in.** That's the whole product.
   misses something (screen sharing, Watch together, a soundboard), it comes
   in the smallest possible version.
 - Nothing to manage: the invite link is the door, and an account is just a
-  name and a PIN (a password only if you want one).
+  name and a password.
 
 ## Stance behind the defaults
 - **Quality over thrift** where it's free: 128 kbps Opus by default, up to the

@@ -3,7 +3,7 @@ import Testing
 @testable import Yap
 @testable import YapCore
 
-/// The composer's suggestions, shared by every skin.
+/// The composer's suggestions (`SuggestionEngine`).
 @MainActor
 @Suite("Composer suggestions")
 struct SuggestionEngineTests {

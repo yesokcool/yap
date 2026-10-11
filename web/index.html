@@ -168,8 +168,9 @@
         <input name="name" maxlength="32" required autocomplete="username" placeholder="Your name">
       </label>
       <label class="field">
-        <span class="field-row"><span class="secret-label">PIN <small class="muted">— 6 digits</small></span><button class="link-btn" type="button" data-action="secret-mode" data-form="welcome-form">Use a password</button></span>
-        <input name="pin" type="password" inputmode="numeric" pattern="\d{6}" maxlength="6" required autocomplete="current-password" placeholder="••••••">
+        <span class="field-row"><span>Password</span><button class="link-btn" type="button" data-action="reveal" aria-pressed="false">Show</button></span>
+        <input name="pin" type="password" maxlength="128" required autocomplete="current-password" autocapitalize="off" spellcheck="false">
+        <small class="muted field-note" data-signup-only>8 characters or more.</small>
       </label>
       <div class="field" id="welcome-colors" data-signup-only><span>Color</span><div class="swatches"></div></div>
       <div class="field welcome-paste" id="welcome-paste" hidden>
@@ -187,24 +188,22 @@
 
   <dialog id="pin-dialog" class="sheet" aria-labelledby="pin-title">
     <form method="dialog" id="pin-form" novalidate>
-      <h2 id="pin-title">Change your PIN or password</h2>
-      <p class="muted" id="pin-hint"></p>
+      <h2 id="pin-title">Change password</h2>
+      <!-- Your name, for password managers (they file the new password under it). -->
+      <input name="username" type="text" autocomplete="username" hidden readonly>
       <label class="field" id="pin-current-field" hidden>
-        <span id="pin-current-label">Current PIN</span>
-        <input name="current" type="password" autocomplete="current-password">
+        <span class="field-row"><span id="pin-current-label">Current password</span><button class="link-btn" type="button" data-action="reveal" aria-pressed="false">Show</button></span>
+        <input name="current" type="password" maxlength="128" autocomplete="current-password" autocapitalize="off" spellcheck="false">
       </label>
       <label class="field">
-        <span class="field-row"><span class="secret-label">New PIN <small class="muted">— 6 digits</small></span><button class="link-btn" type="button" data-action="secret-mode" data-form="pin-form">Use a password instead</button></span>
-        <input name="pin" type="password" inputmode="numeric" pattern="\d{6}" maxlength="6" required autocomplete="new-password">
-      </label>
-      <label class="field">
-        <span>Same again</span>
-        <input name="again" type="password" inputmode="numeric" pattern="\d{6}" maxlength="6" required autocomplete="new-password">
+        <span class="field-row"><span>New password</span><button class="link-btn" type="button" data-action="reveal" aria-pressed="false">Show</button></span>
+        <input name="pin" type="password" maxlength="128" required autocomplete="new-password" autocapitalize="off" spellcheck="false">
+        <small class="muted field-note">8 characters or more.</small>
       </label>
       <p class="form-error" id="pin-error" hidden></p>
       <div class="actions">
         <button class="btn" value="cancel" formnovalidate>Cancel</button>
-        <button class="btn primary" type="submit" id="pin-save">Save PIN</button>
+        <button class="btn primary" type="submit" id="pin-save">Save</button>
       </div>
     </form>
   </dialog>
@@ -329,7 +328,7 @@
       <button class="icon-btn" type="button" data-action="close-devices" aria-label="Close" data-icon="x"></button>
     </header>
     <div class="people-list">
-      <p class="muted devices-hint">Everywhere you're signed in. Don't recognize one? Sign it out, then change your PIN.</p>
+      <p class="muted devices-hint">Everywhere you're signed in. Don't recognize one? Sign it out, then change your password.</p>
       <div class="buddy-well"><ul id="devices-list"></ul></div>
       <div class="actions devices-actions"><button class="btn danger" type="button" data-action="signout-others">Sign out everywhere else</button></div>
     </div>
@@ -535,7 +534,7 @@
             <label class="toggle" data-hide-music><input type="checkbox" name="rnnoise"><span>Stronger noise removal <small class="muted">— RNNoise, the same AI filter the desktop app uses (keyboards, fans, dogs)</small></span></label>
             <label class="toggle"><input type="checkbox" name="relayOnly"><span>Hide my IP address in calls <small class="muted" id="relay-note">— sends your voice through the server's voice relay instead of straight to friends</small></span></label>
             <div class="field obs-field">
-              <span>Stream to OBS <small class="muted">— a private link for an OBS Browser Source that plays a voice channel. Everyone in the call sees 📺 while it's listening.</small></span>
+              <span>Stream to OBS <small class="muted">— a private link for an OBS Browser Source that plays a voice channel. Leave it in OBS: it keeps working until you turn it off.</small></span>
               <div class="inline-form obs-options">
                 <span class="combo"><select id="obs-channel" aria-label="Voice channel for OBS"></select></span>
                 <span class="combo"><select id="obs-only" aria-label="Whose voice"><option value="">Everyone in the call</option></select></span>
@@ -598,7 +597,7 @@
 
       <section>
         <h3>Account</h3>
-        <p class="muted">On another phone or computer, choose “I have an account” and sign in with your name and PIN.</p>
+        <p class="muted">On another phone or computer, choose “I have an account” and sign in with your name and password.</p>
         <div class="field" id="vault-settings">
           <span>Personal space <small class="muted">— encrypted with a passcode only you know</small></span>
           <div class="inline-form">
@@ -612,14 +611,14 @@
         </div>
         <div class="inline-form">
           <button class="btn" type="button" data-action="devices"><span data-icon="devices"></span>Your devices</button>
-          <button class="btn" type="button" data-action="change-pin" id="change-pin-btn">Change PIN or password</button>
+          <button class="btn" type="button" data-action="change-pin" id="change-pin-btn">Change password</button>
           <button class="btn danger" type="button" data-action="sign-out">Sign out of this device</button>
         </div>
       </section>
 
       <section>
         <h3>Owner &amp; mods</h3>
-        <p class="muted">New people wait in a waiting room until someone here lets them in. The owner and mods can also ban people and delete any message.</p>
+        <p class="muted">New people wait in a waiting room until the owner or a mod lets them in. The owner and mods can also ban people, delete any message and reset passwords.</p>
         <p id="owner-status"></p>
         <div class="field" id="owner-claim">
           <span>Claim owner <small class="muted">— paste the admin key (the server's <code>ADMIN_KEY</code> secret)</small></span>

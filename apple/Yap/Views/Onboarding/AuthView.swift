@@ -1,15 +1,16 @@
 import SwiftUI
 import YapCore
 
-/// The AIM-style "Sign On" window: "I'm new" (name + 6-digit PIN + color →
-/// signup, then the waiting room) or "I have an account" (name + PIN). "Use
-/// a password" swaps the PIN for a password of 10+ characters.
+/// The AIM-style "Sign On" window: "I'm new" (name + password + color →
+/// signup, then the waiting room) or "I have an account" (name + password;
+/// an old 6-digit PIN still signs in, so that field takes anything and the
+/// server judges it). A new password is 8 characters or more.
 struct AuthView: View {
     @Environment(AppModel.self) private var model
     @State private var mode: YapClient.AuthMode = .login
     @State private var name = ""
     @State private var pin = ""
-    @State private var usePassword = DebugLaunch.current.usePassword
+    @State private var showPassword = false
     @State private var color = Theme.personColors[0]
     @State private var localError: String?
     @State private var initialized = false
@@ -36,21 +37,14 @@ struct AuthView: View {
                         .onSubmit { field = .pin }
                 }
             }
-            labeled(usePassword ? "Password (10+ characters):" : "PIN (6 digits):") {
-                Field98 {
-                    SecureField("", text: $pin)
-                        .textContentType(mode == .signup ? .newPassword : .password)
-                        #if os(iOS)
-                        .keyboardType(usePassword ? .default : .numberPad)
-                        #endif
-                        .focused($field, equals: .pin)
-                        .onChange(of: pin) { _, new in
-                            let cleaned = usePassword ? String(new.prefix(128)) : String(new.filter(\.isNumber).prefix(6))
-                            if cleaned != new { pin = cleaned }
-                        }
-                        .onSubmit(submit)
+            labeled("\(PasswordText.field):") {
+                PasswordField98(text: $pin, isNew: mode == .signup, shown: showPassword)
+                    .focused($field, equals: .pin)
+                    .onSubmit(submit)
+                if mode == .signup {
+                    PasswordRule98()
                 }
-                Check98(title: "Use a password", isOn: $usePassword)
+                Check98(title: PasswordText.show, isOn: $showPassword)
             }
             if mode == .signup {
                 labeled("Color:") {
@@ -58,7 +52,7 @@ struct AuthView: View {
                 }
             }
 
-            Text(AuthText.hint(signup: mode == .signup, password: usePassword))
+            Text(AuthText.hint(signup: mode == .signup))
                 .font(Theme.chrome)
                 .foregroundStyle(Theme.grayText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -97,10 +91,9 @@ struct AuthView: View {
             mode = model.client.authError?.mode ?? (model.client.savedName == nil ? .signup : .login)
         }
         .onChange(of: mode) { localError = nil }
-        .onChange(of: usePassword) {
-            pin = ""
-            localError = nil
-            field = .pin
+        .onChange(of: showPassword) {
+            // The field is swapped for its shown/hidden twin: keep typing in it.
+            if field == .pin { Task { field = .pin } }
         }
     }
 
@@ -111,16 +104,21 @@ struct AuthView: View {
         }
     }
 
+    /// Signing up needs a new password's 8 characters; signing in takes
+    /// whatever was set (an old PIN too).
+    private var secretFits: Bool {
+        mode == .signup ? Secret.isPassword(pin) : Secret.canSignIn(pin)
+    }
+
     private var canSubmit: Bool {
-        !name.isBlank && (usePassword ? Secret.isPassword(pin) : Secret.isPIN(pin))
-            && model.client.phase != .connecting
+        !name.isBlank && secretFits && model.client.phase != .connecting
     }
 
     private func submit() {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        guard usePassword ? Secret.isPassword(pin) : Secret.isPIN(pin) else {
-            localError = usePassword ? "Passwords are 10 to 128 characters." : "Your PIN is exactly 6 digits."
+        guard secretFits else {
+            localError = mode == .signup ? "Use a password of at least 8 characters." : "Type your password."
             return
         }
         localError = nil

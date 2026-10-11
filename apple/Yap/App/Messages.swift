@@ -189,7 +189,6 @@ extension PersonalSpace {
     }
 
     static let encryptedNote = "End-to-end encrypted with your passcode: this device and your others that know it can read these notes; Yap's server and its backups only ever see scrambled text. Forget the passcode and they're gone for good. (Someone holding your unlocked device can still read it.)"
-    static let lockedNote = "Locked on this device."
 
     /// A run of notes this device can't open yet (one row, not one line each).
     static func lockedRun(_ count: Int) -> String {
@@ -221,7 +220,7 @@ extension ServerEndpoint {
     var changelogURL: URL { baseURL.appending(path: "changelog") }
     /// The web app, at `place` if given (`draw`, `space`, `when`, `watch`…).
     /// With a one-time `pass` it opens signed in: the web keeps its own
-    /// sign-in, apart from the app's, and would otherwise ask for name + PIN
+    /// sign-in, apart from the app's, and would otherwise ask for name + password
     /// and land on chat. The fragment never reaches the server.
     func webURL(place: String? = nil, pass: String? = nil, name: String? = nil) -> URL? {
         var link = inviteLink

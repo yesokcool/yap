@@ -46,13 +46,13 @@ pub enum Cmd {
     UploadEmoji { name: String, bytes: Vec<u8> },
     /// Server/key changed (welcome screen): reconnect from scratch.
     Reconnect,
-    /// Sign in (or sign up) on the current server with name + PIN.
+    /// Sign in (or sign up) on the current server with name + password.
     SignIn(Auth),
-    /// Set or change our PIN.
-    SetPin { pin: String, current: Option<String> },
+    /// Set or change our password (`current`: the password or old PIN, when there is one).
+    SetPassword { password: String, current: Option<String> },
     SignOut,
-    /// Owner/mod: give someone a temporary PIN.
-    ResetPin { uid: String },
+    /// Owner/mod: give someone a temporary password.
+    ResetPassword { uid: String },
     /// Settings › Account: list your devices / sign one out / sign out all the others.
     Devices,
     RevokeDevice(String),

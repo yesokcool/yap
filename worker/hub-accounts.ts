@@ -1,18 +1,30 @@
-// Accounts: hello (token, sign-in, sign-up), devices, lockouts, PINs and
-// passwords, sign-out, one-time sign-in passes, OBS links, and the encrypted
-// Personal space's key.
-import { PIN_RE, deviceLabel, hashPin, isSecret, needsRehash, newToken, randomPin, tokenHash, verifyPin, weakSecret } from './auth';
+// Accounts: hello (token, sign-in, sign-up), devices, lockouts, passwords
+// (and old PINs), sign-out, one-time sign-in passes, OBS links, and the
+// encrypted Personal space's key.
+import { PIN_RE, deviceLabel, hashPin, needsRehash, newToken, passwordRule, tempPassword, tokenHash, verifyPin, weakPassword } from './auth';
 import type { Attachment } from './attachment';
 import { COLOR_RE, ClientError, cleanName, cleanVaultWrap, personalId } from './validate';
-import { LIMITS, PROTOCOL_VERSION, type ClientMessage, type Device, type Role, type VaultWrap } from './protocol';
+import { LIMITS, PROTOCOL_VERSION, type ClientMessage, type Device, type Role, type ServerMessage, type VaultWrap } from './protocol';
 import type { HubHost } from './hub-host';
 import { deliver, pushTargets } from './hub-pushes';
 
 /** How long a one-time sign-in pass (device.handoff) stays good. */
 const HANDOFF_MS = 15 * 60_000;
 
-/** What a PIN or password has to be (sign-up and changing it). */
-const SECRET_RULE = 'Use exactly 6 digits for a PIN, or a password of 10 or more characters.';
+/**
+ * users.weak_secret: 0 = fine, 1 = should be replaced (an old PIN, or a
+ * password the rules now call guessable), 2 = a temporary password from a
+ * reset, until its owner chooses their own. Anything but 0 → ready.weakPin.
+ */
+export const WEAK = { no: 0, yes: 1, temporary: 2 } as const;
+
+/** A new password (sign-up, Change password): bad_pin or weak_pin, or fine. */
+function checkNewPassword(secret: string, name: string) {
+  const rule = passwordRule(secret);
+  if (rule) throw new ClientError('bad_pin', rule);
+  const weak = weakPassword(secret, name);
+  if (weak) throw new ClientError('weak_pin', weak);
+}
 
 export async function onHello(hub: HubHost, ws: WebSocket, me: Attachment, msg: Extract<ClientMessage, { t: 'hello' }>) {
   if (me.hello) throw new ClientError('already_hello', 'Already said hello.');
@@ -30,12 +42,12 @@ export async function onHello(hub: HubHost, ws: WebSocket, me: Attachment, msg: 
         'SELECT user_id, scope, created_at, client, label FROM devices WHERE token_hash = ?', hash,
       )
       .toArray()[0];
-    if (!device) throw new ClientError('bad_token', 'This device was signed out. Sign in with your name and PIN.');
+    if (!device) throw new ClientError('bad_token', 'This device was signed out. Sign in with your name and password.');
     uid = hub.canonical(device.user_id);
     if (device.scope === 'handoff') {
       // A one-time pass (e.g. a new home-screen app): spend it, hand out a real token.
       hub.sql.exec('DELETE FROM devices WHERE token_hash = ?', hash);
-      if (now - device.created_at > HANDOFF_MS) throw new ClientError('bad_token', 'That sign-in link expired. Sign in with your name and PIN.');
+      if (now - device.created_at > HANDOFF_MS) throw new ClientError('bad_token', 'That sign-in link expired. Sign in with your name and password.');
       ({ token, me } = await issueToken(hub, me, uid, client));
     }
     const listen = device.scope === 'listen';
@@ -55,24 +67,27 @@ export async function onHello(hub: HubHost, ws: WebSocket, me: Attachment, msg: 
     const pin = String(msg.login.pin ?? '');
     checkLockout(hub, name, me.ip ?? '');
     const row = hub.sql
-      .exec<{ id: string; pin_hash: string | null; role: Role }>(
-        `SELECT id, pin_hash, role FROM users WHERE lower(name) = lower(?) AND role != 'banned'
+      .exec<{ id: string; pin_hash: string | null; role: Role; secret_kind: string | null; weak_secret: number | null }>(
+        `SELECT id, pin_hash, role, secret_kind, weak_secret FROM users WHERE lower(name) = lower(?) AND role != 'banned'
          AND id NOT IN (SELECT alias FROM user_aliases)`,
         name,
       )
       .toArray()[0];
     if (row && !row.pin_hash) {
-      throw new ClientError('no_pin', `${name} hasn't set a PIN yet. Use a device that's already signed in to set one (Settings → Account), or ask the owner or a mod to reset it.`);
+      throw new ClientError('no_pin', `${name} hasn't set a password yet. Use a device that's already signed in to set one (Settings › Account), or ask the owner or a mod to reset it.`);
     }
     if (!row || !(await verifyPin(pin, row.pin_hash, hub.pepper))) {
       recordFailure(hub, name, me.ip ?? '');
-      throw new ClientError('bad_login', 'Wrong name or PIN.');
+      throw new ClientError('bad_login', 'Wrong name or password.');
     }
     hub.sql.exec('DELETE FROM login_failures WHERE name = ?', name.toLowerCase());
     if (needsRehash(row.pin_hash)) hub.sql.exec('UPDATE users SET pin_hash = ? WHERE id = ?', await hashPin(pin, hub.pepper), row.id);
     uid = row.id;
-    // The only moment the server sees the PIN: remember if it's guessable, so every device can nudge.
-    hub.sql.exec('UPDATE users SET weak_secret = ? WHERE id = ?', weakSecret(pin, name) ? 1 : 0, uid);
+    // The only moment the server sees the secret: remember whether it should be replaced, so every
+    // device can ask once (ready.weakPin). An old PIN always should; a temporary password stays
+    // temporary until its owner chooses one; any other password is checked against today's rules.
+    const weak = row.secret_kind !== 'password' ? WEAK.yes : row.weak_secret === WEAK.temporary ? WEAK.temporary : weakPassword(pin, name) ? WEAK.yes : WEAK.no;
+    hub.sql.exec('UPDATE users SET weak_secret = ? WHERE id = ?', weak, uid);
     ({ token, me } = await issueToken(hub, me, uid, client));
     alertSignIn(hub, uid, me.tokenHash!);
   } else if (msg.signup) {
@@ -80,10 +95,10 @@ export async function onHello(hub: HubHost, ws: WebSocket, me: Attachment, msg: 
     const name = cleanName(msg.signup.name, LIMITS.nameChars);
     if (!name) throw new ClientError('bad_name', 'Pick a name.');
     const secret = String(msg.signup.pin ?? '');
-    if (!isSecret(secret)) throw new ClientError('bad_pin', SECRET_RULE);
-    if (hub.nameTaken(name, '')) throw new ClientError('name_taken', `Someone here is already called ${name}. If that's you, choose "I have an account" and sign in with your PIN.`);
-    const weak = weakSecret(secret, name);
-    if (weak) throw new ClientError('weak_pin', `${weak} Pick another.`);
+    const rule = passwordRule(secret);
+    if (rule) throw new ClientError('bad_pin', rule);
+    if (hub.nameTaken(name, '')) throw new ClientError('name_taken', `Someone here is already called ${name}. If that's you, choose "I have an account" and sign in with your password.`);
+    checkNewPassword(secret, name);
     if (hub.hasMembers() && hub.pendingUsers().length >= 20) throw new ClientError('busy', 'Too many people are waiting to join right now. Try again later.');
     limitSignups(hub, me);
     uid = crypto.randomUUID().replace(/-/g, '');
@@ -91,8 +106,8 @@ export async function onHello(hub: HubHost, ws: WebSocket, me: Attachment, msg: 
     // The very first person on a brand-new server becomes its owner.
     const role: Role = hub.hasMembers() ? 'pending' : 'owner';
     hub.sql.exec(
-      'INSERT INTO users (id, name, color, created_at, last_seen, role, pin_hash, secret_kind, weak_secret) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)',
-      uid, name, color, now, now, role, await hashPin(secret, hub.pepper), PIN_RE.test(secret) ? 'pin' : 'password',
+      "INSERT INTO users (id, name, color, created_at, last_seen, role, pin_hash, secret_kind, weak_secret) VALUES (?, ?, ?, ?, ?, ?, ?, 'password', 0)",
+      uid, name, color, now, now, role, await hashPin(secret, hub.pepper),
     );
     if (me.invite) {
       hub.sql.exec('UPDATE users SET invite_id = ? WHERE id = ?', me.invite, uid);
@@ -103,7 +118,7 @@ export async function onHello(hub: HubHost, ws: WebSocket, me: Attachment, msg: 
     // No credentials (no token, login or signup), like a device from before
     // PINs that only knows its uid: uids are visible to members, so they
     // prove nothing. Every client sends people to sign-in on this code.
-    throw new ClientError('pin_required', 'Sign in with your name and PIN. No PIN yet? Ask the owner or a mod to reset it for you.');
+    throw new ClientError('pin_required', 'Sign in with your name and password. No password yet? Ask the owner or a mod to reset it for you.');
   }
 
   const user = hub.user(uid);
@@ -112,18 +127,26 @@ export async function onHello(hub: HubHost, ws: WebSocket, me: Attachment, msg: 
   me = { ...me, rk: await hub.resumeKey(me.sid, uid) };
   if (user.role === 'pending') {
     ws.serializeAttachment({ ...me, uid, client, pending: true });
-    hub.send(ws, { t: 'pending', message: 'Waiting for someone here to let you in.', uid, token });
-    hub.broadcast({ t: 'join.request', user: hub.pendingUsers().find((u) => u.id === uid) ?? user });
-    if (msg.signup && Date.now() - hub.lastJoinPush > 120_000) {
-      // One push per 2 minutes at most, so a leaked link can't make phones buzz nonstop.
+    hub.send(ws, { t: 'pending', message: WAITING, uid, token });
+    // Only the owner and mods let people in, so only they hear about it.
+    const waiting = hub.pendingUsers().find((u) => u.id === uid) ?? user;
+    toMods(hub, { t: 'join.request', user: waiting });
+    // The owner and mods with pushes on get one (deliver() keeps each one's quiet hours), at most
+    // once every 2 minutes, so a leaked link can't make phones buzz nonstop.
+    const targets = msg.signup ? pushTargets(hub).filter((p) => hub.isMod(p.id)) : [];
+    if (targets.length && Date.now() - hub.lastJoinPush > 120_000) {
       hub.lastJoinPush = Date.now();
-      for (const t of pushTargets(hub)) {
-        deliver(hub, t, { title: `🚪 ${user.name} wants to join Yap`, message: 'Open Yap to let them in (or turn them away).', tags: ['door'], priority: 4, tag: 'join' });
+      for (const t of targets) {
+        deliver(hub, t, {
+          title: `🚪 ${user.name} is waiting to join`,
+          message: `${waiting.invitedBy ? `Invited by ${waiting.invitedBy}. ` : ''}Open Yap to let them in or turn them away.`,
+          tags: ['door'], priority: 4, tag: 'join',
+        });
       }
     }
     return;
   }
-  // OBS links show up as "obs" so everyone in the call can see who's listening.
+  // OBS links connect as "obs": apps leave them out of the channel list and chimes.
   hub.admit(ws, { ...me, uid, client: me.listen ? 'obs' : client }, token);
 }
 
@@ -185,7 +208,7 @@ export function onSignOutOthers(hub: HubHost, ws: WebSocket, me: Attachment) {
   hub.send(ws, { t: 'devices', devices: devicesOf(hub, me) });
 }
 
-/** A new device signed in with your name + PIN: tell your other devices (and your phone). */
+/** A new device signed in with your name + password: tell your other devices (and your phone). */
 function alertSignIn(hub: HubHost, uid: string, hash: string) {
   const row = hub.sql
     .exec<{ client: string; label: string | null; created_at: number; last_seen: number }>('SELECT client, label, created_at, last_seen FROM devices WHERE token_hash = ?', hash)
@@ -198,7 +221,7 @@ function alertSignIn(hub: HubHost, uid: string, hash: string) {
   }
   const target = pushTargets(hub).find((t) => t.id === uid);
   if (target) {
-    deliver(hub, target, { title: '🔐 New sign-in to your Yap account', message: `${device.label}, just now. Not you? Open Yap › Settings › Account › Sign out everywhere else, then change your PIN.`, tags: ['lock'], priority: 4, tag: `signin-${device.id}` }, 'security');
+    deliver(hub, target, { title: '🔐 New sign-in to your Yap account', message: `${device.label}, just now. Not you? Open Yap › Settings › Account › Sign out everywhere else, then change your password.`, tags: ['lock'], priority: 4, tag: `signin-${device.id}` }, 'security');
   }
 }
 
@@ -206,9 +229,9 @@ function alertSignIn(hub: HubHost, uid: string, hash: string) {
 function checkLockout(hub: HubHost, name: string, ip: string) {
   const row = hub.sql.exec<{ locked_until: number }>('SELECT locked_until FROM login_failures WHERE name = ?', name.toLowerCase()).toArray()[0];
   const wait = (row?.locked_until ?? 0) - Date.now();
-  if (wait > 0) throw new ClientError('locked', `Too many wrong PINs. Try again in ${Math.ceil(wait / 60_000)} min.`);
+  if (wait > 0) throw new ClientError('locked', `Too many wrong tries. Try again in ${Math.ceil(wait / 60_000)} min.`);
   const b = hub.peek(`ip:${ip || 'unknown'}`, 'login');
-  if (b && b.n < 1 && Date.now() - b.at < 3_600_000) throw new ClientError('locked', 'Too many wrong PINs from here. Try again later.');
+  if (b && b.n < 1 && Date.now() - b.at < 3_600_000) throw new ClientError('locked', 'Too many wrong tries from here. Try again later.');
 }
 
 function recordFailure(hub: HubHost, name: string, ip: string) {
@@ -231,20 +254,23 @@ function limitSignups(hub: HubHost, me: Attachment) {
   if (!hub.allow(`ip:${ip}`, 'signup', 20, 20 / 3600)) throw new ClientError('slow_down', 'Too many new accounts from here. Try again later.');
 }
 
-/** Set or change your PIN (or password). Changing needs the current one. */
+/**
+ * Set or change your password. Changing needs the current one (your password,
+ * or your old PIN). The new one is always a password: 8–128 characters, not
+ * guessable.
+ */
 export async function onSetPin(hub: HubHost, ws: WebSocket, me: Attachment, msg: Extract<ClientMessage, { t: 'account.pin' }>) {
   const pin = String(msg.pin ?? '');
-  if (!isSecret(pin)) throw new ClientError('bad_pin', SECRET_RULE);
-  const weak = weakSecret(pin, hub.user(me.uid)?.name ?? '');
-  if (weak) throw new ClientError('weak_pin', `${weak} Pick another.`);
+  checkNewPassword(pin, hub.user(me.uid)?.name ?? '');
   hub.limit(me.sid, 'pin', 5, 1 / 60);
-  const stored = hub.sql.exec<{ pin_hash: string | null }>('SELECT pin_hash FROM users WHERE id = ?', me.uid).toArray()[0]?.pin_hash ?? null;
-  if (stored && !(await verifyPin(String(msg.current ?? ''), stored, hub.pepper))) throw new ClientError('bad_login', 'Your current PIN is wrong.');
-  const kind = PIN_RE.test(pin) ? 'pin' : 'password';
-  hub.sql.exec('UPDATE users SET pin_hash = ?, secret_kind = ?, weak_secret = 0 WHERE id = ?', await hashPin(pin, hub.pepper), kind, me.uid);
+  const row = hub.sql.exec<{ pin_hash: string | null; secret_kind: string | null }>('SELECT pin_hash, secret_kind FROM users WHERE id = ?', me.uid).toArray()[0];
+  if (row?.pin_hash && !(await verifyPin(String(msg.current ?? ''), row.pin_hash, hub.pepper))) {
+    throw new ClientError('bad_login', row.secret_kind === 'password' ? 'Your current password is wrong.' : 'Your current password or PIN is wrong.');
+  }
+  hub.sql.exec("UPDATE users SET pin_hash = ?, secret_kind = 'password', weak_secret = ? WHERE id = ?", await hashPin(pin, hub.pepper), WEAK.no, me.uid);
   // (`account.token` stays in the protocol, but every signed-in connection
   // already has a device token, so there's never a new one to hand out.)
-  hub.send(ws, { t: 'account', hasPin: true, kind });
+  hub.send(ws, { t: 'account', hasPin: true, kind: 'password' });
 }
 
 export function onSignOut(hub: HubHost, ws: WebSocket, me: Attachment) {
@@ -252,15 +278,13 @@ export function onSignOut(hub: HubHost, ws: WebSocket, me: Attachment) {
   hub.kick(ws, 4001, 'signed out');
 }
 
-/** Owner/mod: give someone a temporary PIN (they forgot theirs, or never set one). */
+/** Owner/mod: give someone a temporary password (they forgot theirs, or never set one). */
 export async function onResetPin(hub: HubHost, ws: WebSocket, me: Attachment, msg: Extract<ClientMessage, { t: 'member.resetPin' }>) {
-  if (!hub.isMod(me.uid)) throw new ClientError('forbidden', 'Only the owner and mods can reset PINs.');
+  if (!hub.isMod(me.uid)) throw new ClientError('forbidden', 'Only the owner and mods can reset passwords.');
   const target = hub.user(hub.canonical(String(msg.uid)));
   if (!target || target.role === 'banned' || target.role === 'pending') throw new ClientError('no_user', 'No such member.');
-  if (target.role === 'owner' && target.id !== me.uid) throw new ClientError('forbidden', "Can't reset the owner's PIN.");
-  const pin = randomPin();
-  hub.sql.exec("UPDATE users SET pin_hash = ?, secret_kind = 'pin', weak_secret = 0 WHERE id = ?", await hashPin(pin, hub.pepper), target.id);
-  hub.sql.exec('DELETE FROM login_failures WHERE name = ?', target.name.toLowerCase());
+  if (target.role === 'owner' && target.id !== me.uid) throw new ClientError('forbidden', "Can't reset the owner's password.");
+  const pin = await setTemporary(hub, target);
   hub.log(me.uid, 'member.resetPin', target.id, null);
   hub.send(ws, { t: 'pin.reset', uid: target.id, pin });
 }
@@ -269,12 +293,44 @@ export async function onResetPin(hub: HubHost, ws: WebSocket, me: Attachment, ms
 export async function resetPin(hub: HubHost, uid: string) {
   const target = hub.user(hub.canonical(uid));
   if (!target) return { ok: false, message: 'Unknown user id.' };
-  const pin = randomPin();
-  hub.sql.exec("UPDATE users SET pin_hash = ?, secret_kind = 'pin', weak_secret = 0 WHERE id = ?", await hashPin(pin, hub.pepper), target.id);
-  hub.sql.exec('DELETE FROM login_failures WHERE name = ?', target.name.toLowerCase());
+  const pin = await setTemporary(hub, target);
   hub.log('admin', 'member.resetPin', target.id, null);
   return { ok: true, name: target.name, pin };
 }
+
+/** A temporary password replaces whatever they had (and clears any lockout); it asks to be replaced after sign-in. */
+async function setTemporary(hub: HubHost, target: { id: string; name: string }) {
+  const password = tempPassword();
+  hub.sql.exec("UPDATE users SET pin_hash = ?, secret_kind = 'password', weak_secret = ? WHERE id = ?", await hashPin(password, hub.pepper), WEAK.temporary, target.id);
+  hub.sql.exec('DELETE FROM login_failures WHERE name = ?', target.name.toLowerCase());
+  return password;
+}
+
+/**
+ * Tests only (`TEST_PINS=1`, never on a real server): give an account an old
+ * 6-digit PIN, like the ones made before 2026-10-11, since sign-up won't make
+ * them any more. Admin API: POST /api/admin/test-pin?uid=&pin=.
+ */
+export async function setTestPin(hub: HubHost, uid: string, pin: string) {
+  if (hub.env.TEST_PINS !== '1') return { ok: false, message: 'Not on this server.' };
+  const target = hub.user(hub.canonical(uid));
+  if (!target) return { ok: false, message: 'Unknown user id.' };
+  if (!PIN_RE.test(pin)) return { ok: false, message: 'A PIN is 6 digits.' };
+  hub.sql.exec("UPDATE users SET pin_hash = ?, secret_kind = 'pin', weak_secret = ? WHERE id = ?", await hashPin(pin, hub.pepper), WEAK.yes, target.id);
+  hub.sql.exec('DELETE FROM login_failures WHERE name = ?', target.name.toLowerCase());
+  return { ok: true, name: target.name };
+}
+
+/** One message to the owner's and mods' connections (join requests). */
+export function toMods(hub: HubHost, msg: ServerMessage) {
+  const mods = new Set(
+    hub.sql.exec<{ id: string }>("SELECT id FROM users WHERE role IN ('owner', 'mod')").toArray().map((r) => r.id),
+  );
+  hub.sendWhere(msg, (a) => !a.listen && mods.has(a.uid));
+}
+
+/** What a newcomer in the waiting room reads (pending.message). */
+export const WAITING = 'Waiting for the owner or a mod to let you in.';
 
 // ── Sign-in passes for a new home-screen app or device ────────────────
 // A device row with scope 'handoff': good once, for 15 minutes. Expired

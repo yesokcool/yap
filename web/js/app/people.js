@@ -28,7 +28,8 @@ export function renderMembers() {
   const byName = (a, b) => a.name.localeCompare(b.name);
   const people = [...state.users.values()].filter((u) => u.role !== 'pending' && u.role !== 'banned').sort(byName);
   const voiceOf = (uid) => [...state.sessions.values()].find((s) => s.uid === uid && s.voice && s.client !== 'obs');
-  const waiting = [...state.waiting.values()];
+  // Only the owner and mods let people in, so only they see who's waiting.
+  const waiting = isMod() ? [...state.waiting.values()] : [];
   const row = (user) => {
     const me = user.id === settings.uid;
     const inVoice = voiceOf(user.id);
@@ -71,7 +72,7 @@ function memberControlsHtml(user) {
     <label class="field"><span>Volume <output>${volume}%</output></span><input type="range" min="0" max="200" step="5" value="${volume}" data-volume-uid="${esc(uid)}" title="Past 100% boosts quiet people"></label>
     ${canPromote || canBan ? `<div class="pop-actions">
       ${canPromote ? `<button type="button" class="btn small" data-action="set-role" data-uid="${esc(uid)}" data-role="${user.role === 'mod' ? 'member' : 'mod'}">${user.role === 'mod' ? 'Remove mod' : 'Make mod'}</button>` : ''}
-      ${canBan ? `<button type="button" class="btn small" data-action="reset-pin" data-uid="${esc(uid)}">Reset PIN</button>` : ''}
+      ${canBan ? `<button type="button" class="btn small" data-action="reset-pin" data-uid="${esc(uid)}">Reset password…</button>` : ''}
       ${canBan ? `<button type="button" class="btn small danger" data-action="ban" data-uid="${esc(uid)}">Ban</button>` : ''}
     </div>` : ''}`;
 }

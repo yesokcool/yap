@@ -6,7 +6,7 @@ import type { Attachment } from './attachment';
 import { b64urlEncode, sameSecret } from './encoding';
 import { settings } from './settings';
 import { ClientError, EMOJI_NAME_RE, cleanName } from './validate';
-import { LIMITS, type ClientMessage, type Emoji, type Invite, type Link, type ModLogEntry, type Role } from './protocol';
+import { LIMITS, type ClientMessage, type Emoji, type Invite, type JoinedUser, type Link, type ModLogEntry, type Role, type User } from './protocol';
 import type { HubHost } from './hub-host';
 
 /** Databases on the Free plan cap out around here; warn owner/mods at 80%. */
@@ -124,10 +124,12 @@ export function onEmojiRename(hub: HubHost, msg: Extract<ClientMessage, { t: 'em
 
 // ── Moderation ─────────────────────────────────────────────────────────
 
-/** Any member can let someone in (or turn them away). */
+/** The owner and mods let someone in (or turn them away). */
 export function onApprove(hub: HubHost, me: Attachment, uid: unknown, approved: boolean) {
+  if (!hub.isMod(me.uid)) throw new ClientError('forbidden', 'Only the owner and mods can let people in.');
   const target = hub.user(String(uid));
   if (!target || target.role !== 'pending') throw new ClientError('no_request', 'That join request is gone.');
+  const newcomer = approved ? newcomerOf(hub, target) : undefined; // (read while they're still waiting)
   hub.sql.exec('UPDATE users SET role = ? WHERE id = ?', approved ? 'member' : 'banned', target.id);
   for (const ws of hub.ctx.getWebSockets()) {
     const a = ws.deserializeAttachment() as Attachment;
@@ -140,7 +142,16 @@ export function onApprove(hub: HubHost, me: Attachment, uid: unknown, approved: 
     }
   }
   hub.log(me.uid, approved ? 'member.approve' : 'member.deny', target.id, null);
-  hub.broadcast({ t: 'join.resolved', uid: target.id, approved, by: me.uid });
+  hub.broadcast({ t: 'join.resolved', uid: target.id, approved, by: me.uid, ...(newcomer ? { user: newcomer } : {}) });
+}
+
+/**
+ * Who was just let in, for join.resolved: members never saw the request, and
+ * still say "Cleo joined — invited by Ada".
+ */
+function newcomerOf(hub: HubHost, target: User): JoinedUser {
+  const waiting = hub.pendingUsers().find((u) => u.id === target.id);
+  return { id: target.id, name: target.name, color: target.color, ...(waiting?.invitedBy ? { invitedBy: waiting.invitedBy } : {}) };
 }
 
 /** Owner and mods can remove someone: their sessions close and they can't come back. */
@@ -168,14 +179,28 @@ export function onRole(hub: HubHost, me: Attachment, msg: Extract<ClientMessage,
   hub.sql.exec('UPDATE users SET role = ? WHERE id = ?', msg.role, target.id);
   hub.log(me.uid, 'member.role', target.id, msg.role);
   hub.broadcast({ t: 'user', user: hub.user(target.id)! });
+  if (msg.role === 'mod') showWaitingRoom(hub, target.id);
+}
+
+/** Someone just became a mod (or owner): the people already waiting, as if they'd just knocked. */
+function showWaitingRoom(hub: HubHost, uid: string) {
+  const waiting = hub.pendingUsers();
+  if (!waiting.length) return;
+  for (const ws of hub.sockets()) {
+    const a = ws.deserializeAttachment() as Attachment;
+    if (a.uid !== uid || a.listen) continue;
+    for (const user of [...waiting].reverse()) hub.send(ws, { t: 'join.request', user });
+  }
 }
 
 /** Become owner by proving you hold the server's admin key. */
 export function onClaimOwner(hub: HubHost, me: Attachment, msg: Extract<ClientMessage, { t: 'owner.claim' }>) {
   if (!sameSecret(String(msg.key ?? ''), hub.env.ADMIN_KEY ?? '')) throw new ClientError('bad_key', "That isn't the admin key.");
+  const wasMod = hub.isMod(me.uid);
   hub.sql.exec("UPDATE users SET role = 'owner' WHERE id = ?", me.uid);
   hub.log(me.uid, 'owner.claim', me.uid, null);
   hub.broadcast({ t: 'user', user: hub.user(me.uid)! });
+  if (!wasMod) showWaitingRoom(hub, me.uid);
 }
 
 export function modLog(hub: HubHost): ModLogEntry[] {
@@ -375,6 +400,7 @@ export async function mergeUsers(hub: HubHost, from: string, into: string) {
 export async function setRole(hub: HubHost, uid: string, role: Role) {
   const target = hub.user(hub.canonical(uid));
   if (!target) return { ok: false, message: 'Unknown user id.' };
+  const newcomer = target.role === 'pending' && role !== 'banned' ? newcomerOf(hub, target) : undefined;
   hub.sql.exec('UPDATE users SET role = ? WHERE id = ?', role, target.id);
   hub.log('admin', 'member.role', target.id, role);
   for (const ws of hub.ctx.getWebSockets()) {
@@ -385,8 +411,9 @@ export async function setRole(hub: HubHost, uid: string, role: Role) {
       hub.kick(ws, 4003, 'banned');
     } else if (a.pending) hub.admit(ws, a); // approved from the admin API
   }
-  if (target.role === 'pending' && role !== 'banned') hub.broadcast({ t: 'join.resolved', uid: target.id, approved: true, by: 'admin' });
+  if (newcomer) hub.broadcast({ t: 'join.resolved', uid: target.id, approved: true, by: 'admin', user: newcomer });
   hub.broadcast({ t: 'user', user: hub.user(target.id)! });
+  if ((role === 'mod' || role === 'owner') && target.role !== 'mod' && target.role !== 'owner') showWaitingRoom(hub, target.id);
   return { ok: true, user: hub.user(target.id) };
 }
 

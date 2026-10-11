@@ -12,7 +12,7 @@ struct InviteGroup: View {
     var body: some View {
         let client = model.client
         GroupBox98(title: "Invite") {
-            Text("Make a link for a friend. They still wait in the waiting room until someone lets them in, and everyone sees whose invite it was.")
+            Text("Make a link for a friend. They still wait in the waiting room until the owner or a mod lets them in, and everyone sees whose invite it was.")
                 .font(Theme.chrome)
                 .foregroundStyle(Theme.text)
                 .fixedSize(horizontal: false, vertical: true)

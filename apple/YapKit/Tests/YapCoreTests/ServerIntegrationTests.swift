@@ -13,7 +13,8 @@ enum TestServer {
     static var baseURL: URL { URL(string: env["YAP_TEST_URL"] ?? "http://127.0.0.1:8789")! }
     static var endpoint: ServerEndpoint { ServerEndpoint(baseURL: baseURL, key: env["YAP_TEST_KEY"] ?? "") }
     static let run = String(UUID().uuidString.prefix(4)).lowercased()
-    static let pin = "582039"
+    /// The made-up password every suite signs up with (`login.pin` / `signup.pin` on the wire).
+    static let password = "correct-horse-582039"
 
     static func admin(_ path: String, method: String = "GET", query: [String: String] = [:], body: Data? = nil) async throws -> Data {
         var c = URLComponents(url: baseURL.appending(path: path), resolvingAgainstBaseURL: false)!
@@ -43,6 +44,18 @@ enum TestServer {
         let id: String
         if let uid, !uid.isEmpty { id = uid } else { id = try await self.uid(named: name) }
         _ = try await admin("/api/admin/role", method: "POST", query: ["uid": id, "role": "member"])
+    }
+
+    /// Tests only: give an account an old 6-digit PIN, as from before
+    /// passwords (sign-up only makes passwords). Needs the test server's
+    /// `--var TEST_PINS:1`.
+    static func giveOldPin(_ uid: String, pin: String) async throws {
+        _ = try await admin("/api/admin/test-pin", method: "POST", query: ["uid": uid, "pin": pin])
+    }
+
+    /// Only the owner and mods let people in: make someone a mod.
+    static func makeMod(_ uid: String) async throws {
+        _ = try await admin("/api/admin/role", method: "POST", query: ["uid": uid, "role": "mod"])
     }
 
     /// A tiny PNG that's unique per call (same bytes = "duplicate").
@@ -83,11 +96,20 @@ func device(token: String? = nil) -> (YapClient, MemoryCredentialStore) {
     return (YapClient(credentials: store, client: "test-ios"), store)
 }
 
+/// A member the admin made a mod (they let people in), once they know it.
+@MainActor
+func mod(_ name: String, color: String = "#5b6cff") async throws -> (YapClient, MemoryCredentialStore) {
+    let (client, store) = try await member(name, color: color)
+    try await TestServer.makeMod(client.uid)
+    try await waitUntil("\(name) is a mod") { client.isMod }
+    return (client, store)
+}
+
 /// Sign up, wait in the waiting room, get let in by the admin, reach `ready`.
 @MainActor
 func member(_ name: String, color: String = "#5b6cff") async throws -> (YapClient, MemoryCredentialStore) {
     let (client, store) = device()
-    client.signUp(name: name, pin: TestServer.pin, color: color)
+    client.signUp(name: name, pin: TestServer.password, color: color)
     try await waitUntil("\(name) reaches the waiting room or ready") {
         if case .waiting = client.phase { return true }
         return client.phase == .online
@@ -122,7 +144,7 @@ struct ServerIntegrationTests {
         _ = try await member("Host \(TestServer.run)")
         let name = "Ada \(TestServer.run)"
         let (client, store) = device()
-        client.signUp(name: name, pin: TestServer.pin, color: "#5b6cff")
+        client.signUp(name: name, pin: TestServer.password, color: "#5b6cff")
         try await waitUntil("waiting room") { if case .waiting = client.phase { true } else { false } }
         #expect(store.token != nil)
         #expect(client.mySid == nil)
@@ -145,9 +167,9 @@ struct ServerIntegrationTests {
         let (first, firstStore) = try await member(name, color: "#30a46c")
         let firstToken = try #require(firstStore.token)
 
-        // A second device signs in with name + PIN (case-insensitive name).
+        // A second device signs in with name + password (case-insensitive name).
         let (second, secondStore) = device()
-        second.logIn(name: name.uppercased(), pin: TestServer.pin)
+        second.logIn(name: name.uppercased(), pin: TestServer.password)
         try await waitUntil("second device ready") { second.phase == .online }
         #expect(second.uid == first.uid, "same account")
         let secondToken = try #require(secondStore.token)
@@ -183,20 +205,28 @@ struct ServerIntegrationTests {
         wrong.logIn(name: name, pin: "000000")
         try await waitUntil("bad login") { wrong.authError != nil }
         #expect(wrong.authError?.code == "bad_login")
-        #expect(wrong.authError?.message.contains("don't match") == true)
+        #expect(wrong.authError?.message == "Wrong name or password.", "the server's words, as on the web")
         #expect(wrong.phase == .signedOut)
 
         let (taken, _) = device()
-        taken.signUp(name: name.lowercased(), pin: TestServer.pin, color: "#000000")
+        taken.signUp(name: name.lowercased(), pin: TestServer.password, color: "#000000")
         try await waitUntil("name taken") { taken.authError != nil }
         #expect(taken.authError?.code == "name_taken")
         #expect(taken.authError?.mode == .signup)
         #expect(taken.authError?.message.contains("I have an account") == true)
 
-        let (shortPin, _) = device()
-        shortPin.signUp(name: "Pin \(TestServer.run)", pin: "12", color: "#000000")
-        try await waitUntil("bad pin") { shortPin.authError != nil }
-        #expect(shortPin.authError?.code == "bad_pin")
+        let (short, _) = device()
+        short.signUp(name: "Nell \(TestServer.run)", pin: "12", color: "#000000")
+        try await waitUntil("too short") { short.authError != nil }
+        #expect(short.authError?.code == "bad_pin")
+
+        // A 6-digit PIN can't start an account any more: the server says why, in its words.
+        let (pin, _) = device()
+        pin.signUp(name: "Tam \(TestServer.run)", pin: "582039", color: "#000000")
+        try await waitUntil("no new PINs") { pin.authError != nil }
+        #expect(pin.authError?.code == "bad_pin")
+        #expect(pin.authError?.message == "Use a password of at least 8 characters.")
+        #expect(pin.authError?.mode == .signup)
     }
 
     @Test func sendReceiveTextTypingAndHistory() async throws {
@@ -233,7 +263,7 @@ struct ServerIntegrationTests {
         for i in 0..<3 { ada.send(text: "page \(i) \(TestServer.run)", in: "general") }
         try await waitUntil("pages sent") { ada.outbox.isEmpty }
         let (pager, _) = device(token: nil)
-        pager.logIn(name: "Eli \(TestServer.run)", pin: TestServer.pin)
+        pager.logIn(name: "Eli \(TestServer.run)", pin: TestServer.password)
         try await waitUntil("pager ready") { pager.phase == .online }
         pager.open(channel: "general")
         try await waitUntil("newest page") { pager.histories["general"]?.loading == false }
@@ -327,7 +357,7 @@ struct ServerIntegrationTests {
         ben.react(to: message, emoji: "👍", on: true)
         try await waitUntil("ada sees 👍") { ada.histories["general"]?.messages.first { $0.id == message.id }?.reactions.first?.emoji == "👍" }
         let (late, _) = device()
-        late.logIn(name: "Mo \(TestServer.run)", pin: TestServer.pin)
+        late.logIn(name: "Mo \(TestServer.run)", pin: TestServer.password)
         try await waitUntil("late device ready") { late.phase == .online }
         late.open(channel: "general")
         try await waitUntil("history with reactions") { late.histories["general"]?.messages.first { $0.id == message.id }?.reactions.first?.uids == [ben.uid] }
@@ -368,22 +398,44 @@ struct ServerIntegrationTests {
         try await waitUntil("picture removed") { ben.users[ada.uid]?.avatar == nil }
     }
 
-    @Test func waitingRoomVisibleToMembers() async throws {
-        let (host, _) = try await member("Jo \(TestServer.run)")
+    /// Only the owner and mods see the waiting room and let people in; a
+    /// member is never told, and trying anyway is `forbidden`.
+    @Test func waitingRoomIsForOwnerAndMods() async throws {
+        let (host, _) = try await mod("Jo \(TestServer.run)")
+        let (bystander, _) = try await member("Ike \(TestServer.run)")
         let name = "Kai \(TestServer.run)"
         let (newcomer, _) = device()
-        newcomer.signUp(name: name, pin: TestServer.pin, color: "#f76b15")
+        newcomer.signUp(name: name, pin: TestServer.password, color: "#f76b15")
         try await waitUntil("host sees the request") { host.waitingRoom.values.contains { $0.name == name } }
         let uid = try #require(host.waitingRoom.values.first { $0.name == name }?.id)
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(bystander.waitingRoom.isEmpty, "members aren't told")
+        bystander.notice = nil
+        bystander.approve(uid)
+        try await waitUntil("a member can't let people in") { bystander.notice != nil }
+        if case .waiting = newcomer.phase {} else { Issue.record("still waiting after a member tried") }
+        // A member who signs in while someone waits isn't told either (`ready.pending`).
+        let (laptop, _) = device()
+        laptop.logIn(name: "Ike \(TestServer.run)", pin: TestServer.password)
+        try await waitUntil("laptop in") { laptop.phase == .online }
+        #expect(laptop.waitingRoom.isEmpty)
         host.approve(uid)
         try await waitUntil("newcomer in") { newcomer.phase == .online }
         try await waitUntil("request cleared") { host.waitingRoom[uid] == nil }
         #expect(host.users[uid]?.name == name)
+        // Everyone gets the joined line: the member who was never told meets
+        // them in `join.resolved.user`; the newcomer gets "You're in" instead.
+        let line = "\(name) joined — let in by Jo \(TestServer.run)"
+        try await waitUntil("the member's joined line") { bystander.localNotes.contains { $0.plain == line } }
+        try await waitUntil("the laptop's too") { laptop.localNotes.contains { $0.plain == line } }
+        #expect(host.localNotes.contains { $0.plain == "\(name) joined — let in by you" })
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(newcomer.localNotes.map(\.plain) == ["You're in. Say hi 👋"])
 
         // Turned away = banned: stop reconnecting.
         let (stranger, _) = device()
         let strangerName = "Lou \(TestServer.run)"
-        stranger.signUp(name: strangerName, pin: TestServer.pin, color: "#8d8d8d")
+        stranger.signUp(name: strangerName, pin: TestServer.password, color: "#8d8d8d")
         try await waitUntil("host sees stranger") { host.waitingRoom.values.contains { $0.name == strangerName } }
         host.deny(host.waitingRoom.values.first { $0.name == strangerName }!.id)
         try await waitUntil("stranger blocked") { if case .blocked = stranger.phase { true } else { false } }
@@ -418,7 +470,7 @@ struct ServerIntegrationTests {
 
         // History carries editedAt.
         let (late, _) = device()
-        late.logIn(name: "Rae \(TestServer.run)", pin: TestServer.pin)
+        late.logIn(name: "Rae \(TestServer.run)", pin: TestServer.password)
         try await waitUntil("late device ready") { late.phase == .online }
         late.open(channel: "general")
         try await waitUntil("history has the edit") { late.histories["general"]?.messages.first { $0.id == original.id }?.editedAt != nil }
@@ -466,7 +518,7 @@ struct ServerIntegrationTests {
 
     @Test func personalInvitesAndTheMainKey() async throws {
         let inviterName = "Vic \(TestServer.run)"
-        let (ada, _) = try await member(inviterName)
+        let (ada, _) = try await mod(inviterName)
         ada.createInvite(label: "for Wes")
         try await waitUntil("invite made") { ada.createdInvite != nil }
         let created = try #require(ada.createdInvite)
@@ -482,7 +534,7 @@ struct ServerIntegrationTests {
         let name = "Wes \(TestServer.run)"
         let store = MemoryCredentialStore(endpoint: personal)
         let newcomer = YapClient(credentials: store, client: "test-ios")
-        newcomer.signUp(name: name, pin: TestServer.pin, color: "#30a46c")
+        newcomer.signUp(name: name, pin: TestServer.password, color: "#30a46c")
         try await waitUntil("waiting") { if case .waiting = newcomer.phase { true } else { false } }
         try await waitUntil("ada sees who invited them") { ada.waitingRoom.values.contains { $0.name == name } }
         let request = try #require(ada.waitingRoom.values.first { $0.name == name })
@@ -541,7 +593,7 @@ struct ServerIntegrationTests {
         let name = "Bea \(TestServer.run)"
         let (phone, _) = try await member(name)
         let (mac, _) = device()
-        mac.logIn(name: name, pin: TestServer.pin)
+        mac.logIn(name: name, pin: TestServer.password)
         try await waitUntil("second device ready") { mac.phase == .online }
         let (other, _) = try await member("Cal \(TestServer.run)")
 
@@ -625,7 +677,7 @@ struct ServerIntegrationTests {
         ada.delete(mine)
         try await waitUntil("gone for ben") { ben.histories["general"]?.messages.contains { $0.id == original.id } == false }
         let (late, _) = device()
-        late.logIn(name: benName, pin: TestServer.pin)
+        late.logIn(name: benName, pin: TestServer.password)
         try await waitUntil("late device ready") { late.phase == .online }
         late.open(channel: "general")
         try await waitUntil("history loaded") { late.histories["general"]?.loading == false }
@@ -646,7 +698,7 @@ struct ServerIntegrationTests {
         let (phone, _) = try await member(name)
         let macStore = MemoryCredentialStore(endpoint: TestServer.endpoint)
         let mac = YapClient(credentials: macStore, client: "test-mac")
-        mac.logIn(name: name, pin: TestServer.pin)
+        mac.logIn(name: name, pin: TestServer.password)
         try await waitUntil("second device ready") { mac.phase == .online }
         let personal = try #require(phone.personalChannel?.id)
         #expect(phone.vaultWrap == nil && !phone.isSealed(personal))
@@ -726,7 +778,7 @@ struct ServerIntegrationTests {
         let name = "Ivo \(TestServer.run)"
         let (phone, _) = try await member(name)
         let (mac, _) = device()
-        mac.logIn(name: name, pin: TestServer.pin)
+        mac.logIn(name: name, pin: TestServer.password)
         try await waitUntil("second device ready") { mac.phase == .online }
         let personal = try #require(phone.personalChannel?.id)
         phone.open(channel: personal)
@@ -769,15 +821,15 @@ struct ServerIntegrationTests {
     }
 
     @Test func passwordsWeakPinsAndDevices() async throws {
-        // Weak PINs are refused at sign-up, with the server's reason.
+        // Guessable passwords are refused at sign-up, with the server's reason.
         let (weak, _) = device()
-        weak.signUp(name: "Jem \(TestServer.run)", pin: "123456", color: "#000000")
-        try await waitUntil("weak pin refused") { weak.authError != nil }
+        weak.signUp(name: "Jem \(TestServer.run)", pin: "12345678", color: "#000000")
+        try await waitUntil("weak password refused") { weak.authError != nil }
         #expect(weak.authError?.code == "weak_pin")
         #expect(weak.authError?.mode == .signup)
         #expect(weak.authError?.message.isEmpty == false)
 
-        // A password works as well as a PIN, for sign-up and sign-in.
+        // Sign up and sign in with a password.
         let name = "Kit \(TestServer.run)"
         let password = "correct horse \(TestServer.run) battery"
         let (phone, phoneStore) = device()
@@ -812,14 +864,95 @@ struct ServerIntegrationTests {
         #expect(phone.phase == .online)
         #expect(phone.signinAlert == nil)
 
-        // Back to a PIN.
-        phone.changePin(to: "582039", current: password)
+        // No going back to a PIN: refused in the server's words, nothing changes.
+        phone.changePassword(to: "582039", current: password)
+        try await waitUntil("refused") { if case .failed = phone.pinChange { true } else { false } }
+        #expect(phone.pinChange == .failed("Use a password of at least 8 characters."))
+        // A wrong current password is refused too.
+        phone.changePassword(to: "new-\(password)", current: "not-\(password)")
+        try await waitUntil("wrong current one") { if case .failed = phone.pinChange { true } else { false } }
+        // A new password, with the right current one.
+        phone.changePassword(to: TestServer.password, current: password)
         try await waitUntil("saved") { phone.pinChange == .saved }
-        #expect(phone.secretKind == "pin")
+        #expect(phone.secretKind == "password" && phone.passwordNudge == nil)
+        let (watch, _) = device()
+        watch.logIn(name: name, pin: TestServer.password)
+        try await waitUntil("the new password signs in") { watch.phase == .online }
+    }
+
+    /// An account from before passwords: its 6-digit PIN still signs in,
+    /// the app is asked once for a password, the PIN is the current one when
+    /// setting it, and then only the password works.
+    @Test func anOldPinStillSignsIn() async throws {
+        let name = "Ola \(TestServer.run)"
+        let (first, _) = try await member(name)
+        try await TestServer.giveOldPin(first.uid, pin: "582039")
+
+        let (phone, _) = device()
+        phone.logIn(name: name, pin: "582039")
+        try await waitUntil("in with the old PIN") { phone.phase == .online }
+        #expect(phone.uid == first.uid)
+        #expect(phone.secretKind == "pin" && phone.onPin && phone.weakPin)
+        #expect(phone.weakReason == "pin" && phone.passwordNudge == .pin)
+
+        let password = "olive-lantern-\(TestServer.run)"
+        phone.changePassword(to: password, current: "582039")
+        try await waitUntil("password set") { phone.pinChange == .saved }
+        #expect(phone.secretKind == "password" && !phone.onPin && phone.passwordNudge == nil)
+
+        let (stale, _) = device()
+        stale.logIn(name: name, pin: "582039")
+        try await waitUntil("the PIN is gone") { stale.authError != nil }
+        #expect(stale.authError?.code == "bad_login")
+        let (laptop, _) = device()
+        laptop.logIn(name: name, pin: password)
+        try await waitUntil("the password signs in") { laptop.phase == .online }
+        #expect(laptop.secretKind == "password" && laptop.passwordNudge == nil)
+    }
+
+    /// Owner/mods reset a password: a temporary one (three words, two
+    /// digits) comes back; signing in with it asks for your own, the server
+    /// saying why (`ready.weakReason`), also after a relaunch; a member
+    /// can't reset anyone's.
+    @Test func aResetHandsOutATemporaryPassword() async throws {
+        let (host, _) = try await mod("Rex \(TestServer.run)")
+        let name = "Wren \(TestServer.run)"
+        let (wren, _) = try await member(name)
+        let (bystander, _) = try await member("Val \(TestServer.run)")
+
+        bystander.notice = nil
+        bystander.resetPassword(for: wren.uid)
+        try await waitUntil("a member can't reset") { bystander.notice != nil }
+        #expect(bystander.pinReset == nil)
+
+        host.resetPassword(for: wren.uid)
+        try await waitUntil("the temporary password") { host.pinReset != nil }
+        let temporary = try #require(host.pinReset?.pin)
+        #expect(host.pinReset?.name == name)
+        #expect(temporary.wholeMatch(of: /[a-z]+-[a-z]+-[a-z]+-[0-9]{2}/) != nil, "\(temporary)")
+
+        let (phone, phoneStore) = device()
+        phone.logIn(name: name, pin: temporary)
+        try await waitUntil("in with the temporary password") { phone.phase == .online }
+        #expect(phone.weakPin && phone.weakReason == "temporary" && phone.passwordNudge == .temporary)
+        // Still temporary after a relaunch: the same device, its stored token.
+        let relaunched = YapClient(credentials: phoneStore, client: "test-ios")
+        relaunched.start()
+        try await waitUntil("relaunched") { relaunched.phase == .online }
+        #expect(relaunched.passwordNudge == .temporary)
+
+        phone.changePassword(to: "quiet-harbor-\(TestServer.run)", current: temporary)
+        try await waitUntil("own password") { phone.pinChange == .saved }
+        #expect(phone.passwordNudge == nil)
+        // The next sign-in on this device isn't asked again: it's your own password now.
+        let again = YapClient(credentials: phoneStore, client: "test-ios")
+        again.start()
+        try await waitUntil("relaunched again") { again.phase == .online }
+        #expect(!again.weakPin && again.weakReason == nil && again.passwordNudge == nil)
     }
 
     @Test func signInPassForTheWebApp() async throws {
-        // Draw / Space open the web app with a one-time pass instead of name + PIN.
+        // Draw / Space open the web app with a one-time pass instead of name + password.
         let (phone, phoneStore) = try await member("Lux \(TestServer.run)")
         let pass = try #require(await phone.handoffPass())
         #expect(pass != phoneStore.token)
@@ -881,7 +1014,7 @@ struct ServerIntegrationTests {
         for i in 1...6 { ben.send(text: "filler \(i) \(tag)", in: "general") }
         try await waitUntil("fillers arrive") { (ada.histories["general"]?.messages.filter { $0.body.hasPrefix("filler") && $0.body.contains(tag) }.count ?? 0) == 6 }
         let (late, _) = device()
-        late.logIn(name: adaName, pin: TestServer.pin)
+        late.logIn(name: adaName, pin: TestServer.password)
         try await waitUntil("late device") { late.phase == .online }
         late.open(channel: "general")
         try await waitUntil("first page") { late.histories["general"]?.loading == false }

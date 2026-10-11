@@ -24,8 +24,7 @@ enum ShortList {
 
 /// Settings › Voice and › Notifications, grouped the web's way (Mic &
 /// output · How you talk · Sounds · Advanced; On this device · On your
-/// phone (ntfy) · Quiet hours), in each skin's own look. Only what the app
-/// has: no device pickers (iPhone uses the call's output picker, the Mac
+/// phone (ntfy) · Quiet hours). Only what the app has: no device pickers (iPhone uses the call's output picker, the Mac
 /// its system devices), no music mode, RNNoise or OBS links.
 enum SettingsText {
     static let micOutput = "Mic & output"
@@ -37,16 +36,13 @@ enum SettingsText {
     static let quietHours = "Quiet hours"
 
     static let joinSounds = "Join & mute sounds"
-    static let joinSoundsNote = "Yap's join, leave and mute blips, and everyone's join chimes."
     static let chime = "Your join chime"
-    static let chimeNote = "What everyone hears when you join their voice channel."
     static let ownClip = "Use my own clip…"
     /// Under the away message (the web's words, and when it ends here). It only
     /// shows in People and to people who mention you — never beside your name.
     static let awayNote98 = "Like AIM: people who mention you get it as a quiet reply, and it shows in People. It ends when you send a message, or at the time you pick."
     static let ownClipNote = "Your own clip: up to 2 seconds; loud ones are turned down."
     static let boardVolume = "Soundboard volume"
-    static let boardVolumeNote = "Never louder than each clip's safe level."
     static let boardMute = "Mute the soundboard"
     static let clips = "Soundboard clips"
     static let clipsNote = "Short clips anyone in a voice channel can play for everyone in it: two at most at once, never while you're deafened or from someone you've turned all the way down."

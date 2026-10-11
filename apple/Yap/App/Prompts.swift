@@ -46,23 +46,24 @@ struct SignOutOthersPrompt: ViewModifier {
             title: "Sign out everywhere else?", text: "Every other device (and your OBS links) is signed out. You stay signed in here.",
             action: "Sign out", danger: true, perform: { _ in
                 client.signOutOthers()
-                let secret = client.secretKind == "password" ? "password" : "PIN"
-                client.notice = YapClient.Notice(text: "Signed out everywhere else. If it wasn’t you, change your \(secret) now.")
+                client.notice = YapClient.Notice(text: client.onPin
+                    ? "Signed out everywhere else. If it wasn’t you, set a password now."
+                    : "Signed out everywhere else. If it wasn’t you, change your password now.")
             }))
     }
 }
 
-/// The temporary PIN after an owner or mod resets someone's (the web's
-/// "Temporary PIN"), in a Win98 box with the PIN to copy. Whichever
-/// screen is on top shows it: the person's sheet where Reset PIN was
-/// pressed, else People, else the app's root (`active` says which).
+/// The temporary password after an owner or mod resets someone's, in a
+/// Win98 box with the password to copy. Whichever screen is on top shows
+/// it: the person's sheet where Reset password… was pressed, else People,
+/// else the app's root (`active` says which).
 struct PinResetNotice: ViewModifier {
     @Environment(AppModel.self) private var model
     var active: Bool
     /// Kept while the box closes, so its words don't blank out.
     @State private var shown: YapClient.PinReset?
-    /// A beat after the PIN comes: the "Reset PIN?" box it answers is
-    /// usually still closing, and a second box can't open over that.
+    /// A beat after the password comes: the "Reset password?" box it
+    /// answers is usually still closing, and a second box can't open over that.
     @State private var ready = false
 
     func body(content: Content) -> some View {
@@ -76,14 +77,14 @@ struct PinResetNotice: ViewModifier {
                 ready = true
             }
             .question(isPresented: Binding(get: { active && ready && client.pinReset != nil }, set: { if !$0 { client.pinReset = nil } }), Question(
-                title: "Temporary PIN",
-                text: shown.map { "Tell \($0.name) to sign in with the PIN \($0.pin) (“\(AuthText.returning)”), then change it in Settings." },
-                cancel: nil, value: shown?.pin, copyLabel: "Copy PIN"))
+                title: PasswordText.temporaryTitle,
+                text: shown.map { PasswordText.resetResult(name: $0.name, password: $0.pin) },
+                cancel: nil, value: shown?.pin, copyLabel: PasswordText.copy))
     }
 }
 
 extension View {
-    /// The temporary PIN after a reset, when this screen is the one on top.
+    /// The temporary password after a reset, when this screen is the one on top.
     func pinResetNotice(active: Bool = true) -> some View {
         modifier(PinResetNotice(active: active))
     }
@@ -136,39 +137,79 @@ enum AuthText {
     static let new = "I'm new"
     static let returning = "I have an account"
 
-    /// The waiting room (the web's words; an app needn't be kept open).
+    /// The waiting room: only the owner and mods let people in (they get a
+    /// push); an app needn't be kept open.
     static func waiting(_ name: String?) -> String {
-        "Hang tight\(name.map { ", \($0)" } ?? ""). Everyone here just got a ping — this opens by itself as soon as someone lets you in."
+        "Hang tight\(name.map { ", \($0)" } ?? ""). \(waitingLine) This opens by itself as soon as they do."
     }
 
-    /// Follows "Use a password" (the web's `syncWelcomeMode`).
-    static func hint(signup: Bool, password: Bool = false) -> String {
-        if signup {
-            return password
-                ? "Pick a name friends will see and a password of 10 or more characters. It’s how you sign in on your other devices."
-                : "Pick a name friends will see and a 6-digit PIN. The PIN is how you sign in on your other devices."
-        }
-        return "Sign in with your name and \(password ? "password" : "PIN") — same you, same messages, on any device."
+    /// The newcomer's line (the server's `pending` message says the same).
+    static let waitingLine = "Waiting for the owner or a mod to let you in."
+
+    static func hint(signup: Bool) -> String {
+        signup
+            ? "Pick a name friends will see and a password. It’s how you sign in on your other devices."
+            : "Sign in with your name and password — same you, same messages, on any device."
     }
 
-    /// Under a wrong PIN or a lockout (the web's second line): who can help.
+    /// Under a wrong password or a lockout: who can help. With the server's
+    /// line above it, this reads as the web's: "Wrong name or password. An
+    /// old PIN works here too. Forgot it? The owner or a mod can reset it."
+    /// Someone still on an old PIN only sees a Password field, so a wrong
+    /// try says the PIN works there.
     static func help(for error: YapClient.AuthError?) -> String? {
-        guard let code = error?.code, code == "bad_login" || code == "locked" else { return nil }
-        return "Forgot your PIN? The owner or a mod can reset it."
+        switch error?.code {
+        case "bad_login": "An old PIN works here too. Forgot it? The owner or a mod can reset it."
+        case "locked": "Forgot your password? The owner or a mod can reset it."
+        default: nil
+        }
+    }
+}
+
+/// Password wording, the same in every client (PROTOCOL.md › Identity).
+/// No "PIN" anywhere, except "Current password or PIN" (and the prompt's
+/// "Your PIN still works…") for someone still on one.
+enum PasswordText {
+    static let field = "Password"
+    /// Under a new password's field.
+    static let rule = "8 characters or more."
+    static let show = "Show password"
+
+    /// Settings › Account.
+    static func change(onPin: Bool) -> String { onPin ? "Set a password" : "Change password" }
+    static func current(onPin: Bool) -> String { onPin ? "Current password or PIN" : "Current password" }
+    static let new = "New password"
+    static func saved(onPin: Bool) -> String {
+        onPin ? "Password set. Sign in anywhere with your name and this password."
+              : "Password changed. Sign in anywhere with your name and this password."
+    }
+
+    /// The once-per-device prompt (`ready.weakPin`).
+    static let promptTitle = "Choose a password"
+    static func prompt(_ nudge: YapClient.PasswordNudge) -> String {
+        switch nudge {
+        case .pin: "Yap uses passwords now. Your PIN still works until you choose one."
+        case .temporary: "You signed in with a temporary password. Choose your own."
+        case .guessable: "Your password is easy to guess. Choose a stronger one."
+        }
+    }
+    static let choose = "Choose a password"
+    static let later = "Later"
+
+    /// Owner and mods.
+    static let reset = "Reset password…"
+    static let temporaryTitle = "Temporary password"
+    static let copy = "Copy password"
+    static func resetResult(name: String, password: String) -> String {
+        "\(name)’s temporary password: \(password). Send it to \(name); they’ll choose their own after signing in."
     }
 }
 
 /// Account wording (the web's).
 enum AccountText {
-    @MainActor
-    static func howToSignIn(_ client: YapClient) -> String {
-        "On another phone or computer, choose “I have an account” and sign in with your name and \(client.secretKind == "password" ? "password" : "PIN")."
-    }
+    static let howToSignIn = "On another phone or computer, choose “I have an account” and sign in with your name and password."
 
     static let signOutTitle = "Sign out on this device?"
 
-    @MainActor
-    static func signOutMessage(_ client: YapClient) -> String {
-        "You can sign back in with your name and \(client.secretKind == "password" ? "password" : "PIN")."
-    }
+    static let signOutMessage = "You can sign back in with your name and password."
 }

@@ -96,7 +96,7 @@ impl Core {
     /// Sign-in, the account, devices, the waiting room, invites, places links, errors.
     pub(super) async fn on_account_msg(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::Ready { sid, uid, channels, users, sessions, emojis, pending, token, needs_pin, key, links, upload_token, vault, weak_pin, secret_kind, notify, sounds, hangs, resume_key, .. } => {
+            ServerMsg::Ready { sid, uid, channels, users, sessions, emojis, pending, token, needs_pin, key, links, upload_token, vault, weak_pin, weak_reason, secret_kind, notify, sounds, hangs, resume_key } => {
                 self.got_token(token);
                 self.resume_key = resume_key.filter(|k| !k.is_empty());
                 self.sync_vault(vault);
@@ -110,6 +110,8 @@ impl Core {
                     m.unread_counts = None;
                     m.shelf.clear();
                     m.weak_pin = weak_pin;
+                    // Why (the prompt's words); an older server doesn't say.
+                    m.weak_reason = weak_reason.as_deref().and_then(crate::core::WeakReason::from_wire).filter(|_| weak_pin);
                     m.secret_kind = secret_kind.unwrap_or_else(|| "pin".into());
                     m.join_requests = pending.clone();
                     m.needs_pin = needs_pin;
@@ -137,7 +139,7 @@ impl Core {
                         m.config_dirty = true;
                     }
                 }
-                let msg = if message.is_empty() { "Waiting for someone here to let you in.".to_string() } else { message };
+                let msg = if message.is_empty() { "Waiting for the owner or a mod to let you in.".to_string() } else { message };
                 self.set_status(Status::Pending, &msg);
             }
             ServerMsg::Account { has_pin, token, kind } => {
@@ -146,12 +148,16 @@ impl Core {
                     let mut m = self.shared.model.lock();
                     m.needs_pin = !has_pin;
                     if has_pin {
-                        let password = kind.as_deref() == Some("password");
                         m.weak_pin = false;
-                        m.secret_kind = if password { "password" } else { "pin" }.into();
-                        m.toast(if password { "Password saved. Sign in anywhere with your name and password." } else { "PIN saved. Sign in anywhere with your name and PIN." });
+                        m.weak_reason = None;
+                        // Always "password" from a server that has passwords only.
+                        m.secret_kind = kind.unwrap_or_else(|| "password".into());
+                        m.toast("Password saved. Sign in anywhere with your name and password.");
                     }
+                    m.password_error = None;
+                    m.password_seq += 1;
                 }
+                self.emit(CoreEvent::Extra("PASSWORD", "saved".into()));
                 self.repaint();
             }
             ServerMsg::Devices { devices } => {
@@ -166,7 +172,7 @@ impl Core {
                     (m.config.notifications, label)
                 };
                 if notify {
-                    crate::notify::show("New sign-in to your Yap account", &format!("{label}, just now. Not you? Sign out everywhere else, then change your PIN."));
+                    crate::notify::show("New sign-in to your Yap account", &format!("{label}, just now. Not you? Sign out everywhere else, then change your password."));
                 }
                 self.emit(CoreEvent::SigninAlert(label));
                 self.repaint();
@@ -186,8 +192,12 @@ impl Core {
                     m.join_requests.push(user.clone());
                     (new, m.window_focused)
                 };
-                let quiet = self.shared.model.lock().quiet(false);
-                if new && !quiet {
+                // Only the owner and mods let people in (an older server told everyone).
+                let (quiet, moderator) = {
+                    let m = self.shared.model.lock();
+                    (m.quiet(false), m.am_moderator())
+                };
+                if new && !quiet && moderator {
                     self.chime(Chime::Mention);
                     if !focused && self.notifications_on() {
                         crate::notify::show(&format!("🚪 {} wants to join", user.name), "Open Yap to let them in or turn them away.");
@@ -196,12 +206,14 @@ impl Core {
                 self.emit(CoreEvent::JoinRequest { uid: user.id.clone(), name: user.name.clone(), invited_by: user.invited_by.clone(), used_by: user.invite.as_ref().map(|i| i.used_by.clone()).unwrap_or_default() });
                 self.repaint();
             }
-            ServerMsg::JoinResolved { uid, approved, by } => {
+            ServerMsg::JoinResolved { uid, approved, by, user } => {
                 let joined = {
                     let mut m = self.shared.model.lock();
-                    let who = m.join_requests.iter().find(|u| u.id == uid).cloned();
+                    let waiting = m.join_requests.iter().find(|u| u.id == uid).cloned();
                     m.join_requests.retain(|u| u.id != uid);
-                    who.and_then(|who| {
+                    let known = m.users.get(&uid).cloned();
+                    let about_me = uid == m.config.uid;
+                    who_joined(waiting, approved, user, known, about_me).and_then(|who| {
                         let by_name = if by == m.config.uid {
                             "you".to_string()
                         } else if let Some(u) = m.users.get(&by) {
@@ -259,14 +271,21 @@ impl Core {
                         self.shared.store_token(None);
                     }
                     self.shared.model.lock().auth = None;
-                    let text = match code.as_str() {
-                        "name_taken" => format!("{message} If it's you, choose “I have an account”."),
-                        // A wrong PIN was a dead end: say who can help (the web's words).
-                        "bad_login" | "locked" => format!("{message} Forgot your PIN? The owner or a mod can reset it."),
-                        _ => message.clone(),
-                    };
+                    let text = sign_in_error(&code, &message);
                     self.set_status(Status::SignIn, &text);
                     self.emit(CoreEvent::Error { code, message });
+                    return;
+                }
+                // A password change turned away (wrong current one, too short, too
+                // easy to guess): the form that sent it shows the server's words.
+                if re.as_deref() == Some("account.pin") {
+                    {
+                        let mut m = self.shared.model.lock();
+                        m.password_error = Some(message.clone());
+                        m.password_seq += 1;
+                    }
+                    self.emit(CoreEvent::Error { code, message });
+                    self.repaint();
                     return;
                 }
                 if re.as_deref() == Some("device.handoff") {
@@ -972,7 +991,7 @@ impl Core {
                 self.emit(CoreEvent::Extra("POLL", format!("{id} votes {n:?}")));
                 self.repaint();
             }
-            ServerMsg::Sound { id, sid: _, uid } => {
+            ServerMsg::Sound { id, uid } => {
                 let (who, what) = {
                     let m = self.shared.model.lock();
                     (m.user_name(&uid), m.sound(&id).map(|s| format!("{}{}", s.emoji.as_deref().map(|e| format!("{e} ")).unwrap_or_default(), s.name)))
@@ -1211,6 +1230,32 @@ impl Core {
     }
 }
 
+/// What the sign-in screen says after a refused sign-in: the server's words,
+/// plus who can help after a wrong password (the web's words: someone still on
+/// an old PIN only sees a Password field, so say the PIN works there too).
+fn sign_in_error(code: &str, message: &str) -> String {
+    match code {
+        // (The server's own words may already say so.)
+        "name_taken" if !message.contains("I have an account") => format!("{message} If it's you, choose “I have an account”."),
+        "bad_login" => format!("{message} An old PIN works here too. Forgot it? The owner or a mod can reset it."),
+        "locked" => format!("{message} Forgot your password? The owner or a mod can reset it."),
+        _ => message.to_string(),
+    }
+}
+
+/// Whom a `join.resolved` is about, for its line: the waiting-room entry if
+/// we saw the request (the owner and mods), else, when they were let in, the
+/// server's `join.resolved.user` (members never get `join.request`), else
+/// whoever the member list says they are. Someone turned away whom we never
+/// saw waiting: nothing to say. About us (just let in): nothing either, we
+/// get "You're in. Say hi 👋" instead.
+fn who_joined(waiting: Option<User>, approved: bool, resolved: Option<User>, known: Option<User>, about_me: bool) -> Option<User> {
+    if about_me {
+        return None;
+    }
+    waiting.or_else(|| approved.then(|| resolved.or(known)).flatten())
+}
+
 /// Who invited someone, for the "joined" line: the link's maker (`invite.by`),
 /// else `invitedBy` without its "(for …)".
 fn join_line_by(who: &User) -> Option<String> {
@@ -1225,7 +1270,7 @@ fn join_line_by(who: &User) -> Option<String> {
 }
 
 #[cfg(test)]
-mod join_tests {
+mod account_tests {
     use super::*;
 
     #[test]
@@ -1238,5 +1283,37 @@ mod join_tests {
         assert_eq!(join_line_by(&user(with.clone())).as_deref(), Some("Priya"));
         with["invite"] = serde_json::json!({ "by": "Priya Ann", "label": "Theo", "usedBy": [] });
         assert_eq!(join_line_by(&user(with)).as_deref(), Some("Priya Ann"));
+    }
+
+    #[test]
+    fn a_wrong_password_says_who_can_help() {
+        assert_eq!(sign_in_error("bad_login", "Wrong name or password."), "Wrong name or password. An old PIN works here too. Forgot it? The owner or a mod can reset it.");
+        assert_eq!(sign_in_error("locked", "Too many wrong tries. Try again in 2 min."), "Too many wrong tries. Try again in 2 min. Forgot your password? The owner or a mod can reset it.");
+        assert_eq!(sign_in_error("no_pin", "x"), "x");
+    }
+
+    /// Members never see the request: the line comes from `join.resolved.user`
+    /// ("Cleo joined — invited by Ada"), else the member list ("let in by …").
+    #[test]
+    fn who_joined_without_the_request() {
+        let user = |j: serde_json::Value| -> User { serde_json::from_value(j).unwrap() };
+        let waiting = user(serde_json::json!({ "id": "c", "name": "Cleo", "color": "#fff", "role": "pending", "invite": { "by": "Ada", "label": "Cleo", "usedBy": [] } }));
+        let resolved = user(serde_json::json!({ "id": "c", "name": "Cleo", "color": "#30a46c", "invitedBy": "Ada (for Cleo)" }));
+        let known = user(serde_json::json!({ "id": "c", "name": "Cleo", "color": "#30a46c", "role": "member" }));
+        // The owner and mods: the waiting-room entry, with its link.
+        let who = who_joined(Some(waiting.clone()), true, Some(resolved.clone()), Some(known.clone()), false).unwrap();
+        assert_eq!(who.invite.map(|i| i.by).as_deref(), Some("Ada"));
+        // A member: join.resolved.user, so it still says who invited them.
+        let who = who_joined(None, true, Some(resolved.clone()), Some(known.clone()), false).unwrap();
+        assert_eq!((who.name.as_str(), join_line_by(&who).as_deref()), ("Cleo", Some("Ada")));
+        // An older server without it: the member list (then "let in by …").
+        let who = who_joined(None, true, None, Some(known.clone()), false).unwrap();
+        assert_eq!(join_line_by(&who), None);
+        assert_eq!(who_joined(None, true, None, None, false), None);
+        // Cleo herself, just let in: "You're in" instead of a line about herself.
+        assert_eq!(who_joined(None, true, Some(resolved.clone()), Some(known.clone()), true), None);
+        // Turned away: only whoever saw them waiting hears of it.
+        assert!(who_joined(Some(waiting), false, None, None, false).is_some());
+        assert_eq!(who_joined(None, false, Some(resolved), Some(known), false), None);
     }
 }

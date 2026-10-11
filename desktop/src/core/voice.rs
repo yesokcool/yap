@@ -97,16 +97,16 @@ impl Core {
                         let gain = sound.gain.min(1.0) * vol;
                         self.with_pcm(&sound, move |pcm| audio.play_clip(pcm, gain, crate::audio::clips::Bus::Fx, &device));
                     }
-                    None => self.play_builtin_chime("default", vol, &device),
+                    None => self.play_builtin_chime("default", &device),
                 }
             }
-            None => self.play_builtin_chime(&chime, vol, &device),
+            None => self.play_builtin_chime(&chime, &device),
         }
     }
 
     /// Built-ins play at their own (quiet) volume, like the web; the soundboard
     /// volume is for uploaded clips.
-    pub(super) fn play_builtin_chime(&self, id: &str, _vol: f32, device: &str) {
+    pub(super) fn play_builtin_chime(&self, id: &str, device: &str) {
         if let Some(samples) = chime_samples(id).or_else(|| (id != "none").then(|| chime_samples("default")).flatten()) {
             self.shared.audio.play_clip(Arc::new(samples), 1.0, crate::audio::clips::Bus::Fx, device);
         }
@@ -225,12 +225,13 @@ impl Core {
             }
         } else if let Some(mine) = m.voice_channel.clone() {
             if channel_id.as_ref() == Some(&mine) && prev.as_ref() != Some(&mine) {
-                let uid = m.sessions.get(&sid).map(|s| s.uid.clone()).unwrap_or_default();
+                let (uid, obs) = m.sessions.get(&sid).map(|s| (s.uid.clone(), s.is_obs())).unwrap_or_default();
                 drop(m);
                 self.voice.set_resumable(&sid, resume);
-                // The same call back under a new session: no chimes (V7: nor when anyone's straight back).
-                let mut quiet = resumed;
-                if !resumed {
+                // The same call back under a new session: no chimes (V7: nor when anyone's straight back),
+                // and none for an OBS link, which listens without showing up (nor is it its owner back).
+                let mut quiet = resumed || obs;
+                if !resumed && !obs {
                     // A plain join by someone whose old connection we were keeping:
                     // they couldn't resume it (or their app can't), so it's dead weight now.
                     let theirs: Vec<String> = {
@@ -242,7 +243,7 @@ impl Core {
                         quiet = true;
                     }
                 }
-                if self.leave_chimes.remove(&uid).is_some() {
+                if !obs && self.leave_chimes.remove(&uid).is_some() {
                     // Back within 5 s of losing their connection: neither chime.
                     quiet = true;
                 }
@@ -265,17 +266,17 @@ impl Core {
                     drop(m);
                     self.call_person(&sid, "left", if lost { "lost their connection" } else { "" });
                     let mut m = self.shared.model.lock();
-                    let uid = m.sessions.get(&sid).map(|s| s.uid.clone()).unwrap_or_default();
+                    let (uid, obs) = m.sessions.get(&sid).map(|s| (s.uid.clone(), s.is_obs())).unwrap_or_default();
                     m.peer_states.remove(&sid);
                     m.speaking.remove(&sid);
                     m.hints.remove(&sid);
                     drop(m);
                     self.voice.drop_peer(&sid);
                     self.sharer_stopped(&sid);
-                    if lost {
-                        self.defer_leave_chime(&uid);
-                    } else {
-                        self.leave_chime();
+                    match (obs, lost) {
+                        (true, _) => {} // an OBS link listens without showing up: no chime
+                        (false, true) => self.defer_leave_chime(&uid),
+                        (false, false) => self.leave_chime(),
                     }
                 }
             }

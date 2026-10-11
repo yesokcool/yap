@@ -6,9 +6,9 @@ use super::*;
 
 /// Screenshot aid: the `YAP_DEBUG_OPEN` targets that wait until the model has
 /// what they show (connected, history, a voice channel…).
-pub(super) const DEBUG_LATER: [&str; 26] = [
+pub(super) const DEBUG_LATER: [&str; 29] = [
     "gifs", "react", "voice", "reply", "draw", "space", "search", "pins", "plan", "catchup", "shelf", "soundboard", "people-away", "delete", "archive", "viewer", "volume", "signin-alert", "weak-pin",
-    "hang-now", "voice-more", "edit", "watch", "share", "share-dialog", "burst",
+    "weak-password", "temp-password", "password-reset", "hang-now", "voice-more", "edit", "watch", "share", "share-dialog", "burst",
 ];
 
 /// A small made-up picture (the emoji dialog's screenshot aid).
@@ -87,7 +87,7 @@ pub(super) fn start_dialog(ctx: &egui::Context, shared: &Shared) -> (Option<dial
         "encrypt" => (Some(dialogs::Modal::Vault(dialogs::VaultDialog::new(dialogs::VaultMode::Setup))), None),
         "ping" => (Some(dialogs::Modal::Ping { note: String::new() }), None),
         "link" => (Some(dialogs::Modal::AddLink { name: String::new(), url: String::new() }), None),
-        "setpin" => (Some(dialogs::Modal::SetPin { pin: String::new(), confirm: String::new(), password: false }), None),
+        "password" | "setpin" => (Some(dialogs::Modal::Password(Default::default())), None),
         // Debug builds: "Add custom emoji" with YAP_DEBUG_FILE=<picture> (else a made-up one).
         "emoji" if cfg!(debug_assertions) => {
             let file = std::env::var("YAP_DEBUG_FILE").unwrap_or_default();
@@ -296,8 +296,25 @@ impl App {
                 })));
                 self.debug_open = None;
             }
-            Some("weak-pin") if cfg!(debug_assertions) && m.status == Status::Online => {
-                acts.push(Act::DebugModel(Box::new(|m| m.weak_pin = true)));
+            // The "Choose a password" prompt, for an old PIN / a guessable password /
+            // a reset's temporary password.
+            Some(what @ ("weak-pin" | "weak-password" | "temp-password")) if cfg!(debug_assertions) && m.status == Status::Online => {
+                let what = what.to_string();
+                acts.push(Act::DebugModel(Box::new(move |m| {
+                    m.weak_pin = true;
+                    m.needs_pin = false;
+                    m.secret_kind = if what == "weak-pin" { "pin" } else { "password" }.into();
+                    m.weak_reason = Some(match what.as_str() {
+                        "weak-pin" => crate::core::WeakReason::Pin,
+                        "temp-password" => crate::core::WeakReason::Temporary,
+                        _ => crate::core::WeakReason::Guessable,
+                    });
+                })));
+                self.debug_open = None;
+            }
+            // An owner/mod's result after Reset password….
+            Some("password-reset") if cfg!(debug_assertions) && m.status == Status::Online => {
+                acts.push(Act::DebugModel(Box::new(|m| m.pin_reset = Some(("Cleo".into(), "maple-river-stone-42".into())))));
                 self.debug_open = None;
             }
             // The "hang is starting" bar, for the next hang.

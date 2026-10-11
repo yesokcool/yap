@@ -62,11 +62,20 @@ export async function adminRoute(request: Request, url: URL, env: Env): Promise<
       return Response.json(result, { status: result.ok ? 200 : 400 });
     }
 
-    // A forgotten PIN, or an account that never set one: returns a temporary PIN.
+    // A forgotten password, or an account that never set one: returns a temporary password.
     case '/api/admin/reset-pin': {
       if (!adminOk(env, request)) return new Response('Admin key required.', { status: 401 });
       if (request.method !== 'POST') return new Response('POST ?uid=<uid>.', { status: 405 });
       const result = await hub(env).resetPin(url.searchParams.get('uid') ?? '');
+      return Response.json(result, { status: result.ok ? 200 : 400 });
+    }
+
+    // Tests only: an account with an old 6-digit PIN (sign-up makes passwords). Off unless TEST_PINS=1.
+    case '/api/admin/test-pin': {
+      if (env.TEST_PINS !== '1') return null;
+      if (!adminOk(env, request)) return new Response('Admin key required.', { status: 401 });
+      if (request.method !== 'POST') return new Response('POST ?uid=<uid>&pin=<6 digits>.', { status: 405 });
+      const result = await hub(env).setTestPin(url.searchParams.get('uid') ?? '', url.searchParams.get('pin') ?? '');
       return Response.json(result, { status: result.ok ? 200 : 400 });
     }
 

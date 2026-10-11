@@ -129,9 +129,6 @@ final class Peer {
         }
     }
 
-    /// How many signals are waiting (tests).
-    var waiting: Int { outbox.count }
-
     // MARK: Negotiation
 
     func renegotiate() async {

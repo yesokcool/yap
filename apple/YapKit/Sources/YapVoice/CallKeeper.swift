@@ -171,7 +171,8 @@ final class CallKeeper {
             }
             if ghost?.voice?.resume != true || back {
                 dropGhost(sid, quiet: true)
-                if !back, let uid = ghost?.uid { deferLeaveChime(uid) }
+                // An OBS link listens without showing up: it never chimes.
+                if !back, let uid = ghost?.uid, ghost?.isListener != true { deferLeaveChime(uid) }
             }
         }
     }

@@ -69,14 +69,17 @@ yap --list-devices
 RUST_LOG=yap=debug yap               # more logging
 ```
 
-Screenshot aids (any build): `YAP_DEBUG_OPEN=settings[:tab]|channel|update|gifs|react|people|people-away|unlock|encrypt|reply|edit|search|pins|draw|space|switcher|plan|catchup|shelf|soundboard|voice-more|ping|link|setpin|delete|archive|viewer|volume|signin-alert|weak-pin|hang-now`
+Screenshot aids (any build): `YAP_DEBUG_OPEN=settings[:tab]|channel|update|gifs|react|people|people-away|unlock|encrypt|reply|edit|search|pins|draw|space|switcher|plan|catchup|shelf|soundboard|voice-more|ping|link|password|delete|archive|viewer|volume|signin-alert|weak-pin|weak-password|temp-password|password-reset|hang-now`
 opens that dialog, picker, bar or reply bar at start (the ones that need
 something from the server — a message to delete, a picture to view, someone
 away — wait until it's there). Settings tabs: 0 Look, 1 Profile, 2 Voice,
 3 Notifications, 4 Account, 5 Owner & mods, 6 Invite, 7 About.
-`people-away` opens People with someone who's away expanded; in debug builds
-`signin-alert`, `weak-pin` and `hang-now` show those bars as if the server
-had said so.
+`people-away` opens People with someone who's away expanded; `password` opens
+the "Choose a password" dialog; in debug builds `signin-alert`, `hang-now` and
+the "Choose a password" bar (`weak-pin`, `weak-password`, `temp-password`: an
+old PIN, a guessable password, a reset's temporary one) show as if the server
+had said so, and `password-reset` shows an owner/mod's "Cleo's temporary
+password: …" result.
 (debug builds: `YAP_DEBUG_SPACE_AT=x,y` puts you there when you walk into Space)
 (`YAP_DEBUG_QUERY=<words>` fills the search, Everywhere; `YAP_DEBUG_HERE=1`: this channel only)
 Debug builds also take `YAP_DEBUG_OPEN=emoji` (+ `YAP_DEBUG_FILE=<picture>`,
@@ -190,20 +193,41 @@ has no install button. People using it get new versions from the server's
   Minecraft server. Charcoal (dark, default) or Windows Standard (light). Drawn in
   `ui/theme.rs` (egui's own widgets can't do bevels, so most are replaced).
   Motion is instant, like the real thing.
-- **Sign in:** paste an invite link, then *I'm new* (name + 6-digit PIN →
-  waiting room) or *I have an account*; "Use a password instead" switches the
-  PIN field to a 10–128-character password. Guessable PINs (repeats, runs,
-  dates, common ones) come back as `weak_pin` and the reason shows under the
-  form. The device token is kept per server in `tokens.json` (owner-only
-  permissions on Unix), never the PIN or password. The WebSocket upgrade
-  carries `User-Agent: yap-desktop/<version> (<OS>)`, so your devices list
-  says "Desktop app (Mac)". (The pre-PIN uid-only sign-in is gone: the server
-  answers it with `pin_required`.) An account from before PINs that's still
-  signed in with an old device token gets the "Set a PIN" bar; its dialog
-  takes a 6-digit PIN or a password, like Settings › Account.
-- **Account protection:** `ready.weakPin` shows a gentle "your PIN is easy to
-  guess — change it" bar (Later / Change…). Settings › Account changes the PIN
-  or password and lists where you're signed in (`account.devices`): sign one
+- **Sign in:** paste an invite link, then *I'm new* (name + password →
+  waiting room) or *I have an account*. One **Password** field, masked, with
+  a Show box; "8 characters or more." under it when signing up (Sign Up waits
+  for 8). Signing in takes whatever was set, so an account from before
+  2026-10-11 still signs in with its old 6-digit PIN. The server judges the
+  rest (too short, too easy to guess, too many wrong tries) and its words show
+  under the form as it puts them; a wrong name or password adds "An old PIN
+  works here too. Forgot it? The owner or a mod can reset it." and too many
+  wrong tries "Forgot your password? The owner or a mod can reset it." (the
+  web's words). The wire still says `pin`
+  (`login.pin`, `signup.pin`, `account.pin`, `member.resetPin`, `pin.reset`,
+  `bad_pin`, `weak_pin`): PROTOCOL.md › Identity. The device token is kept
+  per server in `tokens.json` (owner-only permissions on Unix), never the
+  password. The WebSocket upgrade carries `User-Agent: yap-desktop/<version>
+  (<OS>)`, so your devices list says "Desktop app (Mac)". (The pre-PIN
+  uid-only sign-in is gone: the server answers it with `pin_required`.) An
+  account with no password at all that's still signed in with an old device
+  token gets the "Set a password" bar and dialog.
+- **Choose a password:** `ready.weakPin` (you signed in with an old PIN, a
+  guessable password or a reset's temporary one) shows a quiet bar:
+  **Choose a password** and, by `ready.weakReason`, "Yap uses passwords now.
+  Your PIN still works until you choose one." (`pin`), "You signed in with a
+  temporary password. Choose your own." (`temporary`) or "Your password is
+  easy to guess. Choose a stronger one." (`guessable`); an older server
+  without `weakReason` gets the PIN's words if you signed in with a PIN
+  (`ready.secretKind`), else the guessable one. [Choose a password] opens a
+  small dialog (the bar goes once it's saved); [Later] puts that reason off
+  on this device for good (`"password_later"` in config.json, like the web's
+  `passwordLater`), so a reset's temporary password is still asked about
+  after a PIN's prompt was put off.
+- **Account protection:** Settings › Account says **Change password** (**Set
+  a password** while you're still on a PIN): Current password ("Current
+  password or PIN" while on one), New password with "8 characters or more.",
+  Show; a refusal shows under the fields in the server's words and keeps
+  them. It also lists where you're signed in (`account.devices`): sign one
   out (`account.revoke`) or all the others (`account.signoutOthers`, asked
   first in the web's words). "Sign out of this computer" (a red danger
   button) asks once first. A `signin.alert` shows "New sign-in: <device>,
@@ -219,13 +243,15 @@ has no install button. People using it get new versions from the server's
   (`session.join` → `voice`/`view`; `voice`/`view` → `session.leave`), and
   that's all the client keeps. The **People** button (chat header, both
   a badge counts people waiting) opens a sheet with everyone A–Z, role
-  badges, who's in voice, the waiting room (Let in / Turn away) and, click
-  someone, their volume plus the owner/mod actions (make/remove mod; Reset
-  PIN… and Ban… ask first, in the web's words).
+  badges, who's in voice, the waiting room (Let in / Turn away, for the owner
+  and mods) and, click someone, their volume plus the owner/mod actions
+  (make/remove mod; Reset password… and Ban… ask first, in the web's words;
+  a reset ends with "Cleo's temporary password: maple-river-stone-42. Send it
+  to Cleo; they'll choose their own after signing in." and Copy).
 - **Chat:** channels (no `#`), bold unread channels, history paging (a page
   can be short and still have more), grouping, day dividers, typing ("Ready"
-  when nobody is), yellow information bars (connection lost, set a PIN, join
-  requests), reconnect with backoff + heartbeat. Markdown subset (bold/italic/
+  when nobody is), yellow information bars (connection lost, choose a
+  password, join requests), reconnect with backoff + heartbeat. Markdown subset (bold/italic/
   strike/code/blocks/quotes), clickable links, **@mention highlights**, custom
   emoji images inline (and big when alone), `:shortcodes:` for standard emoji.
   Every snippet of a message (reply quotes and the reply bar, pins, search,
@@ -475,7 +501,7 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
 - **Voice:** join/leave, mute/deafen, speaking rings, per-person volume
   (0–200%, a limiter past 100 %; click or right-click someone in a voice
   channel: the popup is the web's — volume, **Watch screen** while they
-  share, and the owner/mod actions: make or remove mod, Reset PIN…, Ban…,
+  share, and the owner/mod actions: make or remove mod, Reset password…, Ban…,
   asking first; nothing for your own row), voice
   activity with a threshold (the web's gate: it opens a little *before* you
   speak and ignores a steady fan), push-to-talk (global, with a 200 ms tail),
@@ -501,8 +527,11 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   the channel name) sets one bitrate for everyone in the channel
   (`channel.bitrate`) or "each person's own"; the panel only says "Sound:
   256k for everyone" when one is set. A call uses `channel.bitrate ?? your
-  setting` and renegotiates when it changes. OBS listeners (`client: "obs"`) show as
-  "📺 Name's OBS", dimmed. The voice track goes out in no stream
+  setting` and renegotiates when it changes. An OBS link (`client: "obs"`)
+  listens without showing up, like on the web: it isn't listed under the
+  channel and gets no join or leave chime, but the call connects to it as
+  to anyone (`Model::voice_members`; the call report names it "Name's
+  OBS"). The voice track goes out in no stream
   (`a=msid:- <track>`, like a browser's `addTransceiver(track)`), so it's
   never taken for a screen share.
 - **Audio redundancy (RED, RFC 2198)** (PROTOCOL.md › Voice › Redundancy;
@@ -688,12 +717,19 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
     (`hang.set`). When one starts (`hang.now`), a calm bar says "Game night is
     starting · Lounge" with Join voice (and a desktop notification if Yap is
     in the background and it isn't quiet time).
-- **Waiting room:** members see join requests (a bar each — three or more
-  collapse into one "N people want to join [Review]" bar, like the web — and
-  the People sheet) and can let people in. Someone let in shows up as a
+- **Waiting room:** only the owner and mods let people in. They see join
+  requests (a bar each — three or more collapse into one "N people want to
+  join [Review]" bar, like the web — the People sheet and the header's count,
+  with a chime and a notification); members see none of it, even from an
+  older server that still tells everyone. The newcomer's window says
+  "Waiting for the owner or a mod to let you in." Someone let in shows up as a
   quiet "Theo joined — invited by Priya" line in the first channel, for
   this session only (never a popup); a turned-away person is a toast. The
-  newcomer hears a chime and sees "You're in. Say hi 👋" there.
+  newcomer hears a chime and sees "You're in. Say hi 👋" there (not a line
+  about themselves). Members never get the request, so their line comes
+  from `join.resolved.user` (`{ id, name, color, invitedBy? }`): "Cleo
+  joined — invited by Ada", or "— let in by Ben" without an invite (an older
+  server without it: the member list).
 - **Look:** theme (Charcoal / Windows Standard / Match system), **Size** — Auto (the
   default: 115 % on top of the OS scale, 130 % on a 4K-class monitor the OS
   runs at 100–125 %, worked out once the zoom has settled, since egui reports
@@ -768,9 +804,14 @@ yap --headless --server http://localhost:8788 --name Bot --join-voice lounge \
     --input-wav file.wav --say "hello" --duration 20
 ```
 
-`--pin P` (sign in, or sign up if there's no such account; prints `TOKEN …` and
-`PENDING uid …` while waiting), `--signup`, `--token T` (one of `--pin` /
-`--token` is needed), `--approve-all` (let everyone in from the waiting room),
+`--password P` (sign in, or sign up if there's no such account; an old
+6-digit PIN signs in too; `--pin P` is the same flag; prints `TOKEN …`,
+`PENDING uid …` while waiting and `ACCOUNT uid=… secret=pin|password
+weak=… prompt=none|Pin|Temporary|Guessable role=…` once in), `--signup`,
+`--token T` (one of `--password` / `--token` is needed), `--set-password NEW`
+(once in, change it with the sign-in one as the current: `PASSWORD saved` or
+the server's `Error`), `--approve-all` (let everyone in from the waiting room:
+a test doorman, which has to be the owner or a mod),
 `--react-to TEXT --react EMOJI`, `--ping TEXT`, `--send-gif QUERY`,
 `--edit-to TEXT`, `--send-image FILE`, `--add-link NAME=URL`,
 `--make-invite LABEL` (prints `INVITE <label> <link>`), `--channel-bitrate N`,
@@ -873,10 +914,22 @@ native reads; deleting the picture note erases its blob); a
 3000×2000 picture the native client shrinks and uploads with its upload token
 (and a `sid`-only upload refused with 403); a Places link added from native
 showing in the web sidebar; a personal invite a newcomer joins with (the
-waiting room says who invited them; they keep the main key; a second
+waiting room says who invited them; the inviter, a member, gets no join
+request but logs `JOINED New… joined — invited by Native…` from
+`join.resolved.user`; they keep the main key; a second
 newcomer with the same link: the join request says the link was also used
-by the first); account sign-in +
-token reconnect; voice in `lounge` in both join orders, checking audio both
+by the first); account sign-in with the test password + token reconnect
+(no "Choose a password" prompt; a wrong password is `bad_login`); an old
+PIN account (the test server's `TEST_PINS:1` lets the admin API's
+`test-pin` give an account an old PIN; never set it anywhere else) signing
+in with its PIN, asked once (`prompt=Pin`), choosing a password with the
+PIN as the current, then signing in with the password while the PIN no
+longer works, and after a reset signing in with the temporary password
+(`prompt=Temporary`, from `ready.weakReason`) and replacing it; the waiting
+room (a member's app hears nothing of a newcomer but logs who joined, "let in
+by" the doorman; the doorman hears and lets them in; the newcomer logs
+"we're in", not a line about itself); voice in
+`lounge` in both join orders, checking audio both
 ways, the negotiated Opus fmtp, bitrate, the speaking ring the browser shows for
 us (RTP audio-level extension) and mute propagation, RED both ways (native's
 description lists it first; native unpacks RED from the web and the web
@@ -884,6 +937,9 @@ receives about twice the Opus rate; through the proxy, payload type 63 on
 every packet each way: Chrome's stats name Opus as the codec even then), and
 native's call report (`--call-report`: the header, the web user's block with
 the connection type and `red+opus` each way, the timeline, no IP address);
+an OBS link (the web's `/obs` page, listen-only) in native's call: native
+connects to it and it hears native, with no join or leave chime (the
+`CHIME` lines), and native's call report names "Name's OBS";
 and screen sharing +
 Watch together (native asks `watch.get` at connect; the web's `screen: true`
 in voice and its `watch.join` / `watch.leave` reach native, on and off);
@@ -909,15 +965,18 @@ doodle reaction + Save to Personal + shelf/catch-up requests from native.
 # test/wrangler.test.jsonc adds a stand-in board and a Minecraft address that never answers):
 npx wrangler dev -c test/wrangler.test.jsonc -c test/fixtures/board/wrangler.toml --port 8788 \
   --persist-to <scratch> --var YAP_KEY:testkey --var KLIPY_KEY:test --var ADMIN_KEY:testadmin \
-  --var PIN_PEPPER:testpepper --var TEST_HANGS:1
+  --var PIN_PEPPER:testpepper --var TEST_HANGS:1 --var TEST_PINS:1
 cd desktop && cargo build --release && cd ..
 YAP_URL=http://localhost:8788 YAP_KEY=testkey YAP_ADMIN_KEY=testadmin \
   YAP_BIN=desktop/target/release/yap node desktop/tests/interop.mjs
 ```
 
-Accounts sign in with the test PIN (582039 — the server refuses guessable ones)
-or sign up; a "doorman" bot (`--approve-all`)
-lets newcomers in, and is itself let in through the admin API if needed.
+Accounts sign in with the test password (`correct-horse-582039` — the server
+refuses short and guessable ones) or sign up; a "doorman" bot
+(`--approve-all`) lets newcomers in. Only the owner and mods hear about
+newcomers, so the doorman is the owner on a fresh server and is otherwise
+made a mod through the admin API (also when it's left over as a member from
+an older run).
 `YAP_ONLY=<regex>` runs just the matching tests. `YAP_WEB_MIC=synth` gives the
 web pages a WebAudio mic instead of Chromium's fake one (headless Chromium on
 macOS 27 hangs forever opening any audio capture in some sessions; the
@@ -1208,9 +1267,18 @@ test pattern), `headless.rs`.
   an animated GIF, paging walls with more than twelve drawings.
 - **Since you left with real people:** mentions that came while the app was
   closed (the badge and "for you" in Catch up), Mark all read, a brand-new
-  install starting with everything read, someone being let in (the
-  "joined" line; you being let in: "You're in"), and a reused personal
-  link's warning.
+  install starting with everything read, someone being let in by the owner
+  or a mod (the "joined" line, a member's too, with whose link it was; you
+  being let in: "You're in"; a member sees no bar, count or chime), and a
+  reused personal link's warning.
+- **Passwords with real accounts:** an old PIN account signing in on the
+  desktop (the "Choose a password" bar, Later remembered after a restart),
+  choosing a password from the bar and from Settings › Account, a refusal's
+  words under the fields ("That password is too easy to guess."), an
+  owner/mod's Reset password… and the person signing in with the temporary
+  one (the bar asks again, even after Later on the PIN's), Show in each
+  field, and a password manager filling the field (egui's text fields don't
+  tell the OS they're password fields, so autofill may not offer itself).
 - **RED on real networks** (the tests impair a local proxy): a call on
   choppy Wi‑Fi or cellular with web, iPhone/Mac and desktop people should
   have far fewer robotic blips; the call report says `red+opus` each way

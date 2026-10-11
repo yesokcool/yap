@@ -63,7 +63,7 @@
 
   // Secrets (set with `npx wrangler secret put <NAME>`, never committed):
   //   YAP_KEY             the invite key (required: without it anyone can join)
-  //   PIN_PEPPER          random string mixed into PIN hashes (required; keep a copy: restores need it)
+  //   PIN_PEPPER          random string mixed into password hashes (required; keep a copy: restores need it)
   //   ADMIN_KEY           for backups/restore (Authorization: Bearer); unset = admin API off
   //   KLIPY_KEY           optional: KLIPY GIF API key (the GIF picker)
   //   VAPID_PRIVATE_JWK   optional: browser push notifications (tools/make-vapid.mjs)

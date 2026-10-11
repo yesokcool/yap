@@ -13,7 +13,7 @@ pub const WIDTH: u32 = 1280;
 pub const HEIGHT: u32 = 720;
 
 pub fn source() -> Source {
-    Source { id: ID.into(), name: format!("Test pattern ({WIDTH} × {HEIGHT})"), kind: SourceKind::Screen, width: WIDTH, height: HEIGHT }
+    Source { id: ID.into(), name: format!("Test pattern ({WIDTH} × {HEIGHT})"), kind: SourceKind::Screen }
 }
 
 struct Pattern {

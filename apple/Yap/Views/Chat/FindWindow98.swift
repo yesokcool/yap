@@ -10,7 +10,7 @@ struct FindWindow98: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     var channelId: String
-    /// ⇧⌘F or Run…'s "Search messages for …": everywhere, with these words (maybe none yet).
+    /// ⇧⌘F or Jump to's "Search messages for …": everywhere, with these words (maybe none yet).
     var initialText: String? = nil
     @State private var query = ""
     @State private var scope: SearchScope = .channel

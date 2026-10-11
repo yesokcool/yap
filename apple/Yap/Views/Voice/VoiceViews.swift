@@ -148,15 +148,15 @@ struct VoicePanel: View {
     var body: some View {
         let voice = model.voice
         let channelId = model.callSheetChannel
-        let sessions = model.client.voiceSessions(in: channelId)
+        let sessions = model.client.voiceRoster(in: channelId)
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(sessions) { session in
-                            participant(session)
+                            person(session)
                         }
-                        if sessions.filter({ !$0.isListener }).count <= 1 {
+                        if sessions.count <= 1 {
                             Text("Nobody else here yet. Friends hear you the moment they join.")
                                 .font(Theme.chrome)
                                 .foregroundStyle(Theme.grayText)
@@ -255,17 +255,6 @@ struct VoicePanel: View {
         .presentationDetents([.medium, .large])
     }
 
-    @ViewBuilder
-    private func participant(_ session: Session) -> some View {
-        if session.isListener {
-            ListenerRow98(session: session)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 4)
-        } else {
-            person(session)
-        }
-    }
-
     private func person(_ session: Session) -> some View {
         let user = model.client.user(session.uid)
         let speaking = model.voice.engine.speaking.contains(session.sid)
@@ -320,25 +309,6 @@ struct VoiceHint98: View {
             .italic(kind == .away)
             .foregroundStyle(kind == .away ? Theme.grayText : kind == .blocked ? Theme.danger : Theme.warn)
             .lineLimit(1)
-    }
-}
-
-/// An OBS link listening to the call: "📺 Ada's OBS", gray, no actions.
-struct ListenerRow98: View {
-    @Environment(AppModel.self) private var model
-    var session: Session
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Text("📺").font(.system(size: 11))
-            Text("\(model.client.user(session.uid)?.name ?? "Someone")'s OBS")
-                .font(Theme.chrome)
-                .foregroundStyle(Theme.grayText)
-                .lineLimit(1)
-            Spacer()
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(model.client.user(session.uid)?.name ?? "Someone")'s OBS, listening")
     }
 }
 

@@ -8,7 +8,7 @@
 //! vanish in the dark theme.
 
 use super::dialogs::{actions, note, window};
-use super::{Act, App, theme, theme::Pal};
+use super::{Act, theme, theme::Pal};
 use crate::core::{Cmd, Model};
 use eframe::egui::{self, Color32, Rect, Sense, pos2, vec2};
 
@@ -154,7 +154,7 @@ pub fn encode(lines: &[Line], wiggle: bool) -> Result<Vec<u8>, String> {
 }
 
 /// The dialog's inside (drawn in a Modal by `dialogs::modals`).
-pub fn show(_app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>, d: &mut DoodleBox, keep: &mut bool) {
+pub fn show(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>, d: &mut DoodleBox, keep: &mut bool) {
     let now = ui.input(|i| i.time);
     let mut k = true;
     let canvas = SIDE as f32 * CELL;

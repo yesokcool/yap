@@ -168,7 +168,7 @@ struct ProtocolTests {
     }
 
     @Test func errorsDecode() throws {
-        guard case let .error(code, message, re) = try ServerMessage.decode(#"{"t":"error","code":"locked","message":"Too many wrong PINs. Try again in 2 min.","re":"hello"}"#) else {
+        guard case let .error(code, message, re) = try ServerMessage.decode(#"{"t":"error","code":"locked","message":"Too many wrong tries. Try again in 2 min.","re":"hello"}"#) else {
             Issue.record("not an error")
             return
         }
@@ -202,9 +202,18 @@ struct ProtocolTests {
     }
 
     @Test func friendlyAuthErrors() {
-        #expect(YapClient.friendly(code: "bad_login", message: "Wrong name or PIN.", attempted: nil).contains("don't match"))
-        let taken = YapClient.friendly(code: "name_taken", message: "x", attempted: .signup(name: "Ada", pin: "111111", color: "#000000"))
-        #expect(taken.contains("already called Ada"))
-        #expect(YapClient.friendly(code: "locked", message: "Too many wrong PINs. Try again in 4 min.", attempted: nil) == "Too many wrong PINs. Try again in 4 min.")
+        // A wrong sign-in in the server's words, as the web shows it (the sign-on screen adds who can help).
+        #expect(YapClient.friendly(code: "bad_login", message: "Wrong name or password.", attempted: nil) == "Wrong name or password.")
+        let taken = YapClient.friendly(code: "name_taken", message: "x", attempted: .signup(name: "Ada", pin: "correct-horse-582039", color: "#000000"))
+        #expect(taken.contains("already called Ada") && taken.hasSuffix("sign in with your password."))
+        #expect(YapClient.friendly(code: "bad_token", message: "x", attempted: nil) == "This device was signed out. Sign in again with your name and password.")
+        // The server's own words for the password rules and lockouts.
+        #expect(YapClient.friendly(code: "locked", message: "Too many wrong tries. Try again in 4 min.", attempted: nil) == "Too many wrong tries. Try again in 4 min.")
+        #expect(YapClient.friendly(code: "bad_pin", message: "Use a password of at least 8 characters.", attempted: nil) == "Use a password of at least 8 characters.")
+        #expect(YapClient.friendly(code: "weak_pin", message: "That password is too easy to guess.", attempted: nil) == "That password is too easy to guess.")
+        #expect(YapClient.friendly(code: "bad_pin", message: "", attempted: nil) == "Use a password of at least 8 characters.")
+        for code in ["bad_token", "bad_login", "name_taken", "bad_pin", "weak_pin"] {
+            #expect(!YapClient.friendly(code: code, message: "", attempted: .signup(name: "Ada", pin: "x", color: "#000000")).contains("PIN"), "\(code)")
+        }
     }
 }

@@ -265,8 +265,6 @@ mod imp {
                 id: format!("m:{handle}"),
                 name: screen_name(index + 1, width, height),
                 kind: SourceKind::Screen,
-                width,
-                height,
             })
             .collect()
     }
@@ -325,8 +323,6 @@ mod imp {
                     id: format!("w:{}", hwnd.0 as usize),
                     name: window_name(&title, exe.as_deref()),
                     kind: SourceKind::Window,
-                    width,
-                    height,
                 })
             })
             .collect()

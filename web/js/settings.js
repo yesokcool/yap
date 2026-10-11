@@ -8,8 +8,10 @@ export const COLORS = ['#5b6cff', '#e5484d', '#f76b15', '#f5a524', '#30a46c', '#
 const DEFAULTS = {
   /** Your account id, from the server (ready/pending). Empty until this device signs in. */
   uid: '',
-  /** Device token from signing in (name + PIN). Empty until this device signs in. */
+  /** Device token from signing in (name + password). Empty until this device signs in. */
   token: '',
+  /** "Choose a password" prompts answered with Later on this device, for good (ready.weakReason: pin | temporary | guessable). */
+  passwordLater: [],
   name: '',
   color: '',
   key: '',

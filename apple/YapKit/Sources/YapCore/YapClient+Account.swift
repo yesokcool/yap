@@ -6,6 +6,20 @@ extension YapClient {
     public var savedColor: String? { credentials.color }
     public var hasToken: Bool { credentials.token != nil }
 
+    /// Still signing in with an old 6-digit PIN (Settings › Account says
+    /// "Set a password", and the current one may be the PIN).
+    public var onPin: Bool { secretKind == "pin" }
+
+    /// Why to ask for a password now (`ready.weakPin`), nil when there's
+    /// nothing to ask. The app shows it once per device (PROTOCOL.md › Identity).
+    /// The server says why (`ready.weakReason`); an older one doesn't: then
+    /// an old PIN if I signed in with one, else a guessable password.
+    public var passwordNudge: PasswordNudge? {
+        guard weakPin, mySid != nil else { return nil }
+        if let reason = weakReason.flatMap(PasswordNudge.init(rawValue:)) { return reason }
+        return onPin ? .pin : .guessable
+    }
+
     /// Connect with the stored device token (normal launch).
     public func start() {
         guard endpoint != nil, credentials.token != nil else { return }
@@ -103,7 +117,9 @@ extension YapClient {
         phase = .needsInvite
     }
 
-    public func changePin(to pin: String, current: String?) {
+    /// Set or change my password (`account.pin`; `current` = my password,
+    /// or my old PIN while I'm on one).
+    public func changePassword(to pin: String, current: String?) {
         pinChange = .saving
         if !send(.accountPin(pin: pin, current: current?.isEmpty == true ? nil : current)) {
             pinChange = .failed("Not connected right now. Try again in a moment.")
@@ -195,7 +211,7 @@ extension YapClient {
                 for key in shelves.keys where shelves[key]?.loading == true { shelves[key]?.loading = false }
                 notice = Notice(text: message)
             } else if re == "device.handoff" {
-                // No pass (slowed down): the web app just asks for name + PIN.
+                // No pass (slowed down): the web app just asks for name + password.
                 handoffWaiter?(nil)
                 handoffWaiter = nil
             } else {
@@ -222,15 +238,19 @@ extension YapClient {
     /// Friendly copy for sign-in errors; the server's own message otherwise.
     nonisolated static func friendly(code: String, message: String, attempted: HelloAuth?) -> String {
         switch code {
-        case "bad_token": return "This device was signed out. Sign in again with your name and PIN."
-        case "bad_login": return "That name and PIN (or password) don't match. Check both and try again."
+        case "bad_token": return "This device was signed out. Sign in again with your name and password."
+        // The server's words, as the web shows them ("Wrong name or password.");
+        // the sign-on screen adds who can help (`AuthText.help`).
+        case "bad_login": return message.isEmpty ? "Wrong name or password." : message
         case "name_taken":
             if case let .signup(name, _, _) = attempted {
-                return "Someone here is already called \(name). If that's you, choose “I have an account” and sign in with your PIN."
+                return "Someone here is already called \(name). If that's you, choose “I have an account” and sign in with your password."
             }
             return message
-        case "bad_pin": return "Use a 6-digit PIN, or a password of 10 or more characters."
-        case "weak_pin": return message
+        // The server's own words ("Use a password of at least 8 characters.",
+        // "That password is too easy to guess.", "Too many wrong tries…").
+        case "bad_pin": return message.isEmpty ? "Use a password of at least 8 characters." : message
+        case "weak_pin": return message.isEmpty ? "That password is too easy to guess." : message
         case "bad_name": return "Pick a name friends will recognize."
         default: return message
         }
@@ -266,6 +286,7 @@ extension YapClient {
         vaultUnlocked = false
         noteCache = [:]
         weakPin = false
+        weakReason = nil
         devices = nil
         signinAlert = nil
         search = nil
@@ -320,7 +341,7 @@ extension YapClient {
 
     /// A one-time sign-in pass for the web app (PROTOCOL.md › `device.handoff`),
     /// so Draw / Space / Watch open signed in instead of asking for name +
-    /// PIN. Waits a little for the connection (Draw opened right at launch);
+    /// password. Waits a little for the connection (Draw opened right at launch);
     /// nil if still offline or the server didn't answer in a few seconds.
     public func handoffPass() async -> String? {
         for _ in 0..<40 where !isConnected {

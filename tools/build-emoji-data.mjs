@@ -34,6 +34,7 @@ for (const e of [...data].sort((a, b) => a.order - b.order)) {
   emojis.push(tones.length === 5 ? [e.emoji, group, codes.join(' '), words.join(' '), tones.join(' ')] : [e.emoji, group, codes.join(' '), words.join(' ')]);
 }
 
-const out = path.join(ROOT, 'web/emoji-data.json');
-fs.writeFileSync(out, JSON.stringify({ source: `emojibase-data ${version}`, groups: GROUPS.map(([, name]) => name), emojis }));
-console.log(`wrote ${emojis.length} emojis, ${(fs.statSync(out).size / 1024).toFixed(0)} KB`);
+// The web serves it; the iPhone/Mac app bundles the same file (the desktop fetches the web's).
+const json = JSON.stringify({ source: `emojibase-data ${version}`, groups: GROUPS.map(([, name]) => name), emojis });
+for (const rel of ['web/emoji-data.json', 'apple/YapKit/Sources/YapCore/Resources/emoji-data.json']) fs.writeFileSync(path.join(ROOT, rel), json);
+console.log(`wrote ${emojis.length} emojis, ${(Buffer.byteLength(json) / 1024).toFixed(0)} KB, to web/ and apple/`);

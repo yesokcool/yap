@@ -51,8 +51,11 @@ extension ServerIntegrationTests {
 
     @Test func aReusedLinkAndTheJoinedLine() async throws {
         let inviterName = "Rue \(TestServer.run)"
-        let (ada, _) = try await member(inviterName)
-        let (ben, _) = try await member("Sage \(TestServer.run)")
+        // Both let people in, so both are mods (members never see the waiting room).
+        let (ada, _) = try await mod(inviterName)
+        let (ben, _) = try await mod("Sage \(TestServer.run)")
+        // A member: never sees the request, still gets the line (join.resolved.user).
+        let (nia, _) = try await member("Nia \(TestServer.run)")
         ada.createInvite(label: "for Tova")
         try await waitUntil("invite made") { ada.createdInvite != nil }
         let created = try #require(ada.createdInvite)
@@ -60,7 +63,7 @@ extension ServerIntegrationTests {
 
         func signUp(_ name: String) async throws -> YapClient {
             let newcomer = YapClient(credentials: MemoryCredentialStore(endpoint: link), client: "test-ios")
-            newcomer.signUp(name: name, pin: TestServer.pin, color: "#30a46c")
+            newcomer.signUp(name: name, pin: TestServer.password, color: "#30a46c")
             try await waitUntil("\(name) waiting") { if case .waiting = newcomer.phase { true } else { false } }
             try await waitUntil("ben sees \(name)") { ben.waitingRoom.values.contains { $0.name == name } }
             return newcomer
@@ -79,6 +82,8 @@ extension ServerIntegrationTests {
         try await waitUntil("ada's joined line") { !ada.localNotes(in: general).isEmpty }
         #expect(ada.localNotes(in: general).last?.plain == "\(cyName) joined — invited by \(inviterName)")
         #expect(ben.localNotes(in: general).last?.plain == "\(cyName) joined — invited by \(inviterName)")
+        try await waitUntil("nia's joined line") { nia.localNotes(in: general).last?.plain == "\(cyName) joined — invited by \(inviterName)" }
+        #expect(nia.waitingRoom.isEmpty, "a member was never told about the request")
         #expect(ada.notice?.text.contains("let in") != true, "never a popup")
         #expect(cy.localNotes(in: general).map(\.kind) == [.welcome], "You're in. Say hi")
         #expect(cy.unreadChannels.isEmpty, "the newcomer starts caught up")

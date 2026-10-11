@@ -3,11 +3,11 @@ import UniformTypeIdentifiers
 import YapCore
 import YapVoice
 
-// The Windows 98 skin's windows for the extras: Run… (the quick
-// switcher), Catch Up, the media shelf, New Poll, Plan a Hang, and adding
-// a sound. Each is a Win98 window (navy title bar, grey face, sunken wells).
+// The windows for the extras: Jump to (the quick switcher), Catch up,
+// the media shelf, New poll, Plan a hang, and adding a sound. Each is a
+// Win98 window (navy title bar, grey face, sunken wells).
 
-/// The skin root's sheets for the extras (both platforms).
+/// The root's sheets for the extras (both platforms).
 struct ExtrasSheets98: ViewModifier {
     @Environment(AppModel.self) private var model
 
@@ -21,7 +21,7 @@ struct ExtrasSheets98: ViewModifier {
     }
 }
 
-// MARK: - Run… (quick switcher)
+// MARK: - Jump to (quick switcher)
 
 /// Ctrl/⌘K: a Run-style box. Type to filter; Enter opens the top hit, ↑/↓
 /// move, Esc closes; the last row searches messages.

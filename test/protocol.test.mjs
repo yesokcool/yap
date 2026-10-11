@@ -21,7 +21,18 @@ const RUN = rid().slice(0, 4);
 const ALICE = `Alice ${RUN}`;
 const BOB = `Bob ${RUN}`;
 
+// The made-up password every suite signs up with (CLAUDE.md › Commands).
+const TEST_PASSWORD = 'correct-horse-582039';
+// Old 6-digit PINs still sign in. Only a test server makes new ones: POST
+// /api/admin/test-pin, there when it runs with --var TEST_PINS:1 (npm run test:all does).
 const TEST_PIN = '582039';
+/** Give an account an old PIN like the ones from before 2026-10-11 (the test server's TEST_PINS). */
+const makePinAccount = async (uid, pin = TEST_PIN) => {
+  const res = await admin(`/api/admin/test-pin?uid=${uid}&pin=${pin}`, { method: 'POST' });
+  if (res.status === 404) skip('start the server with --var TEST_PINS:1 to test old PIN accounts');
+  const body = await res.json();
+  assert.equal(body.ok, true, JSON.stringify(body));
+};
 
 class Client {
   constructor(name) {
@@ -67,10 +78,10 @@ class Client {
       }, ms);
     });
   }
-  /** Reconnect with the device token, or sign up (name + PIN) and get let in via the admin API. */
+  /** Reconnect with the device token, or sign up (name + password) and get let in via the admin API. */
   async hello() {
     if (this.token) this.send({ t: 'hello', v: 1, token: this.token, client: 'test' });
-    else this.send({ t: 'hello', v: 1, signup: { name: this.name, pin: TEST_PIN, color: '#ff8800' }, client: 'test' });
+    else this.send({ t: 'hello', v: 1, signup: { name: this.name, pin: TEST_PASSWORD, color: '#ff8800' }, client: 'test' });
     const first = await this.next((m) => m.t === 'ready' || m.t === 'pending' || (m.t === 'error' && m.re === 'hello'));
     if (first.t === 'error') throw new Error(`${this.name}: ${first.code} ${first.message}`);
     if (first.token) this.token = first.token;
@@ -168,6 +179,12 @@ await test('valid JSON that isn’t an object gets bad_json, and the socket keep
 
 await test('hello → ready with seeded channels', async () => {
   const ready = await a.hello();
+  // Alice lets people in in the tests below: only the owner and mods can. She's the owner on a
+  // fresh server (the first person); on one that kept its data, she claims it.
+  if (ADMIN && ready.users.find((u) => u.id === a.uid)?.role !== 'owner') {
+    a.send({ t: 'owner.claim', key: ADMIN });
+    await a.next((m) => m.t === 'user' && m.user.id === a.uid && m.user.role === 'owner');
+  }
   assert.equal(ready.v, 1);
   assert.ok(ready.sid);
   const ids = ready.channels.map((c) => c.id);
@@ -352,11 +369,16 @@ await test('personal invites: key works, newcomer shows who invited them, revoke
   assert.equal(bogus.ok, false);
   const cleo = new Client(`Cleo ${RUN}`);
   await cleo.open(made.key);
-  cleo.send({ t: 'hello', v: 1, signup: { name: cleo.name, pin: TEST_PIN, color: '#00aaff' }, client: 'test' });
+  cleo.send({ t: 'hello', v: 1, signup: { name: cleo.name, pin: TEST_PASSWORD, color: '#00aaff' }, client: 'test' });
   const pending = await cleo.next((m) => m.t === 'pending');
-  const req = await b.next((m) => m.t === 'join.request' && m.user.id === pending.uid);
+  assert.equal(pending.message, 'Waiting for the owner or a mod to let you in.');
+  const req = await a.next((m) => m.t === 'join.request' && m.user.id === pending.uid);
   assert.match(req.user.invitedBy, /^Alice .+ \(for Cleo\)$/, 'says whose invite it was');
-  b.send({ t: 'member.approve', uid: pending.uid });
+  a.send({ t: 'member.approve', uid: pending.uid });
+  // Bob (a member) never saw the request; join.resolved says who joined and who invited them.
+  const joined = await b.next((m) => m.t === 'join.resolved' && m.uid === pending.uid);
+  assert.deepEqual([joined.approved, joined.user?.id, joined.user?.name, joined.user?.color], [true, pending.uid, cleo.name, '#00aaff']);
+  assert.match(joined.user.invitedBy, /^Alice .+ \(for Cleo\)$/);
   const cleoReady = await cleo.next((m) => m.t === 'ready');
   assert.equal(cleoReady.key, KEY || undefined, 'members get the main key, so revoking the invite never locks them out');
   b.send({ t: 'invite.revoke', id: made.invite.id });
@@ -375,9 +397,9 @@ await test('a personal link used twice: the second request says who used it befo
   const join = async (name) => {
     const c = new Client(name);
     await c.open(made.key);
-    c.send({ t: 'hello', v: 1, signup: { name, pin: TEST_PIN, color: '#00aaff' }, client: 'test' });
+    c.send({ t: 'hello', v: 1, signup: { name, pin: TEST_PASSWORD, color: '#00aaff' }, client: 'test' });
     const pending = await c.next((m) => m.t === 'pending');
-    const req = await b.next((m) => m.t === 'join.request' && m.user.id === pending.uid);
+    const req = await a.next((m) => m.t === 'join.request' && m.user.id === pending.uid);
     return { c, uid: pending.uid, user: req.user };
   };
   const first = await join(`Dee ${RUN}`);
@@ -386,7 +408,7 @@ await test('a personal link used twice: the second request says who used it befo
   assert.match(first.user.invitedBy, /^Alice .+ \(for Dee\)$/, 'older clients still get invitedBy');
   const second = await join(`Eve ${RUN}`);
   assert.deepEqual(second.user.invite.usedBy, [`Dee ${RUN}`], 'the same link came in before, as Dee');
-  // A member connecting now sees the same in ready.pending.
+  // The owner connecting now sees the same in ready.pending.
   const look = new Client(ALICE);
   look.token = a.token;
   await look.open();
@@ -395,8 +417,8 @@ await test('a personal link used twice: the second request says who used it befo
   assert.deepEqual(ready.pending.find((u) => u.id === first.uid)?.invite?.usedBy, [`Eve ${RUN}`], 'and the other way round');
   look.close();
   for (const p of [first, second]) {
-    b.send({ t: 'member.deny', uid: p.uid });
-    await b.next((m) => m.t === 'join.resolved' && m.uid === p.uid);
+    a.send({ t: 'member.deny', uid: p.uid });
+    await a.next((m) => m.t === 'join.resolved' && m.uid === p.uid);
     p.c.close();
   }
   a.send({ t: 'invite.revoke', id: made.invite.id });
@@ -409,7 +431,7 @@ await test('hello.client: the iPad app is "Yap for iPad" in Your devices; a clie
   await owner.hello();
   const signIn = async (client) => {
     const c = await new Client(`${name} (${client})`).open();
-    c.send({ t: 'hello', v: 1, login: { name, pin: TEST_PIN }, client });
+    c.send({ t: 'hello', v: 1, login: { name, pin: TEST_PASSWORD }, client });
     const ready = await c.next((m) => m.t === 'ready' || (m.t === 'error' && m.re === 'hello'));
     assert.equal(ready.t, 'ready', `${client}: ${JSON.stringify(ready)}`);
     return c;
@@ -423,7 +445,7 @@ await test('hello.client: the iPad app is "Yap for iPad" in Your devices; a clie
   // An iPad that signed in with an older app (it said "ios", so "Yap for iPhone") is relabeled
   // when it comes back saying "ipad"; a device whose client didn't change keeps its label.
   const old = await new Client(`${name} (old app)`).open();
-  old.send({ t: 'hello', v: 1, login: { name, pin: TEST_PIN }, client: 'ios' });
+  old.send({ t: 'hello', v: 1, login: { name, pin: TEST_PASSWORD }, client: 'ios' });
   const first = await old.next((m) => m.t === 'ready');
   old.close();
   const labels = async () => {
@@ -690,11 +712,11 @@ if (ADMIN) {
 await test('a newcomer cannot take an existing name (any case)', async () => {
   const imposter = new Client(BOB.toUpperCase());
   await imposter.open();
-  imposter.send({ t: 'hello', v: 1, signup: { name: BOB.toUpperCase(), pin: TEST_PIN } });
+  imposter.send({ t: 'hello', v: 1, signup: { name: BOB.toUpperCase(), pin: TEST_PASSWORD } });
   const err = await imposter.next((m) => m.t === 'error');
   assert.equal(err.code, 'name_taken');
   assert.equal(err.re, 'hello');
-  imposter.send({ t: 'hello', v: 1, signup: { name: `Not Bob ${RUN}`, pin: TEST_PIN } });
+  imposter.send({ t: 'hello', v: 1, signup: { name: `Not Bob ${RUN}`, pin: TEST_PASSWORD } });
   assert.equal((await imposter.next((m) => m.t === 'pending')).t, 'pending', 'can retry with another name (then waits to be let in)');
   imposter.close();
 });
@@ -726,17 +748,17 @@ if (ADMIN) {
   });
 }
 
-// ── Accounts: name + PIN, device tokens ─────────────────────────────────
-const PIN = '482916';
+// ── Accounts: name + password (old PINs still sign in), device tokens ───
+const PASSWORD = 'hidden-otter-2741';
 const raw = async () => new Client(`raw-${rid()}`).open();
 const helloWith = (c, extra) => c.send({ t: 'hello', v: 1, client: 'test', ...extra });
 const reply = (c) => c.next((m) => m.t === 'ready' || m.t === 'pending' || (m.t === 'error' && m.re === 'hello'));
 let acct; // { name, uid, token }
 
-await test('sign up with name + PIN → waiting room with a device token; let in → ready', async () => {
+await test('sign up with name + password → waiting room with a device token; let in → ready', async () => {
   const name = `Pinny ${RUN}`;
   const c = await raw();
-  helloWith(c, { signup: { name, pin: PIN, color: '#00ff00' } });
+  helloWith(c, { signup: { name, pin: PASSWORD, color: '#00ff00' } });
   const pending = await reply(c);
   assert.equal(pending.t, 'pending');
   assert.match(pending.token, /^[A-Za-z0-9_-]{40,}$/);
@@ -744,13 +766,14 @@ await test('sign up with name + PIN → waiting room with a device token; let in
   a.send({ t: 'member.approve', uid: req.user.id });
   const ready = await c.next((m) => m.t === 'ready');
   assert.equal(ready.needsPin, false);
+  assert.deepEqual([ready.secretKind, ready.weakPin, ready.weakReason], ['password', undefined, undefined], 'a good password: nothing to ask');
   acct = { name, uid: req.user.id, token: pending.token };
   c.close();
 });
 
-await test('sign in on a new device with name + PIN (any case) → same account, new token', async () => {
+await test('sign in on a new device with name + password (any case) → same account, new token', async () => {
   const c = await raw();
-  helloWith(c, { login: { name: acct.name.toUpperCase(), pin: PIN } });
+  helloWith(c, { login: { name: acct.name.toUpperCase(), pin: PASSWORD } });
   const ready = await reply(c);
   assert.equal(ready.t, 'ready', JSON.stringify(ready));
   assert.equal(ready.uid, acct.uid);
@@ -758,7 +781,7 @@ await test('sign in on a new device with name + PIN (any case) → same account,
   c.close();
 });
 
-await test('a saved device token reconnects without the PIN', async () => {
+await test('a saved device token reconnects without the password', async () => {
   const c = await raw();
   helloWith(c, { token: acct.token });
   const ready = await reply(c);
@@ -767,36 +790,41 @@ await test('a saved device token reconnects without the PIN', async () => {
   c.close();
 });
 
-await test('wrong PINs are refused, then the name locks', async () => {
+await test('wrong passwords are refused, then the name locks', async () => {
   for (let i = 0; i < 5; i++) {
     const c = await raw();
-    helloWith(c, { login: { name: acct.name, pin: '000000' } });
-    assert.equal((await reply(c)).code, 'bad_login');
+    helloWith(c, { login: { name: acct.name, pin: i % 2 ? '000000' : 'not-my-password' } });
+    const err = await reply(c);
+    assert.deepEqual([err.code, err.message], ['bad_login', 'Wrong name or password.']);
     c.close();
   }
   const c = await raw();
-  helloWith(c, { login: { name: acct.name, pin: PIN } });
-  assert.equal((await reply(c)).code, 'locked', 'even the right PIN waits out the lock');
+  helloWith(c, { login: { name: acct.name, pin: PASSWORD } });
+  const locked = await reply(c);
+  assert.equal(locked.code, 'locked', 'even the right password waits out the lock');
+  assert.match(locked.message, /^Too many wrong tries\./);
   c.close();
 });
 
 await test('signing up with a taken name points you to signing in', async () => {
   const c = await raw();
-  helloWith(c, { signup: { name: acct.name, pin: '111111' } });
+  helloWith(c, { signup: { name: acct.name, pin: 'a-fine-new-password' } });
   const err = await reply(c);
   assert.equal(err.code, 'name_taken');
   assert.match(err.message, /I have an account/);
   c.close();
 });
 
-await test('PINs change only with the current one; a bare uid never signs anyone in; sign-out kills the token', async () => {
+await test('passwords change only with the current one; a bare uid never signs anyone in; sign-out kills the token', async () => {
   const c = await new Client(`Pinned ${RUN}`).open();
   const ready = await c.hello();
   assert.equal(ready.needsPin, false);
-  c.send({ t: 'account.pin', pin: '246802' });
-  assert.equal((await c.next((m) => m.t === 'error')).code, 'bad_login', 'changing needs the current PIN');
-  c.send({ t: 'account.pin', pin: '246802', current: TEST_PIN });
-  assert.equal((await c.next((m) => m.t === 'account')).token, undefined, 'device already has a token');
+  c.send({ t: 'account.pin', pin: 'banjo-tundra-cove-19' });
+  const wrong = await c.next((m) => m.t === 'error');
+  assert.deepEqual([wrong.code, wrong.message], ['bad_login', 'Your current password is wrong.'], 'changing needs the current password');
+  c.send({ t: 'account.pin', pin: 'banjo-tundra-cove-19', current: TEST_PASSWORD });
+  const done = await c.next((m) => m.t === 'account');
+  assert.deepEqual([done.hasPin, done.kind, done.token], [true, 'password', undefined], 'device already has a token');
   const imposter = await raw();
   helloWith(imposter, { uid: c.uid, name: c.name, color: '#000000' });
   assert.equal((await reply(imposter)).code, 'pin_required', 'knowing the uid is not enough');
@@ -815,43 +843,141 @@ await test('PINs change only with the current one; a bare uid never signs anyone
 });
 
 if (ADMIN) {
-  await test('owner resets a PIN (and the admin API can too)', async () => {
+  await test('owner resets a password: a temporary one (three words, two digits) that asks to be replaced; the admin API too', async () => {
+    const TEMP = /^[a-z]+-[a-z]+-[a-z]+-\d{2}$/;
     a.send({ t: 'owner.claim', key: ADMIN });
     await a.next((m) => m.t === 'user' && m.user.id === a.uid && m.user.role === 'owner');
     a.send({ t: 'member.resetPin', uid: acct.uid });
     const reset = await a.next((m) => m.t === 'pin.reset');
-    assert.match(reset.pin, /^\d{6}$/);
+    assert.equal(reset.uid, acct.uid);
+    assert.match(reset.pin, TEMP);
     const c = await raw();
     helloWith(c, { login: { name: acct.name, pin: reset.pin } });
-    assert.equal((await reply(c)).uid, acct.uid, 'temporary PIN works (and clears the lock)');
+    const ready = await reply(c);
+    assert.equal(ready.uid, acct.uid, 'the temporary password works (and clears the lock)');
+    assert.deepEqual([ready.secretKind, ready.weakPin, ready.weakReason], ['password', true, 'temporary'], 'and asks for a password of their own');
     c.close();
+    // Every device asks until they choose one (a token reconnect too); then nothing more to ask.
+    const again = await raw();
+    helloWith(again, { token: ready.token });
+    const stillTemp = await reply(again);
+    assert.deepEqual([stillTemp.weakPin, stillTemp.weakReason], [true, 'temporary']);
+    again.send({ t: 'account.pin', pin: PASSWORD, current: reset.pin });
+    await again.next((m) => m.t === 'account');
+    again.close();
+    const after = await raw();
+    helloWith(after, { token: ready.token });
+    const own = await reply(after);
+    assert.deepEqual([own.weakPin, own.weakReason], [undefined, undefined], 'their own password: nothing more to ask');
+    after.close();
     const viaApi = await (await admin(`/api/admin/reset-pin?uid=${acct.uid}`, { method: 'POST' })).json();
-    assert.match(viaApi.pin, /^\d{6}$/);
+    assert.equal(viaApi.ok, true);
+    assert.match(viaApi.pin, TEMP);
+    const log = await (async () => {
+      a.send({ t: 'modlog' });
+      return (await a.next((m) => m.t === 'modlog')).entries;
+    })();
+    assert.ok(log.some((e) => e.action === 'member.resetPin' && e.target === acct.uid && e.actor === a.uid), 'in the mod log');
+    // Members can't reset anyone.
+    b.send({ t: 'member.resetPin', uid: acct.uid });
+    assert.equal((await b.next((m) => m.t === 'error' && m.re === 'member.resetPin')).code, 'forbidden');
+    // Back to the password the later tests know.
+    const back = await raw();
+    helloWith(back, { login: { name: acct.name, pin: viaApi.pin } });
+    await reply(back);
+    back.send({ t: 'account.pin', pin: PASSWORD, current: viaApi.pin });
+    await back.next((m) => m.t === 'account');
+    back.close();
+  });
+
+  await test('an old PIN account: still signs in (asked once to choose a password), sets one, then the PIN stops working', async () => {
+    const c = await new Client(`Oldtimer ${RUN}`).open();
+    await c.hello();
+    await makePinAccount(c.uid);
+    const signIn = async (pin) => {
+      const d = await raw();
+      helloWith(d, { login: { name: c.name, pin } });
+      const r = await reply(d);
+      d.close();
+      return r;
+    };
+    const old = await signIn(TEST_PIN);
+    assert.equal(old.t, 'ready', JSON.stringify(old));
+    assert.deepEqual([old.secretKind, old.weakPin, old.weakReason], ['pin', true, 'pin'], 'on a PIN: asked to choose a password');
+    // Reconnecting with the device token says the same.
+    const back = await raw();
+    helloWith(back, { token: old.token });
+    const r = await reply(back);
+    assert.deepEqual([r.secretKind, r.weakPin, r.weakReason], ['pin', true, 'pin']);
+    // A new PIN can't be set; a guessable password neither; a good one, with the PIN as the current one.
+    back.send({ t: 'account.pin', pin: '246802', current: TEST_PIN });
+    assert.equal((await back.next((m) => m.t === 'error' && m.re === 'account.pin')).code, 'bad_pin');
+    back.send({ t: 'account.pin', pin: 'banjo-tundra-cove-19', current: '000000' });
+    assert.equal((await back.next((m) => m.t === 'error' && m.re === 'account.pin')).message, 'Your current password or PIN is wrong.');
+    back.send({ t: 'account.pin', pin: 'banjo-tundra-cove-19', current: TEST_PIN });
+    assert.equal((await back.next((m) => m.t === 'account')).kind, 'password');
+    back.close();
+    assert.equal((await signIn(TEST_PIN)).code, 'bad_login', 'the PIN no longer works');
+    const now = await signIn('banjo-tundra-cove-19');
+    assert.deepEqual([now.t, now.secretKind, now.weakPin, now.weakReason], ['ready', 'password', undefined, undefined]);
+    c.close();
   });
 }
 
 // ── Waiting room & moderation ───────────────────────────────────────────
 /** Sign up without being let in yet; fills in uid + token from the waiting-room reply. */
 const signUp = async (c) => {
-  c.send({ t: 'hello', v: 1, signup: { name: c.name, pin: TEST_PIN, color: '#123456' }, client: 'test' });
+  c.send({ t: 'hello', v: 1, signup: { name: c.name, pin: TEST_PASSWORD, color: '#123456' }, client: 'test' });
   const pending = await c.next((m) => m.t === 'pending' || m.t === 'ready');
   Object.assign(c, { uid: pending.uid, token: pending.token });
   return pending;
 };
 
-await test('waiting room: a newcomer waits, can do nothing, any member lets them in', async () => {
+await test('waiting room: a newcomer waits and can do nothing; only the owner and mods see them and let them in', async () => {
   const n = await new Client(`New ${RUN}`).open();
-  assert.equal((await signUp(n)).t, 'pending');
+  const pending = await signUp(n);
+  assert.deepEqual([pending.t, pending.message], ['pending', 'Waiting for the owner or a mod to let you in.']);
   const req = await a.next((m) => m.t === 'join.request' && m.user.id === n.uid);
   assert.equal(req.user.role, 'pending');
   n.send({ t: 'send', channelId: 'general', body: 'spam' });
-  assert.equal((await n.next((m) => m.t === 'error')).code, 'pending');
-  b.send({ t: 'member.approve', uid: n.uid });
+  const err = await n.next((m) => m.t === 'error');
+  assert.deepEqual([err.code, err.message], ['pending', 'Waiting for the owner or a mod to let you in.']);
+  // Bob is a member: no request, nothing in ready.pending, and he can't answer one.
+  await assert.rejects(b.next((m) => m.t === 'join.request' && m.user.id === n.uid, 400), 'members never hear about it');
+  const bob = new Client(BOB);
+  bob.token = b.token;
+  await bob.open();
+  assert.deepEqual((await bob.hello()).pending, [], 'members get an empty ready.pending');
+  bob.close();
+  for (const t of ['member.approve', 'member.deny']) {
+    b.send({ t, uid: n.uid });
+    const no = await b.next((m) => m.t === 'error' && m.re === t);
+    assert.deepEqual([no.code, no.message], ['forbidden', 'Only the owner and mods can let people in.']);
+  }
+  a.send({ t: 'member.approve', uid: n.uid });
   const ready = await n.next((m) => m.t === 'ready');
   assert.ok(ready.channels.length > 0);
   const resolved = await a.next((m) => m.t === 'join.resolved' && m.uid === n.uid);
-  assert.deepEqual([resolved.approved, resolved.by], [true, b.uid]);
+  assert.deepEqual([resolved.approved, resolved.by], [true, a.uid]);
+  const seen = await b.next((m) => m.t === 'join.resolved' && m.uid === n.uid);
+  assert.deepEqual(seen.user, { id: n.uid, name: n.name, color: '#123456' }, 'members meet them here (no invite: no invitedBy)');
   n.close();
+});
+
+await test('a new mod sees who is already waiting, and lets them in; the mod log says who', async () => {
+  const w = await new Client(`Waiting ${RUN}`).open();
+  await signUp(w);
+  await a.next((m) => m.t === 'join.request' && m.user.id === w.uid);
+  a.send({ t: 'member.role', uid: b.uid, role: 'mod' });
+  assert.equal((await b.next((m) => m.t === 'join.request' && m.user.id === w.uid)).user.name, w.name, 'as if they had just knocked');
+  b.send({ t: 'member.approve', uid: w.uid });
+  await w.next((m) => m.t === 'ready');
+  a.send({ t: 'modlog' });
+  const { entries } = await a.next((m) => m.t === 'modlog');
+  assert.ok(entries.some((e) => e.action === 'member.approve' && e.actor === b.uid && e.target === w.uid));
+  a.send({ t: 'member.role', uid: b.uid, role: 'member' });
+  await b.next((m) => m.t === 'user' && m.user.id === b.uid && m.user.role === 'member');
+  w.close();
 });
 
 await test('turning someone away keeps them out for good', async () => {
@@ -860,6 +986,7 @@ await test('turning someone away keeps them out for good', async () => {
   await a.next((m) => m.t === 'join.request' && m.user.id === x.uid);
   a.send({ t: 'member.deny', uid: x.uid });
   assert.equal((await x.next((m) => m.t === 'error')).code, 'denied');
+  assert.equal((await a.next((m) => m.t === 'join.resolved' && m.uid === x.uid)).user, undefined, 'nobody joined');
   const again = new Client(`Stranger ${RUN}`);
   again.token = x.token;
   await again.open();
@@ -1006,10 +1133,10 @@ await test('📣 ping: everyone hears it, pushes go out, and it is rate limited'
   assert.deepEqual([heard.from, heard.text], [a.uid, 'game night!']);
   const push = await pushFor(bTopic, (p) => /pinged everyone/.test(p.title));
   assert.equal(push.message, 'game night!');
+  // One a minute per person: the next one right away is turned away.
   a.send({ t: 'ping' });
-  await b.next((m) => m.t === 'ping');
-  a.send({ t: 'ping' });
-  assert.equal((await a.next((m) => m.t === 'error')).code, 'slow_down');
+  const err = await a.next((m) => m.t === 'error');
+  assert.deepEqual([err.code, err.message, err.re], ['slow_down', 'You can ping again in a minute.', 'ping']);
 });
 
 await test('@mention pushes to the person mentioned', async () => {
@@ -1121,6 +1248,57 @@ await test('pushes turned off stay off, though the browser sends its subscriptio
   b.send({ t: 'push.unsubscribe', endpoint: subscribe.endpoint });
   b.send({ t: 'notify.settings', mode: 'pings' }); // back as the later tests expect
   assert.equal((await b.next((m) => m.t === 'notify')).topic, bTopic);
+});
+
+await test('someone starts waiting: the owner and mods get a push (ntfy and browser) saying who invited them; members and quiet hours get none', async () => {
+  // Alice (owner): ntfy + a browser. Mo (a mod): pushes on, but it's their quiet hours. Bob (a member): pushes on.
+  // (Mo joins first: at most one of these pushes goes out every 2 minutes, and Kit's is the one to check.)
+  const mo = await new Client(`Mo ${RUN}`).open();
+  await mo.hello();
+  a.send({ t: 'notify.settings', mode: 'pings' });
+  const aTopic = (await a.next((m) => m.t === 'notify')).topic;
+  const ua = crypto.createECDH('prime256v1');
+  ua.generateKeys();
+  const auth = crypto.randomBytes(16);
+  const endpoint = `http://127.0.0.1:${PUSH_PORT}/push/${rid()}`;
+  a.send({ t: 'push.subscribe', endpoint, keys: { p256dh: b64u(ua.getPublicKey()), auth: b64u(auth) } });
+  await a.next((m) => m.t === 'notify');
+  a.send({ t: 'member.role', uid: mo.uid, role: 'mod' });
+  await mo.next((m) => m.t === 'user' && m.user.id === mo.uid && m.user.role === 'mod');
+  mo.send({ t: 'notify.settings', mode: 'pings' });
+  const moTopic = (await mo.next((m) => m.t === 'notify')).topic;
+  const nowMin = new Date().getUTCHours() * 60 + new Date().getUTCMinutes();
+  mo.send({ t: 'notify.quiet', quiet: { from: (nowMin + 1430) % 1440, to: (nowMin + 10) % 1440, tz: 'UTC', mentions: true } });
+  await mo.next((m) => m.t === 'notify' && m.quiet);
+  // A newcomer comes in with Alice's personal link.
+  a.send({ t: 'invite.create', label: 'for Kit' });
+  const made = await a.next((m) => m.t === 'invite.created');
+  const mark = pushes.length;
+  const kit = await new Client(`Kit ${RUN}`).open(made.key);
+  await signUp(kit);
+  const push = await pushFor(aTopic, (p) => p.title === `🚪 Kit ${RUN} is waiting to join`);
+  assert.match(push.message, /^Invited by Alice .+ \(for Kit\)\. Open Yap to let them in or turn them away\.$/, 'who invited them');
+  let web;
+  for (let i = 0; i < 40 && !web; i++) {
+    web = webPushes.find((w) => endpoint.endsWith(w.path));
+    if (!web) await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(web, 'a browser push too');
+  assert.equal(openWebPush(web.body, ua, auth).title, `🚪 Kit ${RUN} is waiting to join`);
+  await new Promise((r) => setTimeout(r, 600));
+  const others = pushes.slice(mark).filter((p) => /waiting to join/.test(p.title) && p.topic !== aTopic);
+  assert.deepEqual(others.map((p) => p.topic === moTopic ? 'mo (quiet hours)' : p.topic === bTopic ? 'bob (member)' : p.topic), [], 'nobody else');
+  // Tidy up for the later tests.
+  a.send({ t: 'member.deny', uid: kit.uid });
+  await a.next((m) => m.t === 'join.resolved' && m.uid === kit.uid);
+  a.send({ t: 'push.unsubscribe', endpoint });
+  a.send({ t: 'notify.settings', mode: 'off' });
+  await a.next((m) => m.t === 'notify' && m.mode === 'off');
+  a.send({ t: 'invite.revoke', id: made.invite.id });
+  await a.next((m) => m.t === 'invites');
+  a.send({ t: 'member.role', uid: mo.uid, role: 'member' });
+  mo.close();
+  kit.close();
 });
 
 await test('avatars: upload → everyone sees it; remove → gone', async () => {
@@ -1450,33 +1628,41 @@ await test('watch together: two quick adds with nothing on: one plays, the other
   await b.next((m) => m.t === 'watch.state' && m.state.videoId === null);
 });
 
-await test('a sign-up with a secret that is neither a PIN nor a password says what would work', async () => {
-  const c = await new Client(`Shorty ${RUN}`).open();
-  c.send({ t: 'hello', v: 1, signup: { name: `Shorty ${RUN}`, pin: '1234', color: '#ff8800' }, client: 'test' });
-  const err = await c.next((m) => m.t === 'error');
-  assert.equal(err.code, 'bad_pin');
-  assert.match(err.message, /6 digits.*password/, 'passwords work too');
-  c.close();
+await test('sign-up needs a password of 8–128 characters: a 6-digit PIN or anything shorter is bad_pin', async () => {
+  for (const pin of ['1234', '582039', 'seven77', 'x'.repeat(129)]) {
+    const c = await new Client(`Shorty ${RUN}`).open();
+    c.send({ t: 'hello', v: 1, signup: { name: `Shorty ${RUN}`, pin, color: '#ff8800' }, client: 'test' });
+    const err = await c.next((m) => m.t === 'error');
+    assert.equal(err.code, 'bad_pin', pin);
+    if (pin.length < 8) assert.equal(err.message, 'Use a password of at least 8 characters.');
+    c.close();
+  }
 });
 
-await test('weak PINs are refused (repeats, runs, patterns, dates); passwords work instead', async () => {
-  for (const pin of ['424242', '123456', '111111', '123321', '251299', '159753']) {
-    const c = await new Client(`Weak ${pin} ${RUN}`).open();
-    c.send({ t: 'hello', v: 1, signup: { name: `Weak ${pin} ${RUN}`, pin, color: '#ff8800' }, client: 'test' });
-    assert.equal((await c.next((m) => m.t === 'error')).code, 'weak_pin', pin);
+await test('guessable passwords are refused (common ones, your own name, one character repeated, keyboard and number runs), at sign-up and when changing', async () => {
+  const name = `Weakling ${RUN}`;
+  for (const pin of ['password1', 'iloveyou', 'aaaaaaaaaa', 'qwertyuiop', '12345678', 'asdfgh123', `weakling${RUN}`, `${RUN}weakling!`]) {
+    const c = await new Client(name).open();
+    c.send({ t: 'hello', v: 1, signup: { name, pin, color: '#ff8800' }, client: 'test' });
+    const err = await c.next((m) => m.t === 'error');
+    assert.equal(err.code, 'weak_pin', pin);
+    assert.match(err.message, /^That password is too easy to guess\./, pin);
     c.close();
   }
   const p = await new Client(`Pass ${RUN}`).open();
   await p.hello();
-  p.send({ t: 'account.pin', pin: '111111', current: TEST_PIN });
+  p.send({ t: 'account.pin', pin: 'sunshine2024', current: TEST_PASSWORD });
   assert.equal((await p.next((m) => m.t === 'error' && m.re === 'account.pin')).code, 'weak_pin');
-  p.send({ t: 'account.pin', pin: 'short pw', current: TEST_PIN });
-  assert.equal((await p.next((m) => m.t === 'error' && m.re === 'account.pin')).code, 'bad_pin');
-  p.send({ t: 'account.pin', pin: 'purple tiger river 7', current: TEST_PIN });
+  p.send({ t: 'account.pin', pin: `pass${RUN}`.toUpperCase() + '2024', current: TEST_PASSWORD });
+  assert.equal((await p.next((m) => m.t === 'error' && m.re === 'account.pin')).code, 'weak_pin', 'your own name');
+  p.send({ t: 'account.pin', pin: 'short', current: TEST_PASSWORD });
+  const short = await p.next((m) => m.t === 'error' && m.re === 'account.pin');
+  assert.deepEqual([short.code, short.message], ['bad_pin', 'Use a password of at least 8 characters.']);
+  p.send({ t: 'account.pin', pin: 'purple tiger river 7', current: TEST_PASSWORD });
   assert.equal((await p.next((m) => m.t === 'account')).kind, 'password');
   const again = await new Client(`Pass ${RUN} again`).open();
-  again.send({ t: 'hello', v: 1, login: { name: `Pass ${RUN}`, pin: TEST_PIN }, client: 'test' });
-  assert.equal((await again.next((m) => m.t === 'error')).code, 'bad_login', 'the old PIN is gone');
+  again.send({ t: 'hello', v: 1, login: { name: `Pass ${RUN}`, pin: TEST_PASSWORD }, client: 'test' });
+  assert.equal((await again.next((m) => m.t === 'error')).code, 'bad_login', 'the old password is gone');
   again.send({ t: 'hello', v: 1, login: { name: `Pass ${RUN}`, pin: 'purple tiger river 7' }, client: 'test' });
   const ready = await again.next((m) => m.t === 'ready');
   assert.equal(ready.secretKind, 'password');
@@ -1491,7 +1677,7 @@ await test('your devices: a new sign-in alerts your other devices; list, sign on
   await first.hello();
   const login = async () => {
     const c = await new Client(`${name} (2)`).open();
-    c.send({ t: 'hello', v: 1, login: { name, pin: TEST_PIN }, client: 'web' });
+    c.send({ t: 'hello', v: 1, login: { name, pin: TEST_PASSWORD }, client: 'web' });
     c.ready = await c.next((m) => m.t === 'ready');
     return c;
   };

@@ -1,6 +1,6 @@
 [package]
 name = "yap"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 description = "Native desktop client for Yap (text + voice)"
 license = "AGPL-3.0-only"

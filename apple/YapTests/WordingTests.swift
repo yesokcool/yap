@@ -4,21 +4,25 @@ import Testing
 @testable import YapCore
 
 /// Words the app shares with the web (polish pass 2): the sign-on hint and
-/// its wrong-PIN help, the join bars' summary, and the questions.
+/// its wrong-password help, the join bars' summary, and the questions.
 @MainActor
 @Suite("Web wording")
 struct WordingTests {
-    @Test func signOnHintFollowsUseAPassword() {
-        #expect(AuthText.hint(signup: true).contains("6-digit PIN"))
-        #expect(AuthText.hint(signup: true, password: true).contains("password of 10 or more characters"))
-        #expect(AuthText.hint(signup: false) == "Sign in with your name and PIN — same you, same messages, on any device.")
-        #expect(AuthText.hint(signup: false, password: true) == "Sign in with your name and password — same you, same messages, on any device.")
+    @Test func signOnHintSaysPassword() {
+        #expect(AuthText.hint(signup: true) == "Pick a name friends will see and a password. It’s how you sign in on your other devices.")
+        #expect(AuthText.hint(signup: false) == "Sign in with your name and password — same you, same messages, on any device.")
+        #expect(PasswordText.field == "Password" && PasswordText.rule == "8 characters or more.")
     }
 
-    @Test func wrongPinSaysWhoCanHelp() {
-        let help = "Forgot your PIN? The owner or a mod can reset it."
-        #expect(AuthText.help(for: YapClient.AuthError(code: "bad_login", message: "x", mode: .login)) == help)
-        #expect(AuthText.help(for: YapClient.AuthError(code: "locked", message: "x", mode: .login)) == help)
+    /// The server's line, then who can help: together the web's words.
+    @Test func wrongPasswordSaysWhoCanHelp() throws {
+        let wrong = YapClient.friendly(code: "bad_login", message: "Wrong name or password.", attempted: nil)
+        let help = try #require(AuthText.help(for: YapClient.AuthError(code: "bad_login", message: wrong, mode: .login)))
+        #expect("\(wrong) \(help)" == "Wrong name or password. An old PIN works here too. Forgot it? The owner or a mod can reset it.")
+        #expect(YapClient.friendly(code: "bad_login", message: "", attempted: nil) == "Wrong name or password.")
+        let locked = YapClient.friendly(code: "locked", message: "Too many wrong tries. Try again in 4 min.", attempted: nil)
+        let lockedHelp = try #require(AuthText.help(for: YapClient.AuthError(code: "locked", message: locked, mode: .login)))
+        #expect("\(locked) \(lockedHelp)" == "Too many wrong tries. Try again in 4 min. Forgot your password? The owner or a mod can reset it.")
         #expect(AuthText.help(for: YapClient.AuthError(code: "name_taken", message: "x", mode: .signup)) == nil)
         #expect(AuthText.help(for: nil) == nil)
     }
@@ -31,7 +35,8 @@ struct WordingTests {
     }
 
     @Test func questionsUseTheWebsWords() {
-        #expect(Question.resetPin("Ada") {}.title == "Reset Ada’s PIN?")
+        #expect(Question.resetPassword("Ada") {}.title == "Reset Ada’s password?")
+        #expect(Question.resetPassword("Ada") {}.action == "Reset password")
         #expect(Question.turnOffInvite("for Dee") {}.title == "Turn off “for Dee”?")
         #expect(Question.cancelHang("Game night") {}.cancel == "Keep it")
         #expect(Question.deleteMessage {}.text == "It’s erased for good, for everyone.")

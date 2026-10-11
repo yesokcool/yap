@@ -1,7 +1,7 @@
 //! Pieces the windows share, written once: the sidebar's list rows and its
 //! Upcoming, voice-channel and Places sections, the chat's information
 //! bars, avatars, toasts, the typing line's words, day dividers and the
-//! start of a channel. `RowLook` is how a list is drawn.
+//! start of a channel.
 
 use super::{Act, App, Face, dialogs::Modal, face, icons, theme, theme::Pal};
 use crate::core::{Cmd, Hint, Model, Status};
@@ -17,75 +17,51 @@ pub struct Look {
     pub tint: Option<Color32>,
 }
 
-/// How the sidebar's lists are drawn (the palette of the moment).
-#[derive(Clone, Copy)]
-pub struct RowLook {
-    pub p: Pal,
+/// A row's height (rows under a row too).
+const ROW_H: f32 = 20.0;
+
+/// A group heading with an optional + button; true when it's clicked.
+pub fn list_heading(ui: &mut egui::Ui, p: &Pal, title: &str, add: Option<&str>) -> bool {
+    let mut clicked = false;
+    ui.add_space(6.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
+    ui.painter().text(pos2(rect.left() + 3.0, rect.center().y), Align2::LEFT_CENTER, title, theme::bold_font(theme::ui()), p.text);
+    if let Some(tip) = add {
+        let b = Rect::from_min_size(pos2(rect.right() - 22.0, rect.top()), vec2(20.0, 18.0));
+        clicked = ui.place(b, |ui: &mut egui::Ui| icons::tool(ui, "plus", vec2(20.0, 18.0), p.gray, tip, false)).clicked();
+    }
+    clicked
 }
 
-/// A row's height.
-const ROW_98: f32 = 20.0;
-
-impl RowLook {
-    pub fn of(ui: &egui::Ui) -> Self {
-        Self { p: theme::pal(ui.ctx()) }
+/// A row: icon + name, navy when active, underlined under the pointer.
+pub fn list_row(ui: &mut egui::Ui, p: &Pal, kind: &str, key: &str, icon: &str, name: &str, look: Look) -> (Rect, egui::Response) {
+    let (rect, resp) = super::row(ui, ROW_H, (kind, key));
+    let painter = ui.painter();
+    if look.active {
+        painter.rect_filled(rect, 0.0, p.select);
     }
-
-    fn id<'a>(&self, kind: &'a str, key: &'a str) -> (&'static str, &'a str, &'a str) {
-        ("98", kind, key)
+    let fg = if look.active { p.on_select } else { look.tint.unwrap_or(p.text) };
+    let icon_color = if look.active { p.on_select } else { look.tint.unwrap_or(p.gray) };
+    let x = rect.left() + 14.0;
+    icons::paint(painter, Rect::from_center_size(pos2(x + 7.0, rect.center().y), vec2(14.0, 14.0)), icon, icon_color);
+    let font = if look.bold { theme::bold_font(theme::ui()) } else { theme::font(theme::ui()) };
+    // A long name ends in "…" short of a badge or the archive button.
+    let g = fit(painter, name, font, rect.right() - 24.0 - (x + 19.0), fg);
+    let at = pos2(x + 19.0, rect.center().y - g.size().y / 2.0);
+    let w = g.size().x;
+    painter.with_clip_rect(rect.intersect(painter.clip_rect())).galley(at, g, fg);
+    if resp.hovered() {
+        painter.hline(at.x..=at.x + w, (rect.center().y + 7.0).round(), egui::Stroke::new(1.0, fg));
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
+    (rect, resp)
+}
 
-    /// A group heading with an optional + button; true when it's clicked.
-    pub fn heading(&self, ui: &mut egui::Ui, title: &str, add: Option<&str>) -> bool {
-        let p = &self.p;
-        let mut clicked = false;
-        ui.add_space(6.0);
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 18.0), Sense::hover());
-        ui.painter().text(pos2(rect.left() + 3.0, rect.center().y), Align2::LEFT_CENTER, title, theme::bold_font(theme::ui()), p.text);
-        if let Some(tip) = add {
-            let b = Rect::from_min_size(pos2(rect.right() - 22.0, rect.top()), vec2(20.0, 18.0));
-            clicked = ui.place(b, |ui: &mut egui::Ui| icons::tool(ui, "plus", vec2(20.0, 18.0), p.gray, tip, false)).clicked();
-        }
-        clicked
-    }
-
-    /// A row: icon + name, navy when active, underlined under the pointer.
-    pub fn row(&self, ui: &mut egui::Ui, kind: &str, key: &str, icon: &str, name: &str, look: Look) -> (Rect, egui::Response) {
-        let id = self.id(kind, key);
-        let p = &self.p;
-        let (rect, resp) = super::row(ui, ROW_98, id);
-        let painter = ui.painter();
-        if look.active {
-            painter.rect_filled(rect, 0.0, p.select);
-        }
-        let fg = if look.active { p.on_select } else { look.tint.unwrap_or(p.text) };
-        let icon_color = if look.active { p.on_select } else { look.tint.unwrap_or(p.gray) };
-        let x = rect.left() + 14.0;
-        icons::paint(painter, Rect::from_center_size(pos2(x + 7.0, rect.center().y), vec2(14.0, 14.0)), icon, icon_color);
-        let font = if look.bold { theme::bold_font(theme::ui()) } else { theme::font(theme::ui()) };
-        // A long name ends in "…" short of a badge or the archive button.
-        let g = fit(painter, name, font, rect.right() - 24.0 - (x + 19.0), fg);
-        let at = pos2(x + 19.0, rect.center().y - g.size().y / 2.0);
-        let w = g.size().x;
-        painter.with_clip_rect(rect.intersect(painter.clip_rect())).galley(at, g, fg);
-        if resp.hovered() {
-            painter.hline(at.x..=at.x + w, (rect.center().y + 7.0).round(), egui::Stroke::new(1.0, fg));
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        (rect, resp)
-    }
-
-    /// "Nothing planned" and the like: a quiet line where a list would be.
-    fn empty(&self, ui: &mut egui::Ui, kind: &str, text: &str) -> egui::Response {
-        let id = self.id(kind, "");
-        let (rect, resp) = super::row(ui, ROW_98, id);
-        ui.painter().text(pos2(rect.left() + 14.0, rect.center().y), Align2::LEFT_CENTER, text, theme::font(theme::small()), self.p.gray);
-        resp
-    }
-
-    fn ok(&self) -> Color32 {
-        self.p.ok
-    }
+/// "Nothing planned" and the like: a quiet line where a list would be.
+fn list_empty(ui: &mut egui::Ui, p: &Pal, kind: &str, text: &str) -> egui::Response {
+    let (rect, resp) = super::row(ui, ROW_H, (kind, ""));
+    ui.painter().text(pos2(rect.left() + 14.0, rect.center().y), Align2::LEFT_CENTER, text, theme::font(theme::small()), p.gray);
+    resp
 }
 
 /// A count badge: a red box with a black ring.
@@ -102,26 +78,25 @@ pub fn badge(painter: &egui::Painter, right_center: Pos2, n: usize) {
 
 /// Upcoming hangs (and one going on now), with + to plan one; right-click
 /// cancels yours, a click joins its voice channel.
-pub fn hangs(app: &mut App, ui: &mut egui::Ui, m: &Model, look: &RowLook, acts: &mut Vec<Act>) {
+pub fn hangs(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>) {
     if m.status != Status::Online {
         return;
     }
-    if look.heading(ui, "Upcoming", Some("Plan a hang")) {
+    if list_heading(ui, p, "Upcoming", Some("Plan a hang")) {
         app.modal = Some(Modal::PlanHang(super::extras::PlanHang::new(m)));
     }
     let list = super::extras::upcoming_hangs(m);
     if list.is_empty() {
-        let resp = look.empty(ui, "no-hangs", "Nothing planned");
+        let resp = list_empty(ui, p, "no-hangs", "Nothing planned");
         if theme::tip(resp, "Plan a hang: the people who are free then get one reminder").clicked() {
             app.modal = Some(Modal::PlanHang(super::extras::PlanHang::new(m)));
         }
         return;
     }
-    let p = theme::pal(ui.ctx());
     for h in list {
         let when = super::extras::hang_when(h.at, app.h12);
         let now = when == "now";
-        let (r, resp) = look.row(ui, "hang", &h.id, "calendar", &h.title, Look { bold: now, tint: now.then_some(look.ok()), ..Default::default() });
+        let (r, resp) = list_row(ui, p, "hang", &h.id, "calendar", &h.title, Look { bold: now, tint: now.then_some(p.ok), ..Default::default() });
         // When, on the right (over the end of a long title).
         let color = if now { p.ok } else { p.gray };
         let g = ui.painter().layout_no_wrap(when, theme::font(theme::small()), color);
@@ -130,8 +105,8 @@ pub fn hangs(app: &mut App, ui: &mut egui::Ui, m: &Model, look: &RowLook, acts: 
         ui.painter().galley(pos2(r.right() - 6.0 - gw, r.center().y - g.size().y / 2.0), g, color);
         if super::extras::can_cancel_hang(m, h) {
             let id = h.id.clone();
-            theme::context_menu(&resp, &p, |ui| {
-                if theme::menu_item(ui, "Cancel this hang", false, &p).clicked() {
+            theme::context_menu(&resp, p, |ui| {
+                if theme::menu_item(ui, "Cancel this hang", false, p).clicked() {
                     acts.push(Act::Cmd(Cmd::CancelHang(id.clone())));
                     ui.close();
                 }
@@ -146,29 +121,21 @@ pub fn hangs(app: &mut App, ui: &mut egui::Ui, m: &Model, look: &RowLook, acts: 
     }
 }
 
-/// Where a row under a row (someone in voice, someone on a Place) puts things.
-struct SubRow {
-    h: f32,
-    /// The avatar's (or icon's) centre, from the row's left.
-    x: f32,
-    avatar: f32,
-    /// From the avatar's centre to the name.
-    gap: f32,
-    icon: f32,
-}
-
-fn sub_row() -> SubRow {
-    SubRow { h: ROW_98, x: 38.0, avatar: 14.0, gap: 12.0, icon: 14.0 }
-}
+/// A row under a row (someone in voice, someone on a Place): its avatar's
+/// centre, from the row's left…
+const SUB_X: f32 = 38.0;
+/// …the avatar's size…
+const SUB_AVATAR: f32 = 14.0;
+/// …and from the avatar's centre to the name.
+const SUB_GAP: f32 = 12.0;
 
 /// A connection hint after someone's name ("weak connection", "reconnecting…"),
 /// cut short with an ellipsis if the row is narrow. The web's colours: a
 /// warning, grey italics while they're reconnecting, red when they can't connect.
-fn hint_label(ui: &egui::Ui, look: &RowLook, at: Pos2, max_w: f32, hint: &Hint) {
+fn hint_label(ui: &egui::Ui, p: &Pal, at: Pos2, max_w: f32, hint: &Hint) {
     if max_w < 24.0 {
         return;
     }
-    let p = &look.p;
     let (color, italics) = match hint {
         Hint::Reconnecting => (p.gray, true),
         Hint::NeedsRelay | Hint::CantConnect => (p.danger, false),
@@ -183,37 +150,25 @@ fn hint_label(ui: &egui::Ui, look: &RowLook, at: Pos2, max_w: f32, hint: &Hint) 
 
 /// Who's in a voice channel, under it: speaking rings, "connecting", the
 /// LIVE badge, connection hints, mute / deafen marks; click someone for
-/// their volume.
-pub fn voice_members(app: &mut App, ui: &mut egui::Ui, m: &Model, look: &RowLook, channel_id: &str, joined: bool, acts: &mut Vec<Act>) {
-    let mut members: Vec<_> = m.sessions.values().filter(|s| s.voice.as_ref().is_some_and(|v| v.channel_id == channel_id)).collect();
-    members.sort_by_key(|s| m.user_name(&s.uid).to_lowercase());
-    let sr = sub_row();
-    let p = &look.p;
-    for s in members {
+/// their volume. (Not OBS links: they listen without showing up.)
+pub fn voice_members(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, channel_id: &str, joined: bool, acts: &mut Vec<Act>) {
+    for s in m.voice_members(channel_id) {
         let me = Some(&s.sid) == m.sid.as_ref();
         let user = m.users.get(&s.uid);
         let name = user.map(|u| u.name.as_str()).unwrap_or("Unknown");
-        let (rect, resp) = super::row(ui, sr.h, look.id("vm", &s.sid));
-        let c = pos2(rect.left() + sr.x, rect.center().y);
-        if s.is_obs() {
-            // A listen-only OBS Browser Source: shown, dimmed, no menu.
-            let dim = p.gray;
-            icons::paint(ui.painter(), Rect::from_center_size(c, vec2(sr.icon, sr.icon)), "tv", dim);
-            ui.painter().text(pos2(c.x + sr.gap, c.y), Align2::LEFT_CENTER, format!("{name}'s OBS"), theme::font(theme::ui()), dim);
-            theme::tip(resp, "Listening for a stream (OBS)");
-            continue;
-        }
+        let (rect, resp) = super::row(ui, ROW_H, ("vm", &s.sid));
+        let c = pos2(rect.left() + SUB_X, rect.center().y);
         let ghost = m.ghosts.contains_key(&s.sid);
         let connecting = joined && !me && !ghost && m.peer_states.get(&s.sid).map(String::as_str) != Some("connected");
         let hint = if joined && !me { m.hints.get(&s.sid) } else { None };
         let speaking = m.speaking.contains(&s.sid);
         // A long name ends in "…" before the mute / deafen mark.
         let flagged = s.voice.as_ref().is_some_and(|v| v.muted || v.deafened);
-        let name_w = rect.right() - if flagged { 26.0 } else { 6.0 } - (c.x + sr.gap);
-        super::avatar(ui, &app.images, &m.config.server, c, sr.avatar, face(user), speaking, p);
+        let name_w = rect.right() - if flagged { 26.0 } else { 6.0 } - (c.x + SUB_GAP);
+        super::avatar(ui, &app.images, &m.config.server, c, SUB_AVATAR, face(user), speaking, p);
         let color = if connecting { p.gray } else { p.text };
         let g = fit(ui.painter(), name, theme::font(theme::ui()), name_w, color);
-        let at = pos2(c.x + sr.gap, rect.center().y - g.size().y / 2.0);
+        let at = pos2(c.x + SUB_GAP, rect.center().y - g.size().y / 2.0);
         let w = g.size().x;
         ui.painter().galley(at, g, color);
         if resp.hovered() && !me {
@@ -232,7 +187,7 @@ pub fn voice_members(app: &mut App, ui: &mut egui::Ui, m: &Model, look: &RowLook
         }
         if let Some(h) = hint {
             let flags = if s.voice.as_ref().is_some_and(|v| v.muted || v.deafened) { 26.0 } else { 6.0 };
-            hint_label(ui, look, pos2(after + 6.0, c.y), rect.right() - flags - after - 6.0, h);
+            hint_label(ui, p, pos2(after + 6.0, c.y), rect.right() - flags - after - 6.0, h);
         }
         if let Some(v) = &s.voice {
             let flag = if v.deafened { Some("headphones-off") } else if v.muted { Some("mic-off") } else { None };
@@ -260,22 +215,20 @@ pub fn voice_members(app: &mut App, ui: &mut egui::Ui, m: &Model, look: &RowLook
 /// https link with + or remove one with a right-click), Draw and Space (in
 /// the app), the web-only views (in the browser, signed in), and who's on
 /// each. (The Minecraft server is in the status bar.)
-pub fn places(app: &mut App, ui: &mut egui::Ui, m: &Model, look: &RowLook, acts: &mut Vec<Act>) {
+pub fn places(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>) {
     if m.links.is_none() && m.server_config.is_none() {
         return;
     }
-    if look.heading(ui, "Places", Some("Add a link")) {
+    if list_heading(ui, p, "Places", Some("Add a link")) {
         app.modal = Some(Modal::AddLink { name: String::new(), url: String::new() });
     }
-    let p = theme::pal(ui.ctx());
-    let sr = sub_row();
-    let (sub_h, name_font, dim) = (ROW_98, theme::font(theme::ui()), p.gray);
+    let (name_font, dim) = (theme::font(theme::ui()), p.gray);
     for place in super::places(m) {
         let here = place.view.is_some() && place.view == m.view;
-        let (_, resp) = look.row(ui, "place", &place.name, place.icon, &place.name, Look { active: here, ..Default::default() });
+        let (_, resp) = list_row(ui, p, "place", &place.name, place.icon, &place.name, Look { active: here, ..Default::default() });
         if let Some(id) = &place.id {
-            theme::context_menu(&resp, &p, |ui| {
-                if theme::menu_item(ui, &format!("Remove {}", place.name), false, &p).clicked() {
+            theme::context_menu(&resp, p, |ui| {
+                if theme::menu_item(ui, &format!("Remove {}", place.name), false, p).clicked() {
                     acts.push(Act::Cmd(Cmd::RemoveLink(id.clone())));
                     ui.close();
                 }
@@ -291,7 +244,7 @@ pub fn places(app: &mut App, ui: &mut egui::Ui, m: &Model, look: &RowLook, acts:
         // What's on (Watch together), and who's there (being on a shared view
         // or in the Watch audience makes you visible).
         if let Some(title) = super::watch_now(m, &place) {
-            let (rect, resp) = super::row(ui, sub_h, look.id("watch-now", &place.name));
+            let (rect, resp) = super::row(ui, ROW_H, ("watch-now", &place.name));
             let (x, w) = (32.0, rect.width() - 36.0);
             super::now_playing(ui, pos2(rect.left() + x, rect.center().y), &title, name_font.clone(), dim, w);
             if theme::tip(resp, format!("Playing: {title}\nClick to watch in your browser")).clicked() {
@@ -299,13 +252,13 @@ pub fn places(app: &mut App, ui: &mut egui::Ui, m: &Model, look: &RowLook, acts:
             }
         }
         for (u, _) in super::place_people(m, &place) {
-            let (rect, _) = super::row(ui, sub_h, look.id("viewer", &format!("{}/{}", place.name, u.id)));
-            let c = pos2(rect.left() + sr.x, rect.center().y);
-            super::avatar(ui, &app.images, &m.config.server, c, 14.0, face(Some(u)), false, &p);
+            let (rect, _) = super::row(ui, ROW_H, ("viewer", &format!("{}/{}", place.name, u.id)));
+            let c = pos2(rect.left() + SUB_X, rect.center().y);
+            super::avatar(ui, &app.images, &m.config.server, c, SUB_AVATAR, face(Some(u)), false, p);
             // Dimmed, so they don't read like more places (like the web's); a long name ends in "…".
             let color = p.gray;
-            let g = fit(ui.painter(), &u.name, name_font.clone(), rect.right() - 6.0 - (c.x + sr.gap), color);
-            ui.painter().galley(pos2(c.x + sr.gap, rect.center().y - g.size().y / 2.0), g, color);
+            let g = fit(ui.painter(), &u.name, name_font.clone(), rect.right() - 6.0 - (c.x + SUB_GAP), color);
+            ui.painter().galley(pos2(c.x + SUB_GAP, rect.center().y - g.size().y / 2.0), g, color);
         }
     }
 }
@@ -317,13 +270,15 @@ enum Bar {
     Hang,
     Offline,
     SigninAlert,
-    WeakPin,
-    NeedsPin,
+    /// The "Choose a password" prompt (`ready.weakPin`, until Later).
+    ChoosePassword,
+    /// An account with no password at all (`ready.needsPin`).
+    NoPassword,
     Joins,
 }
 
-/// Is there a bar to show over the chat (connection lost, set a PIN, people
-/// waiting, a new sign-in, a weak PIN, a hang starting)?
+/// Is there a bar to show over the chat (connection lost, set a password,
+/// people waiting, a new sign-in, choose a password, a hang starting)?
 pub fn has_bars(app: &App, m: &Model) -> bool {
     !bars_now(app, m).is_empty()
 }
@@ -333,16 +288,16 @@ fn offline(m: &Model) -> bool {
 }
 
 fn bars_now(app: &App, m: &Model) -> Vec<Bar> {
-    let weak = m.weak_pin && !app.weak_pin_dismissed && !m.needs_pin;
     let on = |b: &Bar| match b {
         Bar::Hang => super::extras::hang_notice(app, m).is_some(),
         Bar::Offline => offline(m),
         Bar::SigninAlert => m.signin_alert.is_some(),
-        Bar::WeakPin => weak,
-        Bar::NeedsPin => m.needs_pin,
-        Bar::Joins => !m.join_requests.is_empty(),
+        Bar::ChoosePassword => m.password_prompt().is_some(),
+        Bar::NoPassword => m.needs_pin,
+        // Only the owner and mods let people in (an older server told everyone).
+        Bar::Joins => !m.join_requests.is_empty() && m.am_moderator(),
     };
-    let order = [Bar::Hang, Bar::SigninAlert, Bar::WeakPin, Bar::Offline, Bar::NeedsPin, Bar::Joins];
+    let order = [Bar::Hang, Bar::SigninAlert, Bar::ChoosePassword, Bar::Offline, Bar::NoPassword, Bar::Joins];
     order.into_iter().filter(on).collect()
 }
 
@@ -477,23 +432,27 @@ pub fn bars(app: &mut App, ui: &mut egui::Ui, m: &Model, acts: &mut Vec<Act>) {
                     }
                 });
             }
-            Bar::WeakPin => {
+            Bar::ChoosePassword => {
+                let Some(reason) = m.password_prompt() else { continue };
                 look.bar(ui, |ui| {
-                    match look.row(ui, None, &[("Your PIN is easy to guess — change it, so a friend can't sign in as you.", false)], &[("Later", theme::Btn::Normal, Some(vec2(60.0, 21.0))), ("Change…", theme::Btn::Default, Some(vec2(70.0, 21.0)))]) {
-                        Some(0) => app.weak_pin_dismissed = true,
-                        Some(_) => acts.push(Act::OpenSettings(super::dialogs::TAB_ACCOUNT)),
+                    // Later puts this reason off on this device for good (Settings ›
+                    // Account keeps "Set a password"); Choose a password opens the
+                    // dialog, and the bar goes once the password is saved (like the web).
+                    match look.row(ui, Some("lock"), &[("Choose a password", true), (password_prompt_words(reason), false)], &[("Later", theme::Btn::Normal, Some(vec2(60.0, 21.0))), ("Choose a password", theme::Btn::Default, Some(vec2(120.0, 21.0)))]) {
+                        Some(0) => acts.push(Act::PasswordLater(reason)),
+                        Some(_) => app.modal = Some(Modal::Password(Default::default())),
                         None => {}
                     }
                 });
             }
-            Bar::NeedsPin => {
+            Bar::NoPassword => {
                 look.bar(ui, |ui| {
                     ui.horizontal(|ui| {
-                        let room = ui.available_width() - look.button_w(ui, "Set PIN…", theme::Btn::Normal, None) - 2.0 * ui.spacing().item_spacing.x;
-                        look.words(ui, &[("Set a PIN or a password so you can sign in on your other devices as yourself.", false)], room);
+                        let room = ui.available_width() - look.button_w(ui, "Set a password…", theme::Btn::Normal, None) - 2.0 * ui.spacing().item_spacing.x;
+                        look.words(ui, &[("Set a password so you can sign in on your other devices as yourself.", false)], room);
                         // The button right after the words.
-                        if look.button(ui, "Set PIN…", theme::Btn::Normal, None).clicked() {
-                            app.modal = Some(Modal::SetPin { pin: String::new(), confirm: String::new(), password: false });
+                        if look.button(ui, "Set a password…", theme::Btn::Normal, None).clicked() {
+                            app.modal = Some(Modal::Password(Default::default()));
                         }
                     });
                 });
@@ -550,6 +509,15 @@ pub fn bars(app: &mut App, ui: &mut egui::Ui, m: &Model, acts: &mut Vec<Act>) {
                 }
             }
         }
+    }
+}
+
+/// The "Choose a password" prompt's words, by why it asks (the web's).
+fn password_prompt_words(reason: crate::core::WeakReason) -> &'static str {
+    match reason {
+        crate::core::WeakReason::Pin => "Yap uses passwords now. Your PIN still works until you choose one.",
+        crate::core::WeakReason::Temporary => "You signed in with a temporary password. Choose your own.",
+        crate::core::WeakReason::Guessable => "Your password is easy to guess. Choose a stronger one.",
     }
 }
 

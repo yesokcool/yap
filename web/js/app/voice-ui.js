@@ -95,8 +95,9 @@ export function onVoice(msg) {
   } else if (state.voiceChannel) {
     if (msg.channelId === state.voiceChannel && prev !== state.voiceChannel) {
       const uid = session?.uid;
-      // The same call back under a new session: no chimes (V7: nor when anyone's straight back).
-      let quiet = resumed;
+      // The same call back under a new session: no chimes (V7: nor when anyone's straight back),
+      // and none for an OBS link, which listens without showing up.
+      let quiet = resumed || session?.client === 'obs';
       if (!resumed) {
         // A plain join by someone whose old connection we were keeping: they
         // couldn't resume it (or their app can't), so it's dead weight now.
@@ -127,7 +128,8 @@ export function onVoice(msg) {
       } else {
         callPerson(msg.sid, 'left', msg.lost ? 'lost their connection' : '');
         voice.drop(msg.sid);
-        if (msg.lost) deferLeaveChime(session?.uid);
+        if (session?.client === 'obs') { /* listens without showing up: no chime */ }
+        else if (msg.lost) deferLeaveChime(session?.uid);
         else sounds.peerLeave();
       }
     }
@@ -364,10 +366,6 @@ function micErrorText(error) {
 
 export function voiceMember(session) {
   const user = state.users.get(session.uid);
-  if (session.client === 'obs') {
-    return `<li class="voice-member obs" data-voice-sid="${esc(session.sid)}" title="An OBS link of ${esc(user?.name ?? 'someone')}'s is listening to this call">
-      <span class="obs-badge">📺</span><span class="name">${esc(user?.name ?? 'Someone')}'s OBS</span></li>`;
-  }
   const me = session.sid === state.sid;
   const inMyChannel = state.voiceChannel && session.voice?.channelId === state.voiceChannel;
   const ghost = state.ghosts.has(session.sid);

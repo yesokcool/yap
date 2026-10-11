@@ -330,8 +330,6 @@ impl Conn {
             id: format!("w:{window}"),
             name: window_name(&title, class.as_deref()),
             kind: SourceKind::Window,
-            width: attributes.width as u32,
-            height: attributes.height as u32,
         })
     }
 
@@ -453,8 +451,6 @@ fn screen_sources(mut monitors: Vec<Monitor>) -> Vec<Source> {
                 id: format!("m:{x},{y},{width},{height}"),
                 name: format!("Screen {} ({width} × {height})", i + 1),
                 kind: SourceKind::Screen,
-                width,
-                height,
             }
         })
         .collect()
@@ -1129,7 +1125,6 @@ mod tests {
         assert_eq!(sources[1].id, "m:0,0,1920,1080");
         assert_eq!(sources[2].id, "m:4480,0,1920,1080");
         assert!(sources.iter().all(|s| s.kind == SourceKind::Screen));
-        assert_eq!((sources[0].width, sources[0].height), (2560, 1440));
     }
 
     #[test]

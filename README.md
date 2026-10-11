@@ -45,8 +45,8 @@ than most chat apps and costs nothing to run.
 - **Personal space:** notes only you can see, optionally end-to-end encrypted
   with a passcode.
 - **Accounts that fit friends:**
-  - an invite link is the door, and newcomers wait until someone lets them in;
-  - an account is a name and a password (or a 6-digit PIN);
+  - an invite link is the door, and newcomers wait until the owner or a mod lets them in;
+  - an account is a name and a password;
   - sign-in alerts, a device list, and an owner with mods.
 - **One look:** Windows 98 / AIM, in light or dark.
 

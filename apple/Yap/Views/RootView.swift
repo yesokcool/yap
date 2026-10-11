@@ -3,7 +3,7 @@ import YapCore
 import YapVoice
 
 /// Picks the screen for where the account is: invite → sign on → waiting
-/// room → the app. Notices and the temporary PIN (outside People) live here too.
+/// room → the app. Notices and the temporary password (outside People) live here too.
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
@@ -103,7 +103,7 @@ struct StatusBar98: View {
     private var voice: String {
         let voice = model.voice
         guard let id = voice.wantedChannelId, let channel = model.client.channelsById[id] else { return "Not in voice" }
-        let people = model.client.voiceSessions(in: id).count
+        let people = model.client.voiceRoster(in: id).count
         if voice.isResuming { return "Voice: reconnecting…" }
         return voice.isConnected ? "Voice: \(channel.name) (\(people))" : "Voice: connecting…"
     }

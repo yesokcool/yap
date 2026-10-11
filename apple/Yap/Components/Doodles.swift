@@ -2,8 +2,8 @@ import SwiftUI
 import YapCore
 
 // Doodle reactions (PROTOCOL.md › Doodle reactions): the drawing surface and
-// the image are shared helpers (like `FlowLayout` or the GIF players); each
-// skin wraps them in its own sheet and reaction look.
+// the image, as helpers (like `FlowLayout` or the GIF players) that the
+// doodle window and the reaction tiles wrap (`Extras98.swift`).
 
 /// The doodle being drawn, its tools and undo.
 @MainActor

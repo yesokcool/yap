@@ -14,8 +14,8 @@ import UIKit
 /// where the app starts. Release builds ignore all of it.
 ///
 ///   YAP_INVITE=http://127.0.0.1:8789/#key=testkey   use this server (in-memory credentials, Keychain untouched)
-///   YAP_LOGIN=Name:123456                          sign in as this account
-///   YAP_SIGNUP=Name:123456                         sign up as a new account (→ waiting room)
+///   YAP_LOGIN=Name:password                        sign in as this account
+///   YAP_SIGNUP=Name:password                       sign up as a new account (→ waiting room)
 ///   YAP_FAKE_KLIPY=1                               a pretend KLIPY for the GIF picker (no network)
 ///   YAP_SYNTHETIC_AUDIO=1                          voice uses a fake mic/speaker (no hardware, no prompts)
 ///   YAP_AUTOJOIN=lounge                            join this voice channel once online
@@ -28,9 +28,9 @@ import UIKit
 ///   YAP_DEMO_EDIT=text                             start editing my newest message containing text
 ///   YAP_DRAFT=text                                 the open channel's composer starts with this text (\n = a new line)
 ///   YAP_ORIENTATION=landscape                      iPhone: turn the app to landscape once it's up (screenshots)
-///   YAP_USE_PASSWORD=1                             the sign-on form starts on "Use a password"
-///   YAP_DEMO_PINRESET=Name                         once online, reset Name's PIN for real (a throwaway account on a
-///                                                  local server), to show the temporary PIN
+///   YAP_DEMO_RESET=Name                            once online, reset Name's password for real (a throwaway account
+///                                                  on a local server), to show the temporary password
+///   YAP_SCREEN=password                            Change password (Set a password while on an old PIN)
 ///   YAP_LAST_READ=0 | id:ms,id:ms                  read marks to start from (the in-memory store has none, so a
 ///                                                  scripted launch starts caught up): 0 = nothing read anywhere
 ///   YAP_ASK=ping | archive                         ask the open channel's question (the ping note, Archive…?)
@@ -97,9 +97,8 @@ struct DebugLaunch {
     var demoVoice: String?
     var demoMicCheck: String?
     var draft: String?
-    var demoPinReset: String?
+    var demoReset: String?
     var orientation: String?
-    var usePassword = false
     var watch: String?
     var screenFull = false
     var person: String?
@@ -109,7 +108,6 @@ struct DebugLaunch {
 
     var usesMemoryStore: Bool { invite != nil }
     var isScripted: Bool { invite != nil }
-    var clientLabel: String? { nil }
 
     static let current: DebugLaunch = {
         #if DEBUG
@@ -146,9 +144,8 @@ struct DebugLaunch {
         launch.demoVoice = env["YAP_DEMO_VOICE"]
         launch.demoMicCheck = env["YAP_DEMO_MICCHECK"]
         launch.draft = env["YAP_DRAFT"]?.replacingOccurrences(of: "\\n", with: "\n")
-        launch.demoPinReset = env["YAP_DEMO_PINRESET"]
+        launch.demoReset = env["YAP_DEMO_RESET"]
         launch.orientation = env["YAP_ORIENTATION"]
-        launch.usePassword = env["YAP_USE_PASSWORD"] == "1"
         launch.watch = env["YAP_WATCH"]
         launch.screenFull = env["YAP_SCREEN_FULL"] == "1"
         launch.person = env["YAP_PERSON"]

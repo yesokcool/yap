@@ -2,10 +2,10 @@ import SwiftUI
 import YapCore
 import YapVoice
 
-// The v0.36 extras in the Windows 98 skin (PROTOCOL.md › Extras): polls as
-// a group box of radio buttons with progress bars, dice in a little sunken
-// panel, Watch together as a push button, away messages as AIM's yellow
-// note, doodle reactions as framed tiles.
+// How the v0.36 extras look (PROTOCOL.md › Extras): polls as a group box
+// of radio buttons with progress bars, dice in a little sunken panel, Watch
+// together as a push button, away messages as AIM's yellow note, doodle
+// reactions as framed tiles.
 
 /// A poll: the question in bold, each answer a radio button with a blocky
 /// progress bar and its count. Click to vote; click yours again to take it back.

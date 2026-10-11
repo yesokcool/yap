@@ -3,7 +3,6 @@ node_modules/
 .dev.vars*
 !.dev.vars.example
 worker-configuration.d.ts
-test-results/
 # Made by tools/stamp.mjs whenever they're needed (npm install, dev, check,
 # deploy): which build of the web client this is. Never committed, so dev
 # runs don't dirty the tree and a stamp can't go stale in git.
@@ -13,7 +12,6 @@ backups/
 .DS_Store
 target/
 dist/
-apple/build/
 web/downloads/
 *.profraw
 

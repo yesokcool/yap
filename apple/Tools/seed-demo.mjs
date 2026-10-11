@@ -5,7 +5,7 @@
 //   YAP_URL=http://127.0.0.1:8789 YAP_KEY=testkey YAP_ADMIN_KEY=testadmin \
 //     node apple/Tools/seed-demo.mjs [--stay <seconds>] [--voice [--screen]]
 //
-// Accounts (PIN 582039): Sam, Cleo, Ada, Ben. With --stay, Cleo and Ada
+// Accounts (password correct-horse-582039): Sam, Cleo, Ada, Ben. With --stay, Cleo and Ada
 // stay online and Cleo keeps "typing" in general; with --voice too, Cleo,
 // Ada and Ben sit in Lounge (no audio: they never connect, for the call
 // sheet's screenshots with YAP_SCREEN=voicepanel:lounge); with --screen, Ada
@@ -22,7 +22,7 @@ const BASE = process.env.YAP_URL ?? 'http://127.0.0.1:8789';
 if (!/^http:\/\/(127\.0\.0\.1|localhost)/.test(BASE)) throw new Error('seed-demo only talks to a local dev server');
 const KEY = process.env.YAP_KEY ?? 'testkey';
 const ADMIN = process.env.YAP_ADMIN_KEY ?? 'testadmin';
-const PIN = '582039';
+const PASSWORD = 'correct-horse-582039';
 const STAY = Number(process.argv[process.argv.indexOf('--stay') + 1]) || 0;
 const VOICE = process.argv.includes('--voice') && STAY > 0;
 const SCREEN = VOICE && process.argv.includes('--screen');
@@ -66,10 +66,10 @@ class Client {
   /** Sign in, or sign up + get let in by the admin. */
   async enter() {
     await this.open();
-    this.send({ t: 'hello', v: 1, client: 'web', login: { name: this.name, pin: PIN } });
+    this.send({ t: 'hello', v: 1, client: 'web', login: { name: this.name, pin: PASSWORD } });
     let first = await this.next((m) => m.t === 'ready' || m.t === 'pending' || (m.t === 'error' && m.re === 'hello'));
     if (first.t === 'error') {
-      this.send({ t: 'hello', v: 1, client: 'web', signup: { name: this.name, pin: PIN, color: this.color } });
+      this.send({ t: 'hello', v: 1, client: 'web', signup: { name: this.name, pin: PASSWORD, color: this.color } });
       first = await this.next((m) => m.t === 'ready' || m.t === 'pending' || (m.t === 'error' && m.re === 'hello'));
       if (first.t === 'error') throw new Error(`${this.name}: ${first.message}`);
     }
@@ -240,7 +240,7 @@ if (doodle.ok) {
   ben.send({ t: 'react', id: m1.id, emoji: `<d:${doodle.id}>`, on: true });
   await pause(200);
 }
-console.log('seeded: Sam, Cleo, Ada, Ben (PIN 582039) + messages in general');
+console.log('seeded: Sam, Cleo, Ada, Ben (password correct-horse-582039) + messages in general');
 
 for (const c of VOICE ? [sam] : [sam, ben]) c.ws.close();
 if (VOICE) {

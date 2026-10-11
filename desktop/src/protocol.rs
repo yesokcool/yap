@@ -479,9 +479,6 @@ pub struct Reaction {
 pub enum ServerMsg {
     #[serde(rename = "ready")]
     Ready {
-        #[serde(default)]
-        #[allow(dead_code)]
-        v: u32,
         sid: String,
         /// Canonical uid (differs from ours after an account merge).
         #[serde(default)]
@@ -489,7 +486,7 @@ pub enum ServerMsg {
         /// A fresh device token, when one was issued (store it).
         #[serde(default)]
         token: Option<String>,
-        /// An account from before PINs (signed in with an old device token): ask it to set one.
+        /// An account with no password at all (signed in with an old device token): ask it to set one.
         #[serde(rename = "needsPin", default)]
         needs_pin: bool,
         channels: Vec<Channel>,
@@ -512,9 +509,14 @@ pub enum ServerMsg {
         /// Your encrypted Personal space's wrapped key (None = not encrypted).
         #[serde(default)]
         vault: Option<crate::vault::Wrap>,
-        /// Your PIN is easy to guess (known from your last sign-in).
+        /// You last signed in with an old PIN, a guessable password or a reset's
+        /// temporary one: ask once per device for a password (PROTOCOL.md › Identity).
         #[serde(rename = "weakPin", default)]
         weak_pin: bool,
+        /// Why `weakPin` (only sent with it): "pin", "temporary" or "guessable".
+        /// It picks the prompt's words; older servers leave it out.
+        #[serde(rename = "weakReason", default)]
+        weak_reason: Option<String>,
         /// "pin" or "password".
         #[serde(rename = "secretKind", default)]
         secret_kind: Option<String>,
@@ -597,7 +599,7 @@ pub enum ServerMsg {
         #[serde(default)]
         text: String,
     },
-    /// PIN set/changed (`token` when this device didn't have one yet).
+    /// Password set/changed (`token` when this device didn't have one yet; never sent any more).
     #[serde(rename = "account")]
     Account {
         #[serde(rename = "hasPin", default)]
@@ -608,7 +610,7 @@ pub enum ServerMsg {
         #[serde(default)]
         kind: Option<String>,
     },
-    /// Owner/mod reset someone's PIN: hand this temporary one over.
+    /// Owner/mod reset someone's password: hand this temporary one over (`pin` is the wire's name).
     #[serde(rename = "pin.reset")]
     PinReset { uid: String, pin: String },
     #[serde(rename = "join.request")]
@@ -619,6 +621,11 @@ pub enum ServerMsg {
         approved: bool,
         #[serde(default)]
         by: String,
+        /// Who was let in (`{ id, name, color, invitedBy? }`), sent to everyone
+        /// when someone is let in: members never saw the request. Older servers
+        /// leave it out.
+        #[serde(default)]
+        user: Option<User>,
     },
     #[serde(rename = "error")]
     Error {
@@ -789,9 +796,6 @@ pub enum ServerMsg {
     #[serde(rename = "sound")]
     Sound {
         id: String,
-        #[serde(default)]
-        #[allow(dead_code)]
-        sid: String,
         #[serde(default)]
         uid: String,
     },
@@ -1275,6 +1279,13 @@ mod tests {
         assert!(!serde_json::to_string(&vs).unwrap().contains("resume"));
     }
 
+    /// Fields the app doesn't read (`ready.v`, `sound.sid`) still parse: they're just ignored.
+    #[test]
+    fn ignores_fields_it_doesnt_read() {
+        let sound = r#"{"t":"sound","id":"k1","sid":"s1","uid":"u1"}"#;
+        assert!(matches!(serde_json::from_str::<ServerMsg>(sound).unwrap(), ServerMsg::Sound { id, uid } if id == "k1" && uid == "u1"));
+    }
+
     #[test]
     fn parses_new_shapes() {
         let ready = r#"{"t":"ready","v":1,"sid":"s1","channels":[{"id":"v","name":"Lounge","kind":"voice","position":1,"lastMessageAt":null,"bitrate":256000}],"users":[],"sessions":[{"sid":"o","uid":"u","client":"obs","voice":null}],"emojis":[],"key":"main","links":[{"id":"l1","name":"Board","url":"https://x/board","view":"board"}]}"#;
@@ -1409,6 +1420,42 @@ mod tests {
             ServerMsg::DrawWipe { l, by } => assert!(l == 2 && by == "u"),
             _ => panic!("draw.wipe"),
         }
+    }
+
+    /// PROTOCOL.md › Identity: why the "Choose a password" prompt asks
+    /// (`ready.weakReason`); an older server doesn't say.
+    #[test]
+    fn parses_weak_reason() {
+        let ready = r#"{"t":"ready","v":1,"sid":"s","channels":[],"users":[],"sessions":[],"emojis":[],"weakPin":true,"weakReason":"temporary","secretKind":"password"}"#;
+        match serde_json::from_str::<ServerMsg>(ready).unwrap() {
+            ServerMsg::Ready { weak_pin, weak_reason, secret_kind, .. } => {
+                assert!(weak_pin);
+                assert_eq!(weak_reason.as_deref(), Some("temporary"));
+                assert_eq!(secret_kind.as_deref(), Some("password"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let older = r#"{"t":"ready","v":1,"sid":"s","channels":[],"users":[],"sessions":[],"emojis":[],"weakPin":true,"secretKind":"pin"}"#;
+        assert!(matches!(serde_json::from_str::<ServerMsg>(older).unwrap(), ServerMsg::Ready { weak_reason: None, .. }));
+    }
+
+    /// PROTOCOL.md › Identity › Waiting room: who was let in
+    /// (`join.resolved.user`), for members who never saw the request; not
+    /// sent when someone is turned away, nor by an older server.
+    #[test]
+    fn parses_who_joined() {
+        let joined = r##"{"t":"join.resolved","uid":"c","approved":true,"by":"a","user":{"id":"c","name":"Cleo","color":"#30a46c","invitedBy":"Ada (for Cleo)"}}"##;
+        match serde_json::from_str::<ServerMsg>(joined).unwrap() {
+            ServerMsg::JoinResolved { uid, approved, by, user } => {
+                assert!(approved && uid == "c" && by == "a");
+                let user = user.unwrap();
+                assert_eq!((user.id.as_str(), user.name.as_str(), user.color.as_str()), ("c", "Cleo", "#30a46c"));
+                assert_eq!(user.invited_by.as_deref(), Some("Ada (for Cleo)"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let turned_away = r#"{"t":"join.resolved","uid":"c","approved":false,"by":"a"}"#;
+        assert!(matches!(serde_json::from_str::<ServerMsg>(turned_away).unwrap(), ServerMsg::JoinResolved { approved: false, user: None, .. }));
     }
 
     #[test]

@@ -3,7 +3,7 @@ import YapCore
 import YapVoice
 
 /// People, Win98-style: a window opened on demand (the "People" button), not
-/// a sidebar. Waiting (any member can let people in) then everyone A–Z in
+/// a sidebar. Waiting (owner and mods only: they let people in) then everyone A–Z in
 /// a white sunken list, with who's in voice. No online/offline anywhere
 /// (PROTOCOL.md › Presence). Tapping someone opens their info.
 struct MembersView: View {
@@ -45,11 +45,11 @@ struct MembersView: View {
 
     @ViewBuilder private var groups: some View {
         let client = model.client
-        let waiting = client.waitingRoom.values.sorted { $0.name < $1.name }
+        let waiting = JoinRequests.waiting(client)
         VStack(alignment: .leading, spacing: 0) {
             if !waiting.isEmpty {
                 GroupHeader98(title: "Waiting (\(waiting.count))")
-                Text("Anyone already in Yap can let people in. Turning someone away bans them.")
+                Text(JoinRequests.note)
                     .font(Theme.small)
                     .foregroundStyle(Theme.grayText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -231,7 +231,7 @@ struct MemberSheet: View {
                                     .buttonStyle(.win98)
                                 }
                                 if client.isMod, live.role != .owner {
-                                    Button("Reset PIN…") { confirmReset = true }
+                                    Button(PasswordText.reset) { confirmReset = true }
                                         .buttonStyle(.win98)
                                     Button("Ban…") { confirmBan = true }
                                         .buttonStyle(.win98)
@@ -250,7 +250,7 @@ struct MemberSheet: View {
                 client.ban(id)
                 dismiss()
             })
-            .question(isPresented: $confirmReset, .resetPin(live.name) { [id = live.id] in client.resetPin(for: id) })
+            .question(isPresented: $confirmReset, .resetPassword(live.name) { [id = live.id] in client.resetPassword(for: id) })
             .pinResetNotice()
         }
         .presentationDetents([.medium, .large])

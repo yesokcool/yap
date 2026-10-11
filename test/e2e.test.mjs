@@ -151,8 +151,19 @@ async function user(name, color, viewport = { width: 1280, height: 800 }, colorS
   return page;
 }
 
-const TEST_PIN = '582039';
-/** Get a test user online like a person would: sign in (or sign up) with a PIN; admin lets newcomers in. */
+// The made-up password every suite signs up with.
+const TEST_PASSWORD = 'correct-horse-582039';
+/** Type a password into the welcome form. */
+const fillPassword = (page, value = TEST_PASSWORD) => page.fill('#welcome-form input[name=pin]', value);
+/** The admin API (the test server's ADMIN_KEY). */
+const adminPost = (p) => fetch(`${BASE}${p}`, { method: 'POST', headers: { Authorization: `Bearer ${process.env.YAP_ADMIN_KEY}` } });
+/** Ada lets people in and resets passwords below: on the shared test server someone else came first, so she claims owner. */
+async function ensureOwner(page) {
+  if (!process.env.YAP_ADMIN_KEY || (await page.evaluate(() => yap.state.users.get(yap.settings.uid)?.role)) === 'owner') return;
+  await page.evaluate((key) => yap.ui.send({ t: 'owner.claim', key }), process.env.YAP_ADMIN_KEY);
+  await page.waitForFunction(() => yap.state.users.get(yap.settings.uid)?.role === 'owner', null, { timeout: 5000 });
+}
+/** Get a test user online like a person would: sign in (or sign up) with a password; admin lets newcomers in. */
 async function settle(page, name) {
   let triedLogin = false;
   for (let i = 0; i < 8; i++) {
@@ -165,7 +176,7 @@ async function settle(page, name) {
       // Sign in first; if there's no such account yet (fresh server), sign up.
       await page.click(`#welcome-form label:has(input[value=${triedLogin ? 'signup' : 'login'}])`);
       await page.fill('#welcome-form input[name=name]', name);
-      await page.fill('#welcome-form input[name=pin]', TEST_PIN);
+      await fillPassword(page);
       await page.click('#welcome-form button[type=submit]');
       triedLogin = true;
       await page.waitForFunction(() => !document.querySelector('#welcome-dialog')?.open || document.querySelector('#welcome-error:not([hidden])'), null, { timeout: 10000 });
@@ -204,24 +215,40 @@ const b = await user('Ben', '#30a46c');
 globalThis.pageA = a;
 globalThis.pageB = b;
 
-await test('same person on a new device: sign in with name + PIN', async () => {
+await test('same person on a new device: sign in with name + password', async () => {
   const ctx = await newContext({ viewport: { width: 1280, height: 800 } }, 'Ben, 2nd device');
   const page = await ctx.newPage();
   await page.goto(`${BASE}/#key=${encodeURIComponent(KEY)}`);
   await page.waitForSelector('#welcome-dialog[open]');
   await page.click('#welcome-form label:has(input[value=login])');
-  // Signed out, the app isn't drawn behind the form; a wrong PIN keeps the typed name, and
-  // its error goes away when you switch to a password (it was about the PIN).
+  // Signed out, the app isn't drawn behind the form; a wrong password keeps the typed name, says
+  // who can help, and its error goes away when you switch to "I'm new" (it was about signing in).
   assert.equal(await page.evaluate(() => document.documentElement.classList.contains('signed-out')), true);
+  const field = '#welcome-form input[name=pin]';
+  assert.deepEqual(await page.$eval(field, (el) => [el.type, el.autocomplete]), ['password', 'current-password'], 'password managers fill the saved one');
+  assert.equal(await page.isHidden('#welcome-form .field-note'), true, '"8 characters or more." is for signing up');
   await page.fill('#welcome-form input[name=name]', 'ben');
-  await page.fill('#welcome-form input[name=pin]', '407193');
+  await fillPassword(page, 'not-bens-password');
   await page.click('#welcome-form button[type=submit]');
   await page.waitForSelector('#welcome-error:not([hidden])', { timeout: 8000 });
+  assert.equal(await page.textContent('#welcome-error'), 'Wrong name or password. An old PIN works here too. Forgot it? The owner or a mod can reset it.');
   assert.equal(await page.inputValue('#welcome-form input[name=name]'), 'ben');
-  await page.click('#welcome-form [data-action="secret-mode"]');
-  assert.equal(await page.isHidden('#welcome-error'), true, 'no stale "Wrong name or PIN"');
-  await page.click('#welcome-form [data-action="secret-mode"]');
-  await page.fill('#welcome-form input[name=pin]', TEST_PIN);
+  await page.click('#welcome-form label:has(input[value=signup])');
+  assert.equal(await page.isHidden('#welcome-error'), true, 'no stale "Wrong name or password"');
+  assert.equal(await page.$eval(field, (el) => el.autocomplete), 'new-password', 'and offer to make one when signing up');
+  await page.waitForSelector('#welcome-form .field-note:text-is("8 characters or more.")');
+  await page.click('#welcome-form label:has(input[value=login])');
+  // Show / Hide what's typed.
+  await fillPassword(page);
+  await page.click('#welcome-form [data-action="reveal"]');
+  assert.equal(await page.$eval(field, (el) => el.type), 'text');
+  assert.equal(await page.textContent('#welcome-form [data-action="reveal"]'), 'Hide');
+  await page.click('#welcome-form [data-action="reveal"]');
+  assert.equal(await page.$eval(field, (el) => el.type), 'password');
+  // The only PIN on this screen is the wrong-sign-in hint ("An old PIN works here too").
+  const pins = await page.$eval('#welcome-dialog', (d) => [...d.querySelectorAll('*')].filter((el) => !el.closest('#welcome-error')
+    && [...el.childNodes].some((n) => n.nodeType === 3 && /\bPIN\b/.test(n.textContent))).length);
+  assert.equal(pins, 0, 'no PIN anywhere but the wrong-sign-in hint');
   await page.screenshot({ path: path.join(OUT, 'signin.png') });
   await page.click('#welcome-form button[type=submit]');
   await page.waitForFunction(() => yap.state.status === 'online', null, { timeout: 10000 });
@@ -549,13 +576,24 @@ await test('waiting room: Let in from People moves them from "Waiting to join" t
     await page.goto(link);
     await page.waitForSelector('#welcome-dialog[open]');
     await page.fill('#welcome-form input[name=name]', who);
-    await page.fill('#welcome-form input[name=pin]', TEST_PIN);
+    await fillPassword(page);
     await page.click('#welcome-form button[type=submit]');
     await page.waitForFunction(() => yap.state.status === 'waiting', null, { timeout: 10000 });
     return { ctx, page };
   };
+  await ensureOwner(a);
   const { ctx, page } = await arrive(name);
+  await page.waitForSelector('#gate-text:has-text("Waiting for the owner or a mod to let you in.")');
   await a.waitForSelector(`#requests .request:has-text("${name}")`, { timeout: 5000 });
+  // Ben is a member: only the owner and mods let people in, so he sees no request, no badge, no Let in.
+  await b.waitForTimeout(500);
+  assert.equal(await b.isHidden('#requests'), true, 'no request bar for members');
+  assert.equal(await b.isHidden('#waiting-badge'), true, 'no waiting badge for members');
+  assert.equal(await b.evaluate(() => yap.state.waiting.size), 0, 'the server never told him');
+  await b.click('[data-action="people"]');
+  await b.waitForSelector('#people-dialog[open] .member:has(.name:text-is("Ada"))');
+  assert.equal(await b.locator('#people-dialog .member.waiting, #people-dialog [data-action="approve"]').count(), 0, 'nothing to let in from People');
+  await b.click('[data-action="close-people"]');
   assert.equal(await a.locator(`#requests .request:has-text("${name}") .invite-warn`).count(), 0, 'a first use is fine');
   await a.click('[data-action="people"]');
   const waiting = `#people-dialog .member.waiting:has(.name:text-is("${name}"))`;
@@ -568,7 +606,10 @@ await test('waiting room: Let in from People moves them from "Waiting to join" t
   // Others see a quiet line in the first channel (no popup); the newcomer starts caught up and is welcomed.
   await a.click('[data-action="open-channel"][data-id="general"]');
   await a.waitForSelector(`.local-note:has-text("${name} joined — invited by Ben")`, { timeout: 5000 });
+  await b.click('[data-action="open-channel"][data-id="general"]');
+  await b.waitForSelector(`.local-note:has-text("${name} joined — invited by Ben")`, { timeout: 5000 });
   await page.waitForSelector('.local-note:has-text("You\'re in.")', { timeout: 5000 });
+  assert.equal(await page.locator(`.local-note:has-text("${name} joined")`).count(), 0, 'no "joined" line about yourself');
   assert.equal(await page.locator('#text-channels .channel.unread').count(), 0, 'a new device starts with nothing unread');
   assert.ok(await page.isHidden('#catchup-row'));
   // The same link again: whoever lets them in is told who used it before.
@@ -579,6 +620,89 @@ await test('waiting room: Let in from People moves them from "Waiting to join" t
   await a.waitForSelector(`#requests .request:has-text("Moss ${RUN}")`, { state: 'detached', timeout: 5000 });
   await second.ctx.close();
   await ctx.close();
+});
+
+await test('passwords: sign-up says 8 or more; an old PIN is asked once to choose one (Later is for good); a reset hands out a temporary one', async () => {
+  const name = `Pip ${RUN}`;
+  const fresh = async (label) => {
+    const ctx = await newContext({ viewport: { width: 1280, height: 800 } }, label);
+    const page = await ctx.newPage();
+    await page.goto(`${BASE}/#key=${encodeURIComponent(KEY)}`);
+    await page.waitForSelector('#welcome-dialog[open]');
+    return { ctx, page };
+  };
+  const submit = async (page, mode, password) => {
+    await page.click(`#welcome-form label:has(input[value=${mode}])`);
+    await page.fill('#welcome-form input[name=name]', name);
+    await fillPassword(page, password);
+    await page.click('#welcome-form button[type=submit]');
+  };
+  // Sign up: too short is caught on the page; a guessable one gets the server's words.
+  const first = await fresh(`${name}, phone`);
+  await submit(first.page, 'signup', 'short');
+  await first.page.waitForSelector('#welcome-error:not([hidden]):text-is("Use a password of at least 8 characters.")');
+  await submit(first.page, 'signup', 'password123');
+  await first.page.waitForSelector('#welcome-error:not([hidden]):has-text("That password is too easy to guess.")', { timeout: 8000 });
+  await submit(first.page, 'signup', 'pip-meadow-cove-38');
+  await first.page.waitForFunction(() => yap.state.status === 'waiting', null, { timeout: 10000 });
+  const uid = await first.page.evaluate(() => yap.settings.uid);
+  await adminPost(`/api/admin/role?uid=${uid}&role=member`);
+  await first.page.waitForFunction(() => yap.state.status === 'online', null, { timeout: 10000 });
+  assert.equal(await first.page.isHidden('#weak-bar'), true, 'a good password: nothing to ask');
+  // Pip was here before passwords: an old 6-digit PIN (the test server's TEST_PINS).
+  const made = await adminPost(`/api/admin/test-pin?uid=${uid}&pin=582039`);
+  if (made.status === 404) throw new Error('start the test server with --var TEST_PINS:1 (npm run test:all does)');
+  // Signing in with the PIN on a laptop: asked once; Later hides it there for good (even after a reload).
+  const laptop = await fresh(`${name}, laptop`);
+  await submit(laptop.page, 'login', '582039');
+  await laptop.page.waitForSelector('#weak-bar:not([hidden])', { timeout: 10000 });
+  assert.equal(await laptop.page.textContent('#weak-bar b'), 'Choose a password');
+  assert.equal(await laptop.page.textContent('#weak-bar .prompt-text'), 'Yap uses passwords now. Your PIN still works until you choose one.');
+  await laptop.page.screenshot({ path: path.join(OUT, 'desktop-choose-password.png') });
+  await laptop.page.click('#weak-bar [data-action="password-later"]');
+  assert.equal(await laptop.page.isHidden('#weak-bar'), true);
+  await laptop.page.reload();
+  await laptop.page.waitForFunction(() => yap.state.status === 'online', null, { timeout: 10000 });
+  await laptop.page.waitForTimeout(300);
+  assert.equal(await laptop.page.isHidden('#weak-bar'), true, 'Later is for good on this device');
+  // On a tablet: Choose a password → "Set a password", the PIN counts as the current one.
+  const tablet = await fresh(`${name}, tablet`);
+  await submit(tablet.page, 'login', '582039');
+  await tablet.page.waitForSelector('#weak-bar:not([hidden])', { timeout: 10000 });
+  await tablet.page.click('#weak-bar [data-action="change-pin"]');
+  await tablet.page.waitForSelector('#pin-dialog[open]');
+  assert.equal(await tablet.page.textContent('#pin-title'), 'Set a password');
+  assert.equal(await tablet.page.textContent('#pin-current-label'), 'Current password or PIN');
+  assert.deepEqual(await tablet.page.$eval('#pin-form input[name=pin]', (el) => [el.type, el.autocomplete]), ['password', 'new-password']);
+  await tablet.page.screenshot({ path: path.join(OUT, 'desktop-set-password.png') });
+  await tablet.page.fill('#pin-form input[name=current]', '582039');
+  await tablet.page.fill('#pin-form input[name=pin]', 'qwertyuiop');
+  await tablet.page.click('#pin-save');
+  await tablet.page.waitForSelector('#pin-error:not([hidden]):has-text("That password is too easy to guess.")', { timeout: 5000 });
+  await tablet.page.fill('#pin-form input[name=pin]', 'otter-lagoon-kelp-71');
+  await tablet.page.click('#pin-save');
+  await tablet.page.waitForSelector('#toast:not([hidden]):has-text("Password saved.")', { timeout: 5000 });
+  assert.equal(await tablet.page.isHidden('#weak-bar'), true, 'nothing more to ask');
+  assert.equal(await tablet.page.textContent('#change-pin-btn'), 'Change password');
+  // The owner resets Pip's password: a temporary one to pass on.
+  await ensureOwner(a);
+  await a.click('[data-action="people"]');
+  await a.click(`#people-dialog .member:has(.name:text-is("${name}"))`);
+  await a.click('#people-dialog .person-controls [data-action="reset-pin"]:text-is("Reset password…")');
+  await a.click('#confirm-dialog[open] #confirm-ok');
+  await a.waitForSelector('#confirm-dialog[open] #confirm-title:text-is("Temporary password")', { timeout: 5000 });
+  const said = await a.textContent('#confirm-text');
+  const temp = said.match(/: ([a-z]+-[a-z]+-[a-z]+-\d{2})\. /)?.[1];
+  assert.equal(said, `${name}’s temporary password: ${temp}. Send it to ${name}; they’ll choose their own after signing in.`);
+  await a.screenshot({ path: path.join(OUT, 'desktop-temporary-password.png') });
+  await a.click('#confirm-dialog[open] #confirm-cancel');
+  await a.click('[data-action="close-people"]');
+  // Signing in with it: the prompt says it's temporary.
+  const phone = await fresh(`${name}, new phone`);
+  await submit(phone.page, 'login', temp);
+  await phone.page.waitForSelector('#weak-bar:not([hidden])', { timeout: 10000 });
+  assert.equal(await phone.page.textContent('#weak-bar .prompt-text'), 'You signed in with a temporary password. Choose your own.');
+  for (const c of [first, laptop, tablet, phone]) await c.ctx.close();
 });
 
 await test("When's good: paint your times, the other person sees the heat map and the best time", async () => {
@@ -1905,7 +2029,9 @@ await test('OBS link: a listen-only page joins the call and receives audio', asy
   await obs.goto(link);
   await obs.click('#start');
   await obs.waitForFunction(() => yapObs.state.inCall && [...yapObs.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'), null, { timeout: 15000 });
-  await b.waitForSelector('#voice-channels .voice-member.obs', { timeout: 5000 });
+  // It listens without showing up in the channel (and without a chime).
+  await b.waitForTimeout(500);
+  assert.equal(await b.locator('#voice-channels .voice-member.obs').count(), 0, 'the OBS link is not listed');
   try {
     // Audio packets arrive (give RTP a moment to start).
     await obs.waitForFunction(async () => {
@@ -1920,7 +2046,6 @@ await test('OBS link: a listen-only page joins the call and receives audio', asy
   } finally {
     await obs.close();
   }
-  await b.waitForSelector('#voice-channels .voice-member.obs', { state: 'detached', timeout: 8000 });
 });
 
 await test('board opens inside Yap during a call; cursors show for others', async () => {

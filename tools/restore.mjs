@@ -90,7 +90,7 @@ async function main() {
   console.log(`  messages: ${restored} of ${messages.length}`);
 
   await post('/api/admin/import', { phase: 'finish' }, key);
-  console.log('Done. Everyone signs in with their usual name and PIN (the server needs the same PIN_PEPPER secret as before).');
+  console.log('Done. Everyone signs in with their usual name and password (the server needs the same PIN_PEPPER secret as before).');
 }
 
 main().catch((err) => fail(`restore FAILED: ${err.message}`));

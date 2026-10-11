@@ -6,14 +6,20 @@ import YapVoice
 /// `renderRequests`): one bar each — "Dee wants to join · invited by Ada",
 /// the passed-on-link warning, Let in / Turn away — until they'd crowd
 /// the chat, then one "3 people want to join" bar with Review (People).
-/// Anyone in Yap can let people in. `JoinRequests98` draws the bars.
+/// Only the owner and mods let people in (PROTOCOL.md › Identity › Waiting
+/// room): members never see these, even from an older server that still
+/// tells them. `JoinRequests98` draws the bars.
 enum JoinRequests {
-    /// Who's waiting, A–Z; nobody until we're online (the buttons need a session).
+    /// Who's waiting, A–Z, for the owner and mods; nobody until we're
+    /// online (the buttons need a session).
     @MainActor
     static func waiting(_ client: YapClient) -> [User] {
-        guard client.mySid != nil else { return [] }
+        guard client.mySid != nil, client.isMod else { return [] }
         return client.waitingRoom.values.sorted { $0.name < $1.name }
     }
+
+    /// Above the waiting list in People.
+    static let note = "Only the owner and mods can let people in. Turning someone away bans them."
 
     /// From how many people they fold into one bar: on a phone two bars
     /// (or one under the call bar) already take a lot of the screen.

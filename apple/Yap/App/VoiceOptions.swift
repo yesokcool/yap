@@ -2,8 +2,8 @@ import SwiftUI
 import YapCore
 import YapVoice
 
-/// Wording and behaviour shared by every skin's Settings › Voice for the
-/// options that apply from the next join (the web's wording).
+/// Wording and behaviour of Settings › Voice's options that apply from the
+/// next join (the web's wording).
 enum VoiceOptions {
     static let relayTitle = "Hide my IP address in calls"
 

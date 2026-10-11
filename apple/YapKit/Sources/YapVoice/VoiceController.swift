@@ -435,8 +435,6 @@ public final class VoiceController: VoiceCoordinator {
         screenRenderer.clear()
     }
 
-    /// The share's video track, while it comes (the viewer shows `screenRenderer`).
-    public var watchedTrack: RTCVideoTrack? { watch.flatMap { engine.remoteScreens[$0.sid] } }
     /// The share comes with sound (the volume slider matters).
     public var watchedHasSound: Bool { watch.map { engine.remoteScreenSound.contains($0.sid) } ?? false }
 

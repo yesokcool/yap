@@ -8,8 +8,8 @@ import AppKit
 /// Someone under a voice channel (or in the call sheet): click (Mac), tap
 /// (iPhone, iPad), right-click or long-press → a small popover with their
 /// volume (0–200 %, the web's), Watch screen while they share, and the
-/// owner/mod actions the web shows. Your own row has none of it; neither
-/// does an OBS listener.
+/// owner/mod actions the web shows. Your own row has none of it (an OBS
+/// link has no row at all).
 struct VoicePersonMenu: ViewModifier {
     @Environment(AppModel.self) private var model
     var session: Session
@@ -17,7 +17,7 @@ struct VoicePersonMenu: ViewModifier {
     @State private var asking: Ask?
 
     enum Ask: Identifiable {
-        case ban, resetPin
+        case ban, resetPassword
         var id: Self { self }
     }
 
@@ -59,8 +59,8 @@ struct VoicePersonMenu: ViewModifier {
                 }
                 .question(isPresented: Binding(get: { asking == .ban }, set: { if !$0 { asking = nil } }),
                           .ban(name) { [client, uid = session.uid] in client.ban(uid) })
-                .question(isPresented: Binding(get: { asking == .resetPin }, set: { if !$0 { asking = nil } }),
-                          .resetPin(name) { [client, uid = session.uid] in client.resetPin(for: uid) })
+                .question(isPresented: Binding(get: { asking == .resetPassword }, set: { if !$0 { asking = nil } }),
+                          .resetPassword(name) { [client, uid = session.uid] in client.resetPassword(for: uid) })
                 .accessibilityAction(named: Text("Volume and more")) { open = true }
                 .accessibilityHint("Their volume, and more")
                 .onAppear {
@@ -85,7 +85,7 @@ extension View {
 }
 
 /// The popover itself: name (and role), their away note, Volume, Watch
-/// screen, Make mod / Remove mod, Reset PIN, Ban — the web's words.
+/// screen, Make mod / Remove mod, Reset password…, Ban — the web's words.
 struct VoicePersonPopover98: View {
     enum Action {
         case watch
@@ -122,13 +122,14 @@ struct VoicePersonPopover98: View {
             if let user {
                 let actions = Self.modActions(me: client.myRole, them: user.role)
                 if !actions.isEmpty {
-                    HStack(spacing: 6) {
+                    // Wraps when "Remove mod", "Reset password…" and "Ban" don't fit on one line.
+                    FlowLayout(spacing: 6) {
                         if let promote = actions.first(where: { $0 == "Make mod" || $0 == "Remove mod" }) {
                             Button(promote) { client.setRole(user.id, mod: user.role != .mod) }
                                 .buttonStyle(.win98Compact)
                         }
                         if actions.contains("Ban") {
-                            Button("Reset PIN") { act(.ask(.resetPin)) }
+                            Button(PasswordText.reset) { act(.ask(.resetPassword)) }
                                 .buttonStyle(.win98Compact)
                             Button("Ban") { act(.ask(.ban)) }
                                 .buttonStyle(.win98Compact)
@@ -146,12 +147,12 @@ struct VoicePersonPopover98: View {
 
 extension VoicePersonPopover98 {
     /// What owner and mods can do to them, in the web's words and order:
-    /// the owner makes or removes mods; owner and mods reset PINs and ban,
-    /// never the owner.
+    /// the owner makes or removes mods; owner and mods reset passwords and
+    /// ban, never the owner.
     static func modActions(me: Role, them: Role) -> [String] {
         var actions: [String] = []
         if me == .owner, them == .member || them == .mod { actions.append(them == .mod ? "Remove mod" : "Make mod") }
-        if me.canModerate, them != .owner { actions += ["Reset PIN", "Ban"] }
+        if me.canModerate, them != .owner { actions += [PasswordText.reset, "Ban"] }
         return actions
     }
 }

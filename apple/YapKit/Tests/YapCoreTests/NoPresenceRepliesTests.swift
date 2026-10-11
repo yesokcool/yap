@@ -60,8 +60,8 @@ struct NoPresenceRepliesTests {
     }
 
     @Test func accountFrames() throws {
-        #expect(Secret.isPIN("582039") && !Secret.isPIN("58203") && !Secret.isPIN("58203a"))
-        #expect(Secret.isPassword("ten chars!") && !Secret.isPassword("nine char") && !Secret.isPassword(String(repeating: "x", count: 129)))
+        #expect(Secret.isPassword("8 chars!") && !Secret.isPassword("7 chars") && !Secret.isPassword(String(repeating: "x", count: 129)))
+        #expect(Secret.canSignIn("582039"), "an old PIN still signs in")
         #expect(try json(.accountDevices)["t"] as? String == "account.devices")
         #expect(try json(.accountRevoke(id: "abc"))["id"] as? String == "abc")
         #expect(try json(.accountSignoutOthers).keys.sorted() == ["t"])
@@ -73,10 +73,10 @@ struct NoPresenceRepliesTests {
             Issue.record("signin.alert"); return
         }
         #expect(device.label == "Chrome on Windows")
-        guard case .ready(let ready) = try ServerMessage.decode(#"{"t":"ready","v":1,"sid":"s","uid":"u","needsPin":false,"channels":[],"users":[],"sessions":[],"weakPin":true,"secretKind":"password"}"#) else {
+        guard case .ready(let ready) = try ServerMessage.decode(#"{"t":"ready","v":1,"sid":"s","uid":"u","needsPin":false,"channels":[],"users":[],"sessions":[],"weakPin":true,"weakReason":"guessable","secretKind":"password"}"#) else {
             Issue.record("ready"); return
         }
-        #expect(ready.weakPin && ready.secretKind == "password")
+        #expect(ready.weakPin && ready.weakReason == "guessable" && ready.secretKind == "password")
         guard case let .account(_, kind) = try ServerMessage.decode(#"{"t":"account","hasPin":true,"kind":"password"}"#) else {
             Issue.record("account"); return
         }

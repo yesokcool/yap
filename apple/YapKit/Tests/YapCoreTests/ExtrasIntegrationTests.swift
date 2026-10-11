@@ -43,7 +43,7 @@ extension ServerIntegrationTests {
 
         // History carries the votes.
         let (late, _) = device()
-        late.logIn(name: "Lee \(TestServer.run)", pin: TestServer.pin)
+        late.logIn(name: "Lee \(TestServer.run)", pin: TestServer.password)
         try await waitUntil("late device ready") { late.phase == .online }
         late.open(channel: "general")
         try await waitUntil("history has the tally") { late.histories["general"]?.messages.first { $0.id == poll.id }?.poll?.votes == [[], [], [ada.uid]] }
@@ -195,7 +195,7 @@ extension ServerIntegrationTests {
         ada.setQuietHours(night)
         // A second device gets it in ready.
         let (other, _) = device()
-        other.logIn(name: "Qui \(TestServer.run)", pin: TestServer.pin)
+        other.logIn(name: "Qui \(TestServer.run)", pin: TestServer.password)
         try await waitUntil("other device ready with quiet hours") { other.phase == .online && other.notifySettings?.quiet == night }
         let snooze = Date().addingTimeInterval(3600).yapMillis
         ada.setQuietHours(QuietHours(from: 23 * 60, to: 8 * 60, tz: "Europe/Rome", mentions: false, until: snooze))

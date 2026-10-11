@@ -107,8 +107,6 @@ public final class ScreenLinkServer: @unchecked Sendable {
         self.path = path
     }
 
-    public var isListening: Bool { source != nil }
-
     public func start() throws(ScreenLink.Failure) {
         guard source == nil else { return }
         let fd = try UnixSocket.listen(at: path)

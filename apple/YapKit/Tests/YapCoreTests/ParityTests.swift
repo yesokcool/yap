@@ -95,7 +95,7 @@ struct ParityProtocolTests {
         #expect(say("invite.create", "") == "made an invite link")
         #expect(say("obs.revoke", "3") == "turned off their 3 OBS links")
         #expect(say("sound.delete") == "deleted a soundboard clip by Ben")
-        #expect(say("member.resetPin", target: "admin") == "reset the owner (admin key)'s PIN")
+        #expect(say("member.resetPin", target: "admin") == "reset the owner (admin key)'s password")
         #expect(say("space.reset_all", "x") == "did “space reset all” (x)")
     }
 
@@ -138,7 +138,7 @@ struct ParityProtocolTests {
     }
 
     @MainActor
-    @Test func obsListenersDontCountAsOnline() throws {
+    @Test func obsListenersDontShowUpOrCountAsOnline() throws {
         let client = YapClient(credentials: MemoryCredentialStore(endpoint: ServerEndpoint(baseURL: URL(string: "https://chat.example.com")!, key: "k"), token: "t"), client: "test")
         let ada = User(id: "u1", name: "Ada", color: "#fff")
         let me = User(id: "me", name: "Me", color: "#fff")
@@ -150,7 +150,8 @@ struct ParityProtocolTests {
         #expect(client.members.map(\.id) == ["u1", "me"], "everyone, A–Z")
         #expect(client.voiceChannel(of: "u1") == nil, "a listener doesn't put them in voice")
         #expect(client.sessions(of: "u1").isEmpty)
-        #expect(client.voiceSessions(in: "lounge").map(\.sid) == ["s1"], "still shown in the channel, as a listener")
+        #expect(client.voiceSessions(in: "lounge").map(\.sid) == ["s1"], "the call still connects to it")
+        #expect(client.voiceRoster(in: "lounge").isEmpty, "but it doesn't show up in the channel, or count")
     }
 }
 

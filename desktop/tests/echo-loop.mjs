@@ -9,7 +9,8 @@
 //     YAP_BIN=desktop/target/release/yap node desktop/tests/echo-loop.mjs
 //
 // Needs the local test server (desktop/README.md › Interop test). A doorman
-// (--approve-all) lets the two in. Exits non-zero if a check fails; the
+// (--approve-all; the owner, or made a mod: only they let people in) lets
+// the two in. Exits non-zero if a check fails; the
 // numbers go to $YAP_OUT/echo-loop.json.
 
 import assert from 'node:assert/strict';
@@ -23,7 +24,7 @@ const KEY = process.env.YAP_KEY ?? '';
 const ADMIN = process.env.YAP_ADMIN_KEY ?? 'testadmin';
 const BIN = process.env.YAP_BIN ?? 'desktop/target/release/yap';
 const OUT = process.env.YAP_OUT ?? fs.mkdtempSync(path.join(os.tmpdir(), 'yap-echo-'));
-const PIN = '582039';
+const PASSWORD = 'correct-horse-582039';
 const RATE = 48000;
 const RUN = Date.now() % 100000;
 fs.mkdirSync(OUT, { recursive: true });
@@ -92,7 +93,7 @@ writeWav(ariWav, talk);
 writeWav(quietWav, new Float32Array(RATE));
 
 function bot(name, extra, env = {}) {
-  const args = ['--headless', '--server', BASE, '--name', name, '--pin', PIN, ...extra];
+  const args = ['--headless', '--server', BASE, '--name', name, '--password', PASSWORD, ...extra];
   if (KEY) args.push('--key', KEY);
   const child = spawn(BIN, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } });
   const lines = [];
@@ -123,10 +124,14 @@ function bot(name, extra, env = {}) {
 }
 
 const doorman = bot(process.env.YAP_DOORMAN_NAME ?? 'Doorman', ['--approve-all', '--input-wav', quietWav, '--duration', '200']);
+const makeMod = (uid) => fetch(`${BASE}/api/admin/role?uid=${uid}&role=mod`, { method: 'POST', headers: { Authorization: `Bearer ${ADMIN}`, 'X-Yap-Key': KEY } });
 await doorman.waitFor(/ready, sid|PENDING uid/);
 const pending = doorman.lines.map((l) => l.match(/PENDING uid (\S+)/)?.[1]).find(Boolean);
-if (pending) await fetch(`${BASE}/api/admin/role?uid=${pending}&role=member`, { method: 'POST', headers: { Authorization: `Bearer ${ADMIN}`, 'X-Yap-Key': KEY } });
-await doorman.waitFor(/ready, sid/);
+if (pending) await makeMod(pending);
+await doorman.waitFor(/ACCOUNT uid=/);
+// Left over as a plain member from an older run: only the owner and mods let people in.
+const account = doorman.lines.map((l) => l.match(/ACCOUNT uid=(\S+) .* role=(\S+)/)).find(Boolean);
+if (account && !['owner', 'mod'].includes(account[2])) await makeMod(account[1]);
 
 const result = {};
 for (const mode of ['off', 'on']) {

@@ -11,8 +11,8 @@ import { loadStandardEmojis } from './emoji.js';
 import { loadConfig } from './config.js';
 import { confirmSheet, bindConfirmSheet } from './sheet.js';
 import { forgetKey } from './vault.js';
-import { $, TYPING_MS, conn, findMessage, firstTextChannel, noHover, setConn, state } from './app/state.js';
-import { closePopover, copyByHand, hideGate, openedBy, showGate, showInfo, toast } from './app/ui.js';
+import { $, TYPING_MS, conn, findMessage, firstTextChannel, isMod, noHover, setConn, state } from './app/state.js';
+import { closePopover, copyByHand, hideGate, openedBy, showGate, toast } from './app/ui.js';
 import { applyTheme } from './app/look.js';
 import { postSound } from './app/uploads.js';
 import { bindUpdates, onBuild, reloadForUpdate, restoreAfterUpdate } from './app/updates.js';
@@ -24,7 +24,7 @@ import { renderJumpPill, renderMessages, renderTyping, tapMessage } from './app/
 import { addLocalNote, isQuietNow, jumpTo, loadLatest, loadOlder, markRead, onDeleted, onHistory, onMessage, onPing, onSendError, onSendsLost, openAndJump, openChannel, queueSend, rememberSince, sendOutbox, updateTitle, welcomeIn } from './app/chat.js';
 import { askDelete, bindComposer, cancelEdit, cancelReply, clearStaged, deleteMessage, emojiPicker, gifPicker, openReactPicker, reactPicker, renderStaged, saveToPersonal, shrinkStaged, startEdit, startReply, toggleEmojis, toggleGifs } from './app/composer.js';
 import { openMemberMenu, openPeople, renderMembers } from './app/people.js';
-import { addToHomeScreen, bindPinDialog, bindWelcome, onHelloError, renderAccountBars, renderDevices, renderHomeBar, setSecretMode, showPinDialog, showWelcome, startOver } from './app/account.js';
+import { addToHomeScreen, bindPinDialog, bindWelcome, onHelloError, passwordLater, renderAccountBars, renderDevices, renderHomeBar, showPinDialog, showWelcome, startOver, toggleReveal } from './app/account.js';
 import { askUnlock, bindVaultDialog, showVaultDialog, syncVault } from './app/personal.js';
 import { bindSearch, onSearchResults, openSearch, openSwitcher, renderResultList, runSearch } from './app/search.js';
 import { doodlePad, markAllRead, onUnreadCounts, openCatchup, openDoodle, openPicture, openShelf, openSoundboard, renderHangs, renderShelf, requestUnreadCounts, sendQuiet, setAway, soundboard, viewDoodle } from './app/extras.js';
@@ -298,6 +298,8 @@ function handle(msg) {
         renderChimeSettings();
       }
       if (msg.user.id === settings.uid) spaceWorld?.refreshLook();
+      // No longer the owner or a mod: the waiting room is theirs, not ours.
+      if (msg.user.id === settings.uid && !isMod()) state.waiting.clear();
       return renderAll();
     case 'pending':
       if (msg.token) save({ token: msg.token });
@@ -306,12 +308,13 @@ function handle(msg) {
       state.helloPayload = null;
       state.status = 'waiting';
       renderConn();
-      return showGate('Waiting to be let in', `Hang tight, ${settings.name}. Everyone here just got a ping — this opens by itself as soon as someone lets you in. Keep this tab open.`, { waiting: true });
+      return showGate('Waiting to be let in', `Hang tight, ${settings.name}. Waiting for the owner or a mod to let you in. This opens by itself as soon as they do, so keep this tab open.`, { waiting: true });
     case 'join.request':
+      // (Only the owner and mods get these.)
       if (!state.waiting.has(msg.user.id)) {
         sounds.mention();
         if (settings.desktopNotify !== 'off' && document.visibilityState !== 'visible' && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-          new Notification(`🚪 ${msg.user.name} wants to join`, { body: 'Open Yap to let them in or turn them away.', tag: `join-${msg.user.id}`, icon: '/icon.svg' });
+          new Notification(`🚪 ${msg.user.name} is waiting to join`, { body: `${msg.user.invitedBy ? `Invited by ${msg.user.invitedBy}. ` : ''}Open Yap to let them in or turn them away.`, tag: `join-${msg.user.id}`, icon: '/icon.svg' });
         }
       }
       state.waiting.set(msg.user.id, msg.user);
@@ -331,7 +334,10 @@ function handle(msg) {
       return;
     }
     case 'join.resolved': {
-      const who = state.waiting.get(msg.uid);
+      // The newcomer gets their own let-in too, right after `ready`: they're welcomed instead.
+      if (msg.uid === settings.uid) return;
+      // The owner and mods knew them from the waiting room; everyone else meets them here (join.resolved.user).
+      const who = state.waiting.get(msg.uid) ?? (msg.approved ? msg.user ?? state.users.get(msg.uid) : undefined);
       state.waiting.delete(msg.uid);
       renderRequests();
       renderMembers(); // the People sheet: out of "Waiting to join" (their `user` came first)
@@ -374,11 +380,12 @@ function handle(msg) {
     case 'account':
       if (msg.token) save({ token: msg.token });
       state.hasPin = msg.hasPin;
-      state.secretKind = msg.kind ?? 'pin';
+      state.secretKind = msg.kind ?? 'password';
       state.weakPin = false;
+      state.weakReason = null;
       renderAccountBars();
       $('pin-dialog').close();
-      return toast(state.secretKind === 'password' ? 'Password saved. Sign in anywhere with your name and password.' : 'PIN saved. Sign in anywhere with your name and PIN.');
+      return toast('Password saved. Sign in anywhere with your name and password.');
     case 'devices':
       state.devices = msg.devices;
       return renderDevices();
@@ -387,8 +394,15 @@ function handle(msg) {
       sounds.ping?.();
       return renderAccountBars();
     case 'pin.reset': {
-      const user = state.users.get(msg.uid);
-      return showInfo('Temporary PIN', `Tell ${user?.name ?? 'them'} to sign in with the PIN ${msg.pin} (“I have an account”), then change it in Settings.`);
+      const name = state.users.get(msg.uid)?.name;
+      return confirmSheet({
+        title: 'Temporary password',
+        text: name
+          ? `${name}’s temporary password: ${msg.pin}. Send it to ${name}; they’ll choose their own after signing in.`
+          : `Temporary password: ${msg.pin}. Send it to them; they’ll choose their own after signing in.`,
+        ok: 'Copy',
+        cancel: 'Done',
+      }).then((copy) => copy && navigator.clipboard.writeText(msg.pin).then(() => toast('Copied.'), () => copyByHand('Temporary password', msg.pin)));
     }
     case 'session.join':
       if (msg.session.sid === state.staleSid) return; // our own old session (see onReady)
@@ -467,6 +481,7 @@ function onReady(msg) {
   state.hasPin = !msg.needsPin;
   state.secretKind = msg.secretKind ?? 'pin';
   state.weakPin = Boolean(msg.weakPin);
+  state.weakReason = msg.weakReason ?? null; // pin | temporary | guessable: the prompt's words
   state.notify = msg.notify ?? { mode: 'off', topic: null, quiet: null };
   state.sounds = new Map((msg.sounds ?? []).map((s) => [s.id, s]));
   state.hangs = new Map((msg.hangs ?? []).map((h) => [h.id, h]));
@@ -519,7 +534,7 @@ function onReady(msg) {
       const back = [...state.sessions.values()].some((s) => s.uid === ghost?.uid && !state.ghosts.has(s.sid) && s.voice?.channelId === ghost?.voice?.channelId);
       if (!ghost?.voice?.resume || back) {
         dropGhost(sid, { quiet: true });
-        if (!back) deferLeaveChime(ghost?.uid); // lost, not left: no chimes if they're back within 5 s
+        if (!back && ghost?.client !== 'obs') deferLeaveChime(ghost?.uid); // lost, not left: no chimes if they're back within 5 s (none for an OBS link)
       }
     }
   }
@@ -900,11 +915,7 @@ function onClick(e) {
       }
       return;
     }
-    case 'secret-mode': {
-      const form = $(el.dataset.form);
-      for (const error of form.querySelectorAll('.form-error')) error.hidden = true;
-      return setSecretMode(form, form.dataset.secret === 'password' ? 'pin' : 'password');
-    }
+    case 'reveal': return toggleReveal(el);
     case 'devices':
       $('devices-list').innerHTML = '<li class="muted">Loading…</li>';
       if (!$('devices-dialog').open) $('devices-dialog').showModal();
@@ -917,15 +928,13 @@ function onClick(e) {
         state.signinAlert = null;
         renderAccountBars();
         if (!$('devices-dialog').open) $('devices-dialog').showModal();
-        toast(state.secretKind === 'password' ? 'Signed out everywhere else. If it wasn’t you, change your password now.' : 'Signed out everywhere else. If it wasn’t you, change your PIN now.');
+        toast('Signed out everywhere else. If it wasn’t you, change your password now.');
         conn?.send({ t: 'account.signoutOthers' });
       });
     case 'dismiss-signin':
       state.signinAlert = null;
       return renderAccountBars();
-    case 'dismiss-weak':
-      state.weakDismissed = true;
-      return renderAccountBars();
+    case 'password-later': return passwordLater();
     case 'people':
     case 'show-members':
       return openPeople();
@@ -998,7 +1007,7 @@ function onClick(e) {
     case 'sign-out':
       return confirmSheet({
         title: 'Sign out on this device?',
-        text: `You can sign back in with your name and ${state.secretKind === 'password' ? 'password' : 'PIN'}.`,
+        text: 'You can sign back in with your name and password.',
         ok: 'Sign out',
         danger: true,
       }).then((yes) => {
@@ -1011,7 +1020,7 @@ function onClick(e) {
       const user = state.users.get(el.dataset.uid);
       closePopover();
       if (!user) return;
-      return confirmSheet({ title: `Reset ${user.name}’s PIN?`, text: 'They get a temporary PIN to sign in with; their old PIN or password stops working.', ok: 'Reset PIN', danger: true })
+      return confirmSheet({ title: `Reset ${user.name}’s password?`, text: `${user.name} gets a temporary password to sign in with, and their current one stops working.`, ok: 'Reset password', danger: true })
         .then((yes) => yes && conn?.send({ t: 'member.resetPin', uid: user.id }));
     }
     case 'toggle-gifs': return toggleGifs();

@@ -39,12 +39,6 @@ pub struct Source {
     /// What the picker shows: "Screen 1 (2560 × 1440)", or a window's title + app name.
     pub name: String,
     pub kind: SourceKind,
-    /// Size in pixels when known (0 if not). (The picker's names already say
-    /// it; the backends fill it in for whoever needs the numbers.)
-    #[allow(dead_code)]
-    pub width: u32,
-    #[allow(dead_code)]
-    pub height: u32,
 }
 
 /// One captured picture: BGRA8 (B, G, R, A byte order), top-down rows, `stride` bytes per row

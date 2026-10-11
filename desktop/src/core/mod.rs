@@ -468,7 +468,7 @@ impl Core {
         }
     }
 
-    /// Store a device token the server just issued; the PIN is no longer needed.
+    /// Store a device token the server just issued; the password is no longer needed.
     fn got_token(&mut self, token: Option<String>) {
         if let Some(t) = token.filter(|t| !t.is_empty()) {
             self.shared.store_token(Some(&t));

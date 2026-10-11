@@ -114,8 +114,10 @@ extension YapClient {
         case .emojiDeleted(let id):
             emojis.removeValue(forKey: id)
         case let .account(token, kind):
+            // A new password: nothing more to ask.
             if let token { credentials.token = token }
             weakPin = false
+            weakReason = nil
             if let kind { secretKind = kind }
             pinChange = .saved
         case .devices(let list):
@@ -129,8 +131,12 @@ extension YapClient {
             pinReset = PinReset(name: users[uid]?.name ?? "them", pin: pin)
         case .joinRequest(let user):
             waitingRoom[user.id] = user
-        case let .joinResolved(uid, approved, by):
-            guard let who = waitingRoom.removeValue(forKey: uid) else { return }
+        case let .joinResolved(uid, approved, by, user):
+            // The owner and mods knew them from the waiting room; everyone
+            // else meets them here (`join.resolved.user`, from newer servers).
+            // Not about me: just let in, I get "You're in" instead.
+            let waiting = waitingRoom.removeValue(forKey: uid)
+            guard uid != self.uid, let who = waiting ?? (approved ? user ?? users[uid] : nil) else { return }
             let actor = by == self.uid ? "you" : by == "admin" ? "the owner" : (users[by]?.name ?? "someone")
             if approved {
                 // Let in: a calm line in the first channel, never a popup.
@@ -223,6 +229,7 @@ extension YapClient {
         unreadCounts = nil
         shelves = shelves.filter { shelfWanted.contains($0.key) }
         weakPin = ready.weakPin
+        weakReason = ready.weakPin ? ready.weakReason : nil
         secretKind = ready.secretKind ?? secretKind
         uid = ready.uid
         syncVault(ready.vault)

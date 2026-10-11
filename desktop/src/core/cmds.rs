@@ -90,9 +90,9 @@ fn cmd_group(cmd: &Cmd) -> Part {
         | Cmd::Profile { .. }
         | Cmd::Reconnect
         | Cmd::SignIn(..)
-        | Cmd::SetPin { .. }
+        | Cmd::SetPassword { .. }
         | Cmd::SignOut
-        | Cmd::ResetPin { .. }
+        | Cmd::ResetPassword { .. }
         | Cmd::Devices
         | Cmd::RevokeDevice(..)
         | Cmd::SignOutOthers
@@ -685,7 +685,7 @@ impl Core {
                 };
                 let audio = self.shared.audio.clone();
                 match what {
-                    Preview::Chime(id) => self.play_builtin_chime(&id, vol, &device),
+                    Preview::Chime(id) => self.play_builtin_chime(&id, &device),
                     Preview::Sound(id) => {
                         if let Some(sound) = self.shared.model.lock().sound(&id).cloned() {
                             let gain = sound.gain.min(1.0) * vol;
@@ -744,7 +744,7 @@ impl Core {
         }
     }
 
-    /// The account and the server: sign-in, PINs, devices, invites, places links, moderation, reconnecting.
+    /// The account and the server: sign-in, passwords, devices, invites, places links, moderation, reconnecting.
     pub(super) async fn on_account_cmd(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::CreateInvite(label) => {
@@ -820,8 +820,8 @@ impl Core {
                 self.shared.audio.stop();
                 self.connect();
             }
-            Cmd::SetPin { pin, current } => {
-                self.send(out::account_pin(&pin, current.as_deref()));
+            Cmd::SetPassword { password, current } => {
+                self.send(out::account_pin(&password, current.as_deref()));
             }
             Cmd::SignOut => {
                 if self.shared.model.lock().voice_wanted.is_some() {
@@ -842,7 +842,7 @@ impl Core {
                 self.outbox.clear();
                 self.connect();
             }
-            Cmd::ResetPin { uid } => {
+            Cmd::ResetPassword { uid } => {
                 self.send(out::member_reset_pin(&uid));
             }
             Cmd::Devices => {
@@ -854,7 +854,7 @@ impl Core {
             Cmd::SignOutOthers => {
                 self.shared.model.lock().signin_alert = None;
                 self.send(out::account_signout_others());
-                self.shared.model.lock().toast("Signed out everywhere else. If it wasn't you, change your PIN too.");
+                self.shared.model.lock().toast("Signed out everywhere else. If it wasn't you, change your password too.");
                 self.repaint();
             }
             Cmd::Ban { uid } => {

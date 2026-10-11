@@ -1,6 +1,18 @@
 {
-  "current": "0.42.0",
+  "current": "0.43.0",
   "releases": [
+    {
+      "version": "0.43.0",
+      "date": "2026-10-11",
+      "title": "Passwords instead of PINs",
+      "items": [
+        "Yap uses passwords now (8 characters or more) instead of 6-digit PINs, in every app. Your PIN still works until you choose a password; Yap asks once, and a wrong sign-in reminds you an old PIN works there too.",
+        "Only the owner and mods let new people in from the waiting room, and they get a push when someone's waiting. Everyone still sees \"Cleo joined — invited by Ada\".",
+        "Owners and mods: Reset password… gives a temporary password to send; the person chooses their own after signing in.",
+        "Pings: one a minute per person.",
+        "An OBS link listens without showing up in the voice channel, in every app. Leave it in OBS: it keeps working until you turn it off."
+      ]
+    },
     {
       "version": "0.42.0",
       "date": "2026-10-11",

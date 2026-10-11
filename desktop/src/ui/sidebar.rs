@@ -1,7 +1,7 @@
 //! Left window: you, the voice panel, and the channel list (text, voice with
 //! who's in it, places).
 
-use super::sections::{self, Look, RowLook};
+use super::sections::{self, Look, list_heading, list_row};
 use super::{Act, App, avatar, dialogs::Modal, face, icons, theme, theme::Bevel, theme::Pal, theme::RoundRect};
 use crate::core::{Cmd, Model, Status};
 use eframe::egui::{self, Align2, Color32, Rect, pos2, vec2};
@@ -45,7 +45,6 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
     }
     // The version / updates / privacy strip stays pinned under the list.
     let rect = super::sidebar_footer(app, ui, m, acts);
-    let rows = RowLook::of(ui);
     let rect = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - 3.0));
     theme::well(ui, rect, p, |ui| {
         theme::scroll(ui, egui::ScrollArea::vertical().id_salt("channels").auto_shrink(false), p, |ui| {
@@ -57,7 +56,7 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
                     let active = c.id == m.config.channel && m.view.is_none() && !super::screen::in_pane(app, m);
                     let unread = m.is_unread(c) && !active;
                     ui.add_space(4.0);
-                    let (_, resp) = rows.row(ui, "personal", &c.id, "lock", &c.name, Look { active, bold: unread, ..Default::default() });
+                    let (_, resp) = list_row(ui, p, "personal", &c.id, "lock", &c.name, Look { active, bold: unread, ..Default::default() });
                     if theme::tip(resp, "Only you can see this: notes, links and pictures to grab on your other devices.").clicked() {
                         super::screen::leaving(app, m, acts);
                         acts.push(Act::Cmd(Cmd::OpenChannel(c.id.clone())));
@@ -68,13 +67,13 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
                     // Never connected yet: nothing to list (the chat pane says why).
                     return;
                 }
-                if rows.heading(ui, "Text channels", Some("New text channel")) {
+                if list_heading(ui, p, "Text channels", Some("New text channel")) {
                     app.modal = Some(Modal::NewChannel { name: String::new(), voice: false });
                 }
                 for c in m.channels.iter().filter(|c| c.is_text()) {
                     let active = c.id == m.config.channel && m.view.is_none() && !super::screen::in_pane(app, m);
                     let unread = m.is_unread(c) && !active;
-                    let (r, resp) = rows.row(ui, "text", &c.id, "chat", &c.name, Look { active, bold: unread, ..Default::default() });
+                    let (r, resp) = list_row(ui, p, "text", &c.id, "chat", &c.name, Look { active, bold: unread, ..Default::default() });
                     if let Some(n) = m.mentions.get(&c.id).filter(|n| **n > 0) {
                         sections::badge(ui.painter(), r.right_center() - vec2(5.0, 0.0), *n as usize);
                     } else if resp.hovered() && !active {
@@ -91,13 +90,13 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
                         app.focus_composer = true;
                     }
                 }
-                if rows.heading(ui, "Voice channels", Some("New voice channel")) {
+                if list_heading(ui, p, "Voice channels", Some("New voice channel")) {
                     app.modal = Some(Modal::NewChannel { name: String::new(), voice: true });
                 }
                 for c in m.channels.iter().filter(|c| c.is_voice()) {
                     let joined = m.voice_channel.as_deref() == Some(c.id.as_str());
                     let look = Look { bold: joined, tint: joined.then_some(p.ok), ..Default::default() };
-                    let (r, resp) = rows.row(ui, "voice", &c.id, "volume", &c.name, look);
+                    let (r, resp) = list_row(ui, p, "voice", &c.id, "volume", &c.name, look);
                     let resp = theme::tip(resp, if joined { "You are here" } else { "Join voice" });
                     if resp.hovered() && !joined {
                         let b = Rect::from_min_size(pos2(r.right() - 22.0, r.top() + 1.0), vec2(20.0, 18.0));
@@ -109,10 +108,10 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
                     if resp.clicked() && !joined {
                         acts.push(Act::Cmd(Cmd::JoinVoice(c.id.clone())));
                     }
-                    sections::voice_members(app, ui, m, &rows, &c.id, joined, acts);
+                    sections::voice_members(app, ui, m, p, &c.id, joined, acts);
                 }
-                sections::places(app, ui, m, &rows, acts);
-                sections::hangs(app, ui, m, &rows, acts);
+                sections::places(app, ui, m, p, acts);
+                sections::hangs(app, ui, m, p, acts);
             });
         });
     });
@@ -344,7 +343,7 @@ pub fn volume_popup(app: &mut App, ctx: &egui::Context, m: &Model, p: &Pal, acts
                     }
                 });
             }
-            // The same controls as People: volume (a limiter past 100 %), then mod, PIN reset, ban.
+            // The same controls as People: volume (a limiter past 100 %), then mod, password reset, ban.
             super::dialogs::person_controls(ui, m, p, acts, &user, moderator, owner, &mut ask, 6);
             theme::menu_bevel(ui, p);
         });

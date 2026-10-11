@@ -2,8 +2,8 @@ import SwiftUI
 import YapCore
 import YapVoice
 
-// Settings for the v0.36 extras in the Windows 98 skin: the away message,
-// sounds and chimes, the soundboard, notifications and quiet hours.
+// Settings for the v0.36 extras: the away message, sounds and chimes, the
+// soundboard, notifications and quiet hours.
 
 /// AIM's away message: type it, pick when it ends, Set.
 struct AwayGroup98: View {

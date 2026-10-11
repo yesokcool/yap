@@ -1,8 +1,8 @@
-// Signing up and in, your PIN or password, your devices, sign-in alerts,
-// starting over from the waiting room, and Add to Home Screen.
+// Signing up and in, your password (and the once-per-device "Choose a
+// password" prompt), your devices, sign-in alerts, starting over from the
+// waiting room, and Add to Home Screen.
 
 import { settings, save } from '../settings.js';
-import { icon } from '../icons.js';
 import { esc, formatTime } from '../format.js';
 import { applySignInLink, checkKey, parseKey, sendHello, start } from '../app.js';
 import { $, coarsePointer, conn, state } from './state.js';
@@ -17,6 +17,12 @@ export function startOver() {
 }
 
 let welcomeColor = settings.color;
+
+/** The server's rule for a new password (PROTOCOL.md › Identity), checked here first so the form can say so at once. */
+const PASSWORD_MIN = 8;
+const TOO_SHORT = 'Use a password of at least 8 characters.';
+/** Length in characters, the way the server counts them (an emoji is one). */
+const chars = (s) => [...s].length;
 
 export function onHelloError(msg) {
   if (msg.code === 'bad_token' && state.spareHandoff) {
@@ -34,10 +40,12 @@ export function onHelloError(msg) {
   if (msg.code === 'name_taken' && tried?.signup) {
     // Probably them on a new device: flip to sign-in.
     mode = 'login';
-    error = `Someone already has the name ${tried.signup.name}. If that's you, sign in with your PIN.`;
+    error = `Someone already has the name ${tried.signup.name}. If that's you, sign in with your password.`;
   }
-  // A wrong PIN was a dead end: say who can help.
-  if (msg.code === 'bad_login' || msg.code === 'locked') error = `${error} Forgot your PIN? The owner or a mod can reset it.`;
+  // A wrong password was a dead end: say who can help.
+  // Someone still on an old PIN only sees a Password field: say the PIN works there.
+  if (msg.code === 'bad_login') error = `${error} An old PIN works here too. Forgot it? The owner or a mod can reset it.`;
+  else if (msg.code === 'locked') error = `${error} Forgot your password? The owner or a mod can reset it.`;
   showWelcome({ needKey: false, error, mode, ...(typed ? { name: typed } : {}) });
 }
 
@@ -48,6 +56,7 @@ export function showWelcome({ needKey, error = '', mode, name = settings.name })
   if (!state.sid) document.documentElement.classList.add('signed-out');
   form.name.value = name;
   form.pin.value = '';
+  hideSecrets(form);
   form.mode.value = mode ?? (settings.name || settings.token ? 'login' : 'signup');
   $('welcome-key-field').hidden = !needKey && !(isStandalone() && !settings.key);
   $('welcome-paste').hidden = !(isStandalone() && !settings.token);
@@ -64,14 +73,11 @@ export function syncWelcomeMode() {
   const form = $('welcome-form');
   const signup = form.mode.value === 'signup';
   for (const el of form.querySelectorAll('[data-signup-only]')) el.hidden = !signup;
+  // So password managers offer to make one (sign-up) or fill the saved one (sign-in).
   form.pin.autocomplete = signup ? 'new-password' : 'current-password';
-  // The hint follows "Use a password" (it kept saying PIN).
-  const password = form.dataset.secret === 'password';
   $('welcome-hint').textContent = signup
-    ? (password
-      ? 'Pick a name friends will see and a password of 10 or more characters. It’s how you sign in on your other devices.'
-      : 'Pick a name friends will see and a 6-digit PIN. The PIN is how you sign in on your other devices.')
-    : `Sign in with your name and ${password ? 'password' : 'PIN'} — same you, same messages, on any device.`;
+    ? 'Pick a name friends will see and a password. It’s how you sign in on your other devices.'
+    : 'Sign in with your name and password — same you, same messages, on any device.';
   form.querySelector('button[type=submit]').textContent = signup ? 'Sign Up' : 'Sign On';
 }
 
@@ -87,14 +93,14 @@ export function bindWelcome() {
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const name = form.name.value.trim();
-    const pin = form.pin.value.trim();
+    const pin = form.pin.value; // (never trimmed: a password is exactly what was typed)
     const error = (text) => {
       $('welcome-error').textContent = text;
       $('welcome-error').hidden = false;
     };
-    if (!name) return;
-    const password = form.dataset.secret === 'password';
-    if (password ? pin.length < 10 : !/^\d{6}$/.test(pin)) return error(password ? 'Passwords are at least 10 characters.' : 'Your PIN is exactly 6 digits.');
+    if (!name || !pin) return;
+    // Signing in takes any password (or an old 6-digit PIN); a new one has to be long enough.
+    if (form.mode.value === 'signup' && chars(pin) < PASSWORD_MIN) return error(TOO_SHORT);
     if (!$('welcome-key-field').hidden && applySignInLink(form.key.value)) return;
     if (!$('welcome-key-field').hidden) {
       const key = parseKey(form.key.value);
@@ -107,6 +113,7 @@ export function bindWelcome() {
     const signup = form.mode.value === 'signup';
     save({ color: welcomeColor, token: '' }); // the name is kept once the server says yes (ready / pending)
     state.helloPayload = signup ? { signup: { name, pin, color: welcomeColor } } : { login: { name, pin } };
+    hideSecrets(form);
     dialog.close();
     renderUserPanel();
     if (conn?.open && !state.sid) sendHello();
@@ -115,63 +122,89 @@ export function bindWelcome() {
   });
 }
 
+/** Settings › Account › Change password (Set a password while on an old PIN, or with none). */
 export function showPinDialog() {
   const form = $('pin-form');
   form.reset();
+  hideSecrets(form);
   $('pin-error').hidden = true;
+  const onPin = state.secretKind !== 'password';
+  form.username.value = settings.name;
   $('pin-current-field').hidden = !state.hasPin;
   form.current.required = Boolean(state.hasPin);
-  $('pin-current-label').textContent = state.secretKind === 'password' ? 'Current password' : 'Current PIN';
-  setSecretMode(form, 'pin');
-  $('pin-title').textContent = state.hasPin ? 'Change your PIN or password' : 'Set a PIN';
-  $('pin-hint').textContent = 'Six digits. You sign in on new devices with your name and this PIN.';
+  $('pin-current-label').textContent = onPin ? 'Current password or PIN' : 'Current password';
+  $('pin-title').textContent = passwordAction();
   $('pin-dialog').showModal();
+  (state.hasPin ? form.current : form.pin).focus();
 }
+
+/** "Change password", or "Set a password" for someone still on a PIN (or without one). */
+export const passwordAction = () => (state.hasPin && state.secretKind === 'password' ? 'Change password' : 'Set a password');
 
 export function bindPinDialog() {
   const form = $('pin-form');
   form.addEventListener('submit', (e) => {
-    if (e.submitter?.value === 'cancel') return; // (Cancel closes it; it used to say "Exactly 6 digits." and stay)
+    if (e.submitter?.value === 'cancel') return; // (Cancel closes it)
     e.preventDefault();
     const fail = (text) => {
       $('pin-error').textContent = text;
       $('pin-error').hidden = false;
     };
-    // (Our own words, not the browser's "Please match the requested format": the form is novalidate.)
-    const password = form.dataset.secret === 'password';
-    if (form.current.required && !form.current.value) return fail(`Type your current ${state.secretKind === 'password' ? 'password' : 'PIN'} first.`);
-    if (password ? form.pin.value.length < 10 : !/^\d{6}$/.test(form.pin.value)) return fail(password ? 'At least 10 characters — a short phrase works well.' : 'Your new PIN is exactly 6 digits.');
-    if (form.pin.value !== form.again.value) return fail("Those two don't match.");
+    // (Our own words, not the browser's: the form is novalidate.)
+    if (form.current.required && !form.current.value) return fail(state.secretKind === 'password' ? 'Type your current password first.' : 'Type your current password or PIN first.');
+    if (chars(form.pin.value) < PASSWORD_MIN) return fail(TOO_SHORT);
+    $('pin-error').hidden = true;
     conn?.send({ t: 'account.pin', pin: form.pin.value, current: form.current.value || undefined });
   });
 }
 
-// ── Account protection: PIN or password, devices, sign-in alerts ──────────
+// ── Passwords: show/hide, and the once-per-device prompt ─────────────────
 
-/** Switch a form's secret field between a 6-digit PIN and a password. */
-export function setSecretMode(form, mode) {
-  form.dataset.secret = mode;
-  const password = mode === 'password';
-  for (const input of [form.pin, form.again].filter(Boolean)) {
-    input.value = '';
-    if (password) {
-      input.removeAttribute('pattern');
-      input.removeAttribute('maxlength');
-      input.removeAttribute('inputmode');
-      input.placeholder = '';
-    } else {
-      input.setAttribute('pattern', '\\d{6}');
-      input.setAttribute('maxlength', '6');
-      input.setAttribute('inputmode', 'numeric');
-      if (form.id === 'welcome-form') input.placeholder = '••••••';
-    }
+/** Show or hide what's typed in the password field next to this button. */
+export function toggleReveal(button) {
+  const input = button.closest('.field')?.querySelector('input');
+  if (!input) return;
+  const show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  button.textContent = show ? 'Hide' : 'Show';
+  button.setAttribute('aria-pressed', String(show));
+  input.focus();
+}
+
+/** Back to dots, in every password field of a form (so a password is never left showing). */
+function hideSecrets(form) {
+  for (const button of form.querySelectorAll('[data-action="reveal"]')) {
+    const input = button.closest('.field')?.querySelector('input');
+    if (input) input.type = 'password';
+    button.textContent = 'Show';
+    button.setAttribute('aria-pressed', 'false');
   }
-  const label = form.querySelector('.secret-label');
-  const isNew = form.id === 'pin-form';
-  label.innerHTML = password ? `${isNew ? 'New password' : 'Password'} <small class="muted">— 10+ characters</small>` : `${isNew ? 'New PIN' : 'PIN'} <small class="muted">— 6 digits</small>`;
-  form.querySelector('[data-action="secret-mode"]').textContent = password ? 'Use a PIN' : isNew ? 'Use a password instead' : 'Use a password';
-  if ($('pin-save') && isNew) $('pin-save').textContent = password ? 'Save password' : 'Save PIN';
-  if (form.id === 'welcome-form') syncWelcomeMode();
+}
+
+/** The prompt's words, by ready.weakReason. */
+const PROMPTS = {
+  pin: 'Yap uses passwords now. Your PIN still works until you choose one.',
+  temporary: 'You signed in with a temporary password. Choose your own.',
+  guessable: 'Your password is easy to guess. Choose a stronger one.',
+};
+
+/**
+ * Why to ask this person to choose a password (ready.weakPin, ready.weakReason),
+ * or null: an old PIN, a temporary password from a reset, or a password that's
+ * easy to guess. "Later" hides it on this device for good (for that reason).
+ */
+function passwordPrompt() {
+  if (!state.weakPin || !state.sid) return null;
+  const reason = PROMPTS[state.weakReason] ? state.weakReason : state.secretKind !== 'password' ? 'pin' : 'guessable';
+  if ((settings.passwordLater ?? []).includes(reason)) return null;
+  return { reason, text: PROMPTS[reason] };
+}
+
+/** Later: not on this device again. */
+export function passwordLater() {
+  const prompt = passwordPrompt();
+  if (prompt) save({ passwordLater: [...new Set([...(settings.passwordLater ?? []), prompt.reason])] });
+  renderAccountBars();
 }
 
 export function renderDevices() {
@@ -193,7 +226,7 @@ export function renderDevices() {
     </li>`).join('') || '<li class="muted">Just this one.</li>';
 }
 
-/** The "new sign-in" alert and the weak-PIN nudge, above the chat. */
+/** The "new sign-in" alert and the "Choose a password" prompt, above the chat. */
 export function renderAccountBars() {
   const alert = state.signinAlert;
   const bar = $('signin-bar');
@@ -203,13 +236,16 @@ export function renderAccountBars() {
       <button class="btn small danger" type="button" data-action="signout-others">Sign out everywhere else</button>
       <button class="btn small" type="button" data-action="dismiss-signin">It was me</button>`;
   }
-  const weak = $('weak-bar');
-  weak.hidden = !state.weakPin || state.weakDismissed || !state.sid;
-  if (!weak.hidden) {
-    weak.innerHTML = `<span>🔑 Your PIN is easy to guess for someone who knows you.</span><span class="spacer"></span>
-      <button class="btn small primary" type="button" data-action="change-pin">Change it</button>
-      <button class="icon-btn tiny" type="button" data-action="dismiss-weak" aria-label="Not now" title="Not now">${icon('x')}</button>`;
+  const prompt = passwordPrompt();
+  const ask = $('weak-bar');
+  ask.hidden = !prompt;
+  if (prompt) {
+    ask.innerHTML = `<span class="prompt-words">🔑 <b>Choose a password</b> <span class="prompt-text">${esc(prompt.text)}</span></span>
+      <button class="btn small primary" type="button" data-action="change-pin">Choose a password</button>
+      <button class="btn small" type="button" data-action="password-later">Later</button>`;
   }
+  const change = $('change-pin-btn');
+  if (change) change.textContent = passwordAction();
 }
 
 // ── Add to Home Screen ────────────────────────────────────────────────────
@@ -282,6 +318,6 @@ export async function addToHomeScreen() {
        <li>Tap <b>Add</b>. Yap's icon appears on your Home Screen.</li>`;
   $('home-note').textContent = pass
     ? 'The new icon opens Yap already signed in (within 15 minutes). We also copied a sign-in link: if the icon asks you to sign in, tap “Paste the sign-in link”.'
-    : 'The new icon will ask for your name and PIN once (home-screen apps keep their own sign-in).';
+    : 'The new icon will ask for your name and password once (home-screen apps keep their own sign-in).';
   $('home-dialog').showModal();
 }

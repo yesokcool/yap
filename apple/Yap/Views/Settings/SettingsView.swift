@@ -192,29 +192,29 @@ struct ProfileGroup: View {
     }
 }
 
-/// PIN and sign out.
+/// Password and sign out.
 struct AccountGroup: View {
     @Environment(AppModel.self) private var model
-    @State private var changingPin = false
+    @State private var changingPassword = false
     @State private var confirmSignOut = false
 
     var body: some View {
         GroupBox98(title: "Account") {
-            Text(AccountText.howToSignIn(model.client))
+            Text(AccountText.howToSignIn)
                 .font(Theme.chrome)
                 .foregroundStyle(Theme.text)
                 .fixedSize(horizontal: false, vertical: true)
             // Wraps at big text sizes instead of cutting the labels short.
             FlowLayout(spacing: 6) {
-                Button(model.client.secretKind == "password" ? "Change Password…" : "Change PIN…") { changingPin = true }
+                Button("\(PasswordText.change(onPin: model.client.onPin))…") { changingPassword = true }
                     .buttonStyle(.win98)
                 Button("Sign out of this device…") { confirmSignOut = true }
                     .buttonStyle(.win98)
             }
             DevicesGroup98()
         }
-        .sheet(isPresented: $changingPin) { ChangePinView() }
-        .question(isPresented: $confirmSignOut, Question(title: AccountText.signOutTitle, text: AccountText.signOutMessage(model.client),
+        .sheet(isPresented: $changingPassword) { ChangePasswordView() }
+        .question(isPresented: $confirmSignOut, Question(title: AccountText.signOutTitle, text: AccountText.signOutMessage,
                                                          action: "Sign out", danger: true, perform: { [client = model.client] _ in client.signOut() }))
     }
 }
@@ -616,65 +616,59 @@ struct LevelMeter: View {
     }
 }
 
-/// Set or change the 6-digit PIN (current one required when changing).
-struct ChangePinView: View {
+/// Change password (Set a password while still on an old PIN): the
+/// current password, or the PIN, and a new password of 8 characters or more.
+/// The server's refusals (`bad_pin`, `weak_pin`, a wrong current one) show
+/// in its own words.
+struct ChangePasswordView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var current = ""
-    @State private var pin = ""
-    @State private var again = ""
-    @State private var usePassword = false
-    @State private var localError: String?
+    @State private var new = ""
+    @State private var show = false
+    /// Read once: the title mustn't flip to "Change password" as it saves.
+    @State private var onPin = false
+    @State private var opened = false
 
     var body: some View {
         let client = model.client
-        let thing = usePassword ? "password" : "PIN"
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(usePassword ? "10 to 128 characters. You sign in on new devices with your name and this password."
-                                     : "Six digits. You sign in on new devices with your name and this PIN.")
-                        .font(Theme.chrome)
-                        .foregroundStyle(Theme.text)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(client.secretKind == "password" ? "Current password:" : "Current PIN:").font(Theme.chrome).foregroundStyle(Theme.text)
-                    pinField(text: $current, password: client.secretKind == "password")
-                    Text("New \(thing):").font(Theme.chrome).foregroundStyle(Theme.text)
-                    pinField(text: $pin, password: usePassword)
-                    Text("New \(thing) again:").font(Theme.chrome).foregroundStyle(Theme.text)
-                    pinField(text: $again, password: usePassword)
-                    Check98(title: "Use a password instead of a PIN", isOn: $usePassword)
-                    if let message = localError ?? failure {
-                        ErrorLine(text: message)
+                    Text("\(PasswordText.current(onPin: onPin)):").font(Theme.chrome).foregroundStyle(Theme.text)
+                    PasswordField98(text: $current, shown: show)
+                    Text("\(PasswordText.new):").font(Theme.chrome).foregroundStyle(Theme.text)
+                    PasswordField98(text: $new, isNew: true, shown: show)
+                    PasswordRule98()
+                    Check98(title: PasswordText.show, isOn: $show)
+                    if let failure {
+                        ErrorLine(text: failure)
                     }
                 }
                 .padding(12)
             }
             .background(Theme.face)
-            .win98Sheet(client.secretKind == "password" ? "Change password" : "Change PIN") {
-                CloseSheetButton(hasChanges: !pin.isEmpty || !current.isEmpty) { dismiss() }
+            .win98Sheet(PasswordText.change(onPin: onPin)) {
+                CloseSheetButton(hasChanges: !new.isEmpty || !current.isEmpty) { dismiss() }
             } done: {
                 DoneButton(action: save)
-                    .disabled(!(usePassword ? Secret.isPassword(pin) : Secret.isPIN(pin)) || again.isEmpty
-                              || !Secret.isValid(current) || client.pinChange == .saving)
+                    .disabled(!Secret.isPassword(new) || !Secret.canSignIn(current) || client.pinChange == .saving)
             }
             .onAppear {
+                guard !opened else { return }
+                opened = true
+                onPin = client.onPin
                 client.pinChange = .idle
-                usePassword = client.secretKind == "password"
-            }
-            .onChange(of: usePassword) {
-                pin = ""
-                again = ""
             }
             .onChange(of: client.pinChange) { _, state in
                 if state == .saved {
-                    client.notice = YapClient.Notice(text: "\(usePassword ? "Password" : "PIN") saved. Sign in anywhere with your name and \(thing).")
+                    client.notice = YapClient.Notice(text: PasswordText.saved(onPin: onPin))
                     dismiss()
                 }
             }
         }
         .presentationDetents([.medium, .large])
-        .interactiveDismissDisabled(!pin.isEmpty)
+        .interactiveDismissDisabled(!new.isEmpty)
         #if os(macOS)
         .frame(minWidth: 340, minHeight: 300)
         #endif
@@ -685,25 +679,7 @@ struct ChangePinView: View {
         return nil
     }
 
-    private func pinField(text: Binding<String>, password: Bool) -> some View {
-        Field98 {
-            SecureField("", text: text)
-                #if os(iOS)
-                .keyboardType(password ? .default : .numberPad)
-                #endif
-                .onChange(of: text.wrappedValue) { _, new in
-                    let cleaned = password ? String(new.prefix(128)) : String(new.filter(\.isNumber).prefix(6))
-                    if cleaned != new { text.wrappedValue = cleaned }
-                }
-        }
-    }
-
     private func save() {
-        guard pin == again else {
-            localError = usePassword ? "Those two passwords don't match." : "Those two PINs don't match."
-            return
-        }
-        localError = nil
-        model.client.changePin(to: pin, current: current)
+        model.client.changePassword(to: new, current: current)
     }
 }

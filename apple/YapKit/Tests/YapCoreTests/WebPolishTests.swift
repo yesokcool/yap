@@ -159,6 +159,44 @@ struct WebPolishTests {
                                                                    "Eve joined — let in by you"])
     }
 
+    /// Only the owner and mods get `join.request`; everyone else meets the
+    /// newcomer in `join.resolved.user` and gets the same line.
+    @Test func aMemberWhoNeverSawTheRequestStillGetsTheLine() throws {
+        let (client, _) = Self.client()
+        let frame = ##"{"t":"join.resolved","uid":"cleo","approved":true,"by":"ada","user":{"id":"cleo","name":"Cleo","color":"#12a594","invitedBy":"Ben (for Cleo)"}}"##
+        let message = try ServerMessage.decode(frame)
+        guard case let .joinResolved(uid, approved, by, user) = message else { Issue.record("join.resolved"); return }
+        #expect(uid == "cleo" && approved && by == "ada" && user?.name == "Cleo" && user?.invitedBy == "Ben (for Cleo)")
+        client.receiveForTesting(message)
+        #expect(client.notice == nil, "never a popup")
+        #expect(client.localNotes(in: "general").map(\.plain) == ["Cleo joined — invited by Ben"])
+        #expect(client.localNotes(in: "general").first?.kind == .joined(name: "Cleo", color: "#12a594", invitedBy: "Ben", letInBy: "Ada"))
+
+        // Nobody's invite: who let them in (the admin API: "the owner").
+        client.receiveForTesting(try ServerMessage.decode(##"{"t":"join.resolved","uid":"dee","approved":true,"by":"admin","user":{"id":"dee","name":"Dee","color":"#8d8d8d"}}"##))
+        #expect(client.localNotes(in: "general").last?.plain == "Dee joined — let in by the owner")
+        // Turned away: members were never told about them, so nothing at all.
+        client.receiveForTesting(try ServerMessage.decode(##"{"t":"join.resolved","uid":"eve","approved":false,"by":"ada"}"##))
+        #expect(client.notice == nil && client.localNotes.count == 2)
+        // An older server: no `user`, and a member never knew them: nothing either.
+        client.receiveForTesting(try ServerMessage.decode(##"{"t":"join.resolved","uid":"fay","approved":true,"by":"ada"}"##))
+        #expect(client.localNotes.count == 2)
+    }
+
+    /// The owner and mods keep what the waiting room told them (the link and
+    /// its label), and the newcomer isn't told about themselves: "You're in"
+    /// says hi.
+    @Test func theWaitingRoomsCopyWinsAndNeverAboutMe() throws {
+        let cleo = User(id: "cleo", name: "Cleo", color: "#12a594", role: .pending, invitedBy: "Ada (for Cleo)",
+                        invite: InviteInfo(by: "Ada", label: "for Cleo"))
+        let (client, _) = Self.client(pending: [cleo])
+        client.receiveForTesting(.joinResolved(uid: "cleo", approved: true, by: "ben",
+                                               user: User(id: "cleo", name: "Cleo", color: "#12a594", invitedBy: "Someone (for Cleo)")))
+        #expect(client.localNotes(in: "general").map(\.plain) == ["Cleo joined — invited by Ada"])
+        client.receiveForTesting(.joinResolved(uid: "sam", approved: true, by: "ada", user: User(id: "sam", name: "Sam", color: "#5b6cff")))
+        #expect(client.localNotes.count == 1, "not about me")
+    }
+
     @Test func turnedAwayIsJustAWordForOthers() {
         let cleo = User(id: "cleo", name: "Cleo", color: "#12a594", role: .pending)
         let dee = User(id: "dee", name: "Dee", color: "#12a594", role: .pending)

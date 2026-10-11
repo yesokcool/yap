@@ -1,8 +1,9 @@
 import SwiftUI
 import YapCore
 
-/// Account nudges above your nameplate, Win98-style (tooltip-yellow bars):
-/// an easy-to-guess PIN, and a sign-in on a new device.
+/// Account notes above your nameplate, Win98-style (tooltip-yellow bars):
+/// a sign-in on a new device, and "Choose a password" once per device
+/// (`ready.weakPin`: an old PIN, a reset's temporary password or a guessable one).
 struct AccountNotices98: View {
     @Environment(AppModel.self) private var model
     @State private var signingOut = false
@@ -22,30 +23,37 @@ struct AccountNotices98: View {
                     }
                 } dismiss: { client.signinAlert = nil }
             }
-            if client.weakPin, !model.weakPinDismissed {
+            if let nudge = model.passwordPrompt {
                 bar(icon: "key.fill") {
-                    Text("Your PIN is easy to guess for someone who knows you.")
+                    Text("\(Text(PasswordText.promptTitle).bold())\n\(PasswordText.prompt(nudge))")
                 } actions: {
-                    Button("Change it…") { model.changingPin = true }
-                        .buttonStyle(.win98Compact)
-                } dismiss: { model.weakPinDismissed = true }
+                    FlowLayout(spacing: 4) {
+                        Button(PasswordText.choose) { model.changingPassword = true }
+                            .buttonStyle(Win98ButtonStyle(isDefault: true, compact: true))
+                        Button(PasswordText.later) { model.passwordPromptsPutOff.insert(nudge.rawValue) }
+                            .buttonStyle(.win98Compact)
+                    }
+                }
             }
         }
         .signOutOthersPrompt(isPresented: $signingOut)
     }
 
+    /// `dismiss` adds a close box (the prompt has Later instead).
     private func bar<Message: View, Actions: View>(icon: String, @ViewBuilder message: () -> Message,
-                                                   @ViewBuilder actions: () -> Actions, dismiss: @escaping () -> Void) -> some View {
+                                                   @ViewBuilder actions: () -> Actions, dismiss: (() -> Void)? = nil) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .top, spacing: 6) {
                 Image(systemName: icon).font(.system(size: 11, weight: .bold))
                 message().font(Theme.chrome).fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 4)
-                Button(action: dismiss) {
-                    Image(systemName: "xmark").font(.system(size: 9, weight: .black))
+                if let dismiss {
+                    Button(action: dismiss) {
+                        Image(systemName: "xmark").font(.system(size: 9, weight: .black))
+                    }
+                    .buttonStyle(.win98Compact)
+                    .accessibilityLabel("Dismiss")
                 }
-                .buttonStyle(.win98Compact)
-                .accessibilityLabel("Dismiss")
             }
             actions().padding(.leading, 17)
         }

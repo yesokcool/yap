@@ -58,6 +58,24 @@ stick to those characters (SELF_HOSTING.md). The server accepts `?key=K` on any
 call. A server without a key is open (local dev only).
 Everything that reaches the Worker is capped per IP (HTTP 429).
 
+**Resetting the main link** (owner only, 2026-10-11). `invite.resetMain` →
+everyone connected gets `key { key }` (the new main key; save it as your
+link), the owner too, and `ready.key` carries it from then on; the mod log
+says "reset the main link". Old main links stop working for anyone who isn't
+signed in yet; **signed-in devices keep working**: a WebSocket upgrade with a
+wrong or old key is still let through, but that socket may only send
+`hello { token }` (a valid device token), and anything else, or a bad token,
+closes it with 4003 "wrong invite key". So a client that holds a device token
+connects even when `/api/check` (or a 401) says its key is wrong, and saves
+`ready.key`. HTTP calls other than the socket still need the current key (or
+a personal link's). Personal invite links (`yi_…`) keep working. The server
+keeps the main key itself once it has been reset (`YAP_KEY` is only the
+first one). Clients show the reset under Settings › Invite, for the owner
+only, behind a warning: **Reset main link?** "The old link stops working for
+anyone who hasn't joined yet. Everyone already signed in keeps working, and
+their apps get the new link by themselves. Personal invite links keep
+working." [**Reset link**] [Cancel]; then the new link with Copy.
+
 ## WebSocket framing
 
 - Every frame is UTF-8 JSON with a `"t"` (type) field. Max 384 KB.
@@ -71,8 +89,12 @@ Everything that reaches the Worker is capped per IP (HTTP 429).
 
 ## Identity
 
-**Accounts are a name + a 6-digit PIN** (or a password of 10–128 characters).
-Names are unique (case-insensitive).
+**Accounts are a name + a password** (8–128 characters). Names are unique
+(case-insensitive). Accounts made before 2026-10-11 may still have a 6-digit
+**PIN**: it keeps working for signing in until that person sets a password,
+and nothing new can be set as a PIN. The wire still says `pin` (`login.pin`,
+`account.pin`, `member.resetPin`, `bad_pin`, `weak_pin`) so older apps keep
+working; read it as "the password".
 Each signed-in device gets a **device token** (a long random secret) — store
 it and use it to reconnect. Internally an account has a `uid`; `ready.uid` is
 always your canonical one.
@@ -82,20 +104,36 @@ always your canonical one.
 | Form | When | Reply |
 |---|---|---|
 | `token` | normal reconnect | `ready` (or `pending`); `error bad_token` → token revoked: sign in again |
-| `login: { name, pin }` | new device / signed out | `ready`/`pending` **with `token`**; `bad_login`, `locked` (too many wrong PINs: 5 free tries, then waits that double up to 24 h), `no_pin` (the account never set a PIN: an owner or mod resets it) |
-| `signup: { name, pin, color }` | brand-new person | `pending { uid, token }` (waiting room); `name_taken` (suggest signing in), `bad_pin` |
+| `login: { name, pin }` | new device / signed out | `pin` = the password (or an old PIN). `ready`/`pending` **with `token`**; `bad_login`, `locked` (too many wrong tries: 5 free, then waits that double up to 24 h), `no_pin` (the account has no password: an owner or mod resets it) |
+| `signup: { name, pin, color }` | brand-new person | `pin` = a password. `pending { uid, token }` (waiting room); `name_taken` (suggest signing in), `bad_pin` (not 8–128 characters, e.g. a 6-digit PIN: "Use a password of at least 8 characters."), `weak_pin` |
+
+On `bad_login`, clients show "Wrong name or password. An old PIN works here
+too. Forgot it? The owner or a mod can reset it."; on `locked`, the server's
+message followed by "Forgot your password? The owner or a mod can reset it."
 
 The old uid-only `hello` (devices from before PINs) is gone: it's refused with
-`pin_required` ("ask the owner or a mod to reset your PIN"). An account with
-no PIN gets one through `member.resetPin`.
+`pin_required` ("ask the owner or a mod to reset your password"). An account
+with no password gets a temporary one through `member.resetPin`.
 
-- `account.pin { pin, current? }` sets/changes your PIN (`current` required
-  when changing) → `account { hasPin, token?, kind }` (`token` is never sent any
-  more: every signed-in device already has one; clients may ignore it). `pin` may also be a **password** (10–128 characters) — `kind: "password"`;
-  sign-in (`login.pin`) accepts either. **Weak PINs are refused** (`weak_pin`):
-  repeats, runs, patterns, common PINs, date-like ones (signup too).
-- `ready.weakPin` (the PIN you last signed in with is guessable: nudge to change
-  it) and `ready.secretKind` (`pin` | `password`).
+- `account.pin { pin, current? }` sets/changes your password (`current`, your
+  password or old PIN, required when changing) → `account { hasPin, token?,
+  kind: "password" }` (`token` is never sent any more; clients may ignore it).
+  The new one must be a password: 8–128 characters (`bad_pin` otherwise), and
+  **guessable ones are refused** (`weak_pin`, "That password is too easy to
+  guess."): very common passwords, your own name, one character repeated,
+  keyboard and number runs.
+- `ready.secretKind` (`pin` | `password`) says what you last signed in with;
+  `ready.weakPin` is true when that was an old PIN, a guessable password or a
+  temporary one from a reset, and `ready.weakReason` says which (`pin` |
+  `temporary` | `guessable`; absent from older servers: `pin` if `secretKind`
+  is `pin`, else `guessable`). Then show **once per device** a quiet prompt,
+  **Choose a password**, whose words follow the reason: pin "Yap uses passwords
+  now. Your PIN still works until you choose one.", temporary "You signed in
+  with a temporary password. Choose your own.", guessable "Your password is
+  easy to guess. Choose a stronger one.", with **Choose a password** and
+  **Later**. Later hides it on that device for that reason (a later reset asks
+  again), and Settings › Account keeps **Set a password**. Clients never trim
+  a password.
 - **Devices:** `account.devices` → `devices { devices: [{ id, client, label,
   createdAt, lastSeen, scope, current? }] }`; `account.revoke { id }` signs one
   other device out (its sockets close with 4001); `account.signoutOthers` signs
@@ -106,15 +144,25 @@ no PIN gets one through `member.resetPin`.
   different `client` while its label is still the default for the old one
   (an iPad app that used to say `ios`), the label follows. Devices can't be
   renamed.
-- **Sign-in alerts:** a name+PIN sign-in on a new device sends `signin.alert
+- **Sign-in alerts:** a name+password sign-in on a new device sends `signin.alert
   { device }` to your other devices (and a push). Clients offer "Sign out
   everywhere else".
 - `account.signout` revokes this device's token and closes the socket.
-- Owner/mod: `member.resetPin { uid }` → `pin.reset { uid, pin }` (a temporary
-  PIN to hand over). Admin API: `POST /api/admin/reset-pin?uid=`.
+- Owner/mod: `member.resetPin { uid }` → `pin.reset { uid, pin }`: `pin` is a
+  temporary **password** to hand over (three short words and two digits, like
+  `maple-river-stone-42`); signing in with it brings up the prompt above.
+  Admin API: `POST /api/admin/reset-pin?uid=` (the same).
 - **Waiting room:** a new account gets `pending` instead of `ready` and can't
-  do anything else. Members get `join.request`; **any member** answers with
-  `member.approve` / `member.deny`. Someone who came with a personal invite
+  do anything else ("Waiting for the owner or a mod to let you in."). Only the
+  **owner and mods** get `join.request` and `ready.pending`, and only they
+  answer with `member.approve` / `member.deny` (anyone else: `forbidden`). They
+  also get a push, "Cleo is waiting to join" (+ "invited by Ada"), unless their
+  pushes are off or it's their quiet hours. When someone is let in,
+  `join.resolved` carries `user: { id, name, color, invitedBy? }` to everyone
+  (members never saw the request), so every client can say "Cleo joined —
+  invited by Ada"; a turned-away one has no `user`. The newcomer's own
+  connection gets that `join.resolved` too, right after its `ready`: skip the
+  line when `uid` is your own (the newcomer is welcomed instead). Someone who came with a personal invite
   link carries `invitedBy` ("Ada (for Cleo)") and `invite: { by, label,
   usedBy }`: the link's maker, its label, and the names of the other accounts
   that signed up with the **same link** before (oldest first, ≤ 10; any role,
@@ -126,7 +174,7 @@ no PIN gets one through `member.resetPin`.
   reconnecting.
 - **Roles:** `User.role` is `owner | mod | member` in lists (`pending`/`banned`
   users aren't listed; a `user` event with those roles means "remove").
-  Owner + mods can `delete` anyone's message, `member.ban`, and reset PINs;
+  Owner + mods can `delete` anyone's message, `member.ban`, let people in, and reset passwords;
   only the owner sets mods (`member.role`). `owner.claim { key }` with the
   admin key makes you owner.
 - **Rate limits:** sends 10 burst / 1 per s (`error slow_down`), channel
@@ -152,7 +200,7 @@ no PIN gets one through `member.resetPin`.
 |---|---|---|
 | `hello` | `v: 1, client?` + `token` \| `login` \| `signup` | Must be first. See *Identity*. `client` is a short label (≤ 16 chars): `web`, `desktop`, `ios` (iPhone), `ipad`, `mac`. Any other value is fine too — it only names the device in *Your devices* ("Yap for iPad", "Chrome on Windows"…), and an unknown one is named from the User-Agent. |
 | `account.pin` / `account.signout` | `pin, current?` / — | See *Identity*. |
-| `member.resetPin` | `uid` | Owner/mod: temporary PIN comes back as `pin.reset`. |
+| `member.resetPin` | `uid` | Owner/mod: a temporary password comes back as `pin.reset`. |
 | `history` | `channelId, before?, beforeId?, limit?` | Newest page when `before` is omitted; older pages pass the oldest message's `ts` and `id`. `limit` ≤ 100 (default 50). A page also stops at ~512 KB of text, so it can hold fewer (`hasMore` stays true). |
 | `send` | `channelId, body, nonce?, gif?, image?, replyTo?` | Text channels only. ≤ 40,000 chars (encrypted Personal-space notes: ≤ 240,000); `replyTo` = a message id in the same channel (in your Personal space: any message you can read, which is *Save to Personal*) — see *Replies*; trailing whitespace trimmed. `body` may be empty when `gif` or `image` is set. `image` = `{id, width, height}` from `POST /api/image` (*HTTP* › Uploads: every upload needs your `sid` and `uploadToken`). `nonce` is echoed back to you only, so you can swap your optimistic copy. |
 | `delete` | `id, blobs?` | Own messages (owner/mods: anyone's). **Erased, not hidden:** its text, GIF, picture, reactions and earlier versions are wiped from the server; only an empty row stays so the id is never reused. `blobs` (your own Personal space only, ≤ 10): ids of the note's encrypted pictures to erase too. |
@@ -165,7 +213,7 @@ no PIN gets one through `member.resetPin`.
 | `modlog` | | → `modlog` (last 200: who did what to whom; never message text). |
 | `push.subscribe` / `push.unsubscribe` | `endpoint, keys {p256dh, auth}` / `endpoint` | Browser pushes (Web Push, `/sw.js`). The server encrypts per RFC 8291 and signs with VAPID (`VAPID_PRIVATE_JWK` secret; public key in `/api/config` as `push.publicKey`). Pushes follow your push mode (subscribing a new browser with it off turns on pings & mentions; sending the same subscription again leaves the mode alone) and go to ntfy and every browser you subscribed; 404/410 from a push service forgets that browser. |
 | `device.handoff` | | A one-time sign-in pass (15 min) → `device.handoff {token}`. Hello with it as `token`: it's spent and `ready` carries a new lasting token for that device. Used by Add to Home Screen (`/#key=&handoff=&name=`), since home-screen apps don't share Safari's storage, and by the native apps whenever they open the web app (Draw, Space, Watch…: `/#key=&place=&handoff=&name=`; in-app pages add `&embed=1`, which hides the web's own sidebar and header for that tab). A pass that arrives while the browser still has a token is kept and used if that token turns out to be signed out. Limited to 5 at once, then one per 20 s; a refusal comes back as `error {re: 'device.handoff'}`. |
-| `obs.create` / `obs.revoke` | | A listen-only device token for an OBS Browser Source (`/obs#key=&listen=&channel=[&only=Name][&overlay=0]`) → `obs.created {token}` / turn all of yours off → `obs.revoked {count}` (their sockets close). A listen-only session may only send `hello`, `voice.join/leave/state` (always muted) and `signal`; it shows to everyone with `client: "obs"` and never gets the main key. |
+| `obs.create` / `obs.revoke` | | A listen-only device token for an OBS Browser Source (`/obs#key=&listen=&channel=[&only=Name][&overlay=0]`) → `obs.created {token}` / turn all of yours off → `obs.revoked {count}` (their sockets close). A listen-only session may only send `hello`, `voice.join/leave/state` (always muted) and `signal`; it carries `client: "obs"` (apps don't list it in the channel or chime for it) and never gets the main key. |
 | `stats` | | Owner/mods: → `stats {chatBytes, mediaBytes, limitBytes}`. |
 | `edit` | `id, body` | Your own messages only (mods can delete but not edit). Earlier versions are kept in `message_edits` until the message is deleted. Empty body → `empty` unless the message has a GIF or a picture. |
 | `typing` | `channelId` | Send at most every ~3.5 s while the user types. Display for ~6 s. |
@@ -182,7 +230,7 @@ no PIN gets one through `member.resetPin`.
 | `watch.next` | `expect: videoId` | The video ended: play the next queued one (ignored unless `expect` is still what's playing, so many clients can report the end at once). |
 | `emoji.delete` | `id` | Anyone can. Soft delete. |
 | `emoji.rename` | `id, name` | Anyone can. Broadcast as `emoji`; old `<:oldname:id>` tokens still render. |
-| `member.approve` / `member.deny` | `uid` | Any member, for someone in the waiting room. |
+| `member.approve` / `member.deny` | `uid` | Owner/mods, for someone in the waiting room (others: `forbidden`). |
 | `member.ban` | `uid` | Owner/mod. Kicks every session; they can't come back. |
 | `member.role` | `uid, role: "mod" \| "member"` | Owner only. |
 | `owner.claim` | `key` | Becomes owner if `key` is the server's admin key. |
@@ -196,7 +244,7 @@ no PIN gets one through `member.resetPin`.
 | `personal.plain` / `personal.seal` | — / `notes: [{id, body}]` (≤ 50) | Sealing notes written before encryption was turned on: → `personal.plain { notes: [{id, body, gif?, image?}] }` (yours that aren't `e1:` yet, oldest first, ≤ 2,000); encrypt each (pictures re-uploaded via `/api/blob`), then hand back `e1:` bodies. The server swaps them in place (no "edited" mark), erases the plain text, its earlier versions and its plain picture, and tells your devices `edited { …, sealed: true }`. **One batch must fit one frame (384 KB)**: batch by size, not just count (the web sends ≤ 50 notes and ~300 KB per `personal.seal`). A note is sealed once its `edited { sealed: true }` arrives; a frame that's too big gets `error bad_frame` and seals nothing, so count what never came back as not sealed. |
 | `vault.set` | `wrap: {v, iter, salt, iv, ct} \| null` | Turn on / change the passcode of / reset your encrypted Personal space → `vault` to your connections. See *Encrypted Personal space*. |
 | `notify.settings` | `mode: "off" \| "pings" \| "all"` | Phone pushes via ntfy → `notify { mode, topic }`. `pings` = 📣 pings + @mentions; `all` = also every message while you're offline (≤ 1 per 20 s). |
-| `ping` | `text?` | 📣 Everyone online gets `ping`; everyone with pushes on gets one. 2 per 30 s per person. |
+| `ping` | `text?` | 📣 Everyone online gets `ping`; everyone with pushes on gets one. One a minute per person (`slow_down`, "You can ping again in a minute."). |
 | `draw.state` | — | → `draw.state { canvas, strokes, gallery }` (send when opening the board). |
 | `draw.gallery` | — | → `draw.gallery { gallery }`: just the saved drawings (newest first, ≤ 60; PNGs and animated GIFs at `/media/<media>`). New saves still arrive as `drawing`. |
 | `draw.seg` / `draw.stroke` | `sk, c, w, e, p, l?` | Live pieces of a stroke (relayed, not stored) / the finished stroke (stored). `sk` = your stroke id, `c` "#rrggbb", `w` width, `e` eraser, `p` flat `[x,y,…]` in board units (10000 × 6250). Optional `k`: `"poly"` = straight segments (lines, boxes), `"text"` = `text` (≤ 200 chars) drawn at `p[0],p[1]` (exactly 2 numbers), size from `w`. Optional `l` = layer 0–2 (absent = 0; see *Draw layers*). |
@@ -219,7 +267,7 @@ no PIN gets one through `member.resetPin`.
 
 | `t` | Fields | Notes |
 |---|---|---|
-| `ready` | `v, sid, uid, token?, needsPin, notify, channels, users, sessions, emojis, pending, build?, key?, links?, storageWarning?, uploadToken?, resumeKey?, vault?, weakPin?, secretKind?, sounds?, hangs?` | Full state snapshot. `uid` = your canonical id (adopt it if it differs: merged accounts). `users` = the members (≤ 500, most recently connected first); `sessions` = only the visible ones (see *Presence*); `emojis` = live custom emojis; `build` = `{ app, style }` of the web client now being served (see Updates). |
+| `ready` | `v, sid, uid, token?, needsPin, notify, channels, users, sessions, emojis, pending, build?, key?, links?, storageWarning?, uploadToken?, resumeKey?, vault?, weakPin?, weakReason?, secretKind?, sounds?, hangs?` | Full state snapshot. `uid` = your canonical id (adopt it if it differs: merged accounts). `users` = the members (≤ 500, most recently connected first); `sessions` = only the visible ones (see *Presence*); `emojis` = live custom emojis; `build` = `{ app, style }` of the web client now being served (see Updates). |
 | `build` | `build` | A new deploy started while you were connected: the web client now being served (see Updates). |
 | *(Personal space)* | | `ready.channels` includes **your** Personal space: `{id: "p_<your uid>", kind: "personal", name: "Personal space"}` (never anyone else's). `send`/`history`/`edit`/`delete`/`react` work in it for you only (others get `no_channel`/`no_message`, mods too); its messages, edits and reactions go only to your own connections; no typing, no pushes; a `replyTo` there is *Save to Personal*. Encrypted once you turn it on — see *Encrypted Personal space*. |
 | `history` | `channelId, messages (oldest first), hasMore` | Refused (`no_channel`) for archived channels. Messages carry `editedAt` once edited and `reply` when they answer another message. |
@@ -246,7 +294,7 @@ no PIN gets one through `member.resetPin`.
 | `emoji` / `emoji.deleted` | `emoji` / `id` | `emoji` = added or renamed (replace by id). |
 | `pending` | `message, uid, token?` | You're in the waiting room (instead of `ready`). Store `token` and `uid`. |
 | `account` / `pin.reset` | `hasPin, kind, token?` / `uid, pin` | See *Identity*. |
-| `join.request` / `join.resolved` | `user` / `uid, approved, by` | Someone's waiting / was let in or turned away. |
+| `join.request` / `join.resolved` | `user` / `uid, approved, by, user?` | Someone's waiting (owner/mods only) / was let in (with `user`, to everyone) or turned away. |
 | `view` | `sid, view` | A session switched views. |
 | `cursor` | `sid, view, a` | Another person's pointer (only sent to people on that view). |
 | `notify` | `mode, topic, quiet` | Your push settings; subscribe to `topic` in the ntfy app. Also in `ready.notify`. `quiet`: see *Extras* › Quiet hours. |
@@ -510,7 +558,8 @@ divider. Never a popup, never a badge for being away.
   first `ready`, rather than showing every channel unread since the beginning.
 - When someone is let in (`join.resolved` with `approved`), the web shows a
   quiet line in the first text channel — "Cleo joined — invited by Ada"
-  (from the waiting entry's `invite.by` / `invitedBy`) — for that session
+  (from `join.resolved.user`, or the waiting entry's `invite.by` /
+  `invitedBy`) — for that session
   only: nothing is stored, and it's never a popup.
 
 ### Save to Personal
@@ -986,6 +1035,18 @@ the apps in their own data folder (the last three). Contents, in this order:
    minute: `Ana: rtt 38 ms, lost 0.4 %, patched 0.1 %, 129 kbps in, 131 out`.
    At most 2,000 timeline lines (the oldest go first; the summary never does).
 
+**OBS links in a call** (2026-10-11). An OBS link (`client: "obs"`) listens
+only while its account is in that voice channel, or for **5 minutes** after
+it left: the server refuses its `voice.join` otherwise (`not_in_voice`,
+"Waiting for <name> to join <channel>.") and, when the 5 minutes pass, takes
+it out (`voice { sid, channelId: null }`). The OBS page watches `voice` events
+and joins again as soon as its account is back in that channel. What clients
+show: while the account is in the call, nothing (the OBS link is invisible,
+no chimes); while only the OBS link is there, the account's name in that
+channel **greyed out** (an in-between state, not a call member: no volume, no
+ring), with "<name>'s OBS is still listening". The OBS page itself says
+"Paused: waiting for <name> to join <channel>." while it can't listen.
+
 ### Keeping calls across reconnects
 
 Audio goes peer to peer, so a dropped WebSocket doesn't have to cut a call:
@@ -1138,7 +1199,7 @@ tools read it as `tools/instance.mjs` says). Unset key = admin API off.
 | `GET /api/admin/media/<id>` | One stored file's bytes, `Cache-Control: no-store` (backups use this, so nothing a post's deletion should erase lingers in a cache). |
 | `POST /api/admin/emoji?name=N` | Add an emoji without a live session (bulk imports); body = image bytes. Uploader shows as `admin`. |
 | `POST /api/admin/role?uid=&role=owner\|mod\|member\|banned` | Set a role (also lets someone out of the waiting room). |
-| `POST /api/admin/reset-pin?uid=` | A temporary PIN for someone who forgot theirs (or never set one) → `{ ok, name, pin }`. |
+| `POST /api/admin/reset-pin?uid=` | A temporary password for someone who forgot theirs (or never set one) → `{ ok, name, pin }`. |
 | `POST /api/admin/channels?names=a,b[&kind=voice]` | Add channels by name (names that exist are skipped); `?archive=a,b` archives instead (messages kept), `?unarchive=a,b` brings archived ones back with their history. Clients get the usual `channel` / `channel.archived`. |
 | `POST /api/admin/merge-users?from=<dup uid>&into=<real uid>` | Merge a duplicate account: `from` reads as `into` everywhere (messages, emojis, deletes) and leaves the member list; its devices adopt `into` on reconnect. Nothing is rewritten. Everyone is bounced to reconnect. |
 | `POST /api/admin/unmerge-user?alias=<uid>` | Undo a merge. |
@@ -1155,7 +1216,7 @@ deleted post's picture leaves the backups once no kept snapshot shows it.
 
 **Disaster recovery** (Cloudflare account gone, database lost beyond the 30-day
 window): deploy Yap to the new place with the **same `PIN_PEPPER`** (keep a copy
-somewhere safe; without it nobody's PIN works) and the same `YAP_KEY`, then
+somewhere safe; without it nobody's password works) and the same `YAP_KEY`, then
 `node tools/restore.mjs backups/yap-<date>.json.gz --to https://<new server>`.
 Files go back first (only those the snapshot refers to, plus sealed pictures,
 whose ids are inside encrypted notes), then every table, then messages. A

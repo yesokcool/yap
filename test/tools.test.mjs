@@ -148,6 +148,12 @@ await test('restore: the files the backup uses, and sealed pictures; nothing els
   assert.deepEqual(server.phases, ['check', 'begin', 'messages', 'finish']);
 });
 
+await test('emoji data: the iPhone/Mac app bundles the same file the web serves', async () => {
+  const web = fs.readFileSync(path.join(ROOT, 'web/emoji-data.json'));
+  const apple = fs.readFileSync(path.join(ROOT, 'apple/YapKit/Sources/YapCore/Resources/emoji-data.json'));
+  assert.ok(web.equals(apple), 'run node tools/build-emoji-data.mjs: it writes both');
+});
+
 fake.close();
 fs.rmSync(tmp, { recursive: true, force: true });
 for (const [mark, name, err] of results) {

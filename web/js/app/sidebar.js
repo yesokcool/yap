@@ -4,7 +4,7 @@
 import { settings, api } from '../settings.js';
 import { icon } from '../icons.js';
 import { esc } from '../format.js';
-import { $, conn, state } from './state.js';
+import { $, conn, isMod, state } from './state.js';
 import { avatar, hangWhen, holdFocus } from './ui.js';
 import { VIEWS, watchParty } from './places.js';
 import { voiceMember } from './voice-ui.js';
@@ -52,7 +52,8 @@ export function renderChannels() {
   $('voice-channels').innerHTML = channels
     .filter((c) => c.kind === 'voice')
     .map((c) => {
-      const members = [...state.sessions.values()].filter((s) => s.voice?.channelId === c.id);
+      // An OBS link listens without showing up (the maintainer: OBS can record anything anyway).
+      const members = [...state.sessions.values()].filter((s) => s.voice?.channelId === c.id && s.client !== 'obs');
       const joined = state.voiceChannel === c.id;
       return `
         <li class="channel-row">
@@ -144,21 +145,22 @@ function renderMinecraft(s) {
     </button>`;
 }
 
+/** Who's waiting to be let in: only the owner and mods let people in, so only they see it. */
 export function renderRequests() {
   const el = $('requests');
-  const waiting = [...state.waiting.values()];
+  const waiting = isMod() ? [...state.waiting.values()] : [];
   const badge = $('waiting-badge');
   badge.hidden = !waiting.length || !state.sid;
   badge.textContent = String(waiting.length);
   el.hidden = !waiting.length || !state.sid;
   // One or two get their own bar; more collapse into one so the chat stays visible.
   el.innerHTML = waiting.length > 2
-    ? `<div class="request"><span><b>${waiting.length} people</b> want to join</span><span class="spacer"></span>
+    ? `<div class="request"><span><b>${waiting.length} people</b> are waiting to join</span><span class="spacer"></span>
         <button class="btn small primary" data-action="show-members">Review</button></div>`
     : waiting
       .map((u) => `
         <div class="request ${u.invite?.usedBy?.length ? 'warn' : ''}">
-          ${avatar(u, 'sm')}<span class="request-text"><span><b>${esc(u.name)}</b> wants to join${u.invitedBy ? ` <small class="muted">· invited by ${esc(u.invitedBy)}</small>` : ''}</span>${inviteWarning(u)}</span>
+          ${avatar(u, 'sm')}<span class="request-text"><span><b>${esc(u.name)}</b> is waiting to join${u.invitedBy ? ` <small class="muted">· invited by ${esc(u.invitedBy)}</small>` : ''}</span>${inviteWarning(u)}</span>
           <span class="spacer"></span>
           <span class="request-actions">
             <button class="btn small primary" data-action="approve" data-uid="${esc(u.id)}">Let in</button>

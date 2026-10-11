@@ -50,6 +50,18 @@ public final class YapClient {
         case failed(String)
     }
 
+    /// Why "Choose a password" comes up (`ready.weakPin`), which picks its
+    /// words; the raw values are `ready.weakReason`'s.
+    public enum PasswordNudge: String, Sendable {
+        /// Still on a 6-digit PIN from before passwords.
+        case pin
+        /// Signed in with the temporary password an owner/mod reset handed out.
+        case temporary
+        /// A password the server now finds easy to guess.
+        case guessable
+    }
+
+    /// A reset's temporary password (`pin.reset`; the wire keeps "pin").
     public struct PinReset: Identifiable, Equatable, Sendable {
         public let id = UUID()
         public var name: String
@@ -123,9 +135,13 @@ public final class YapClient {
     public var createdInvite: CreatedInvite?
     /// The moderation log, after `refreshModLog`.
     public internal(set) var modLog: [ModLogEntry]?
-    /// My PIN is easy to guess (`ready.weakPin`): show a gentle nudge.
+    /// I signed in with an old PIN, a guessable password or a temporary
+    /// one (`ready.weakPin`): ask once for a password (`passwordNudge`).
     public internal(set) var weakPin = false
-    /// "pin" or "password" (`ready.secretKind`).
+    /// Why `weakPin` (`ready.weakReason`: "pin", "temporary" or "guessable");
+    /// nil from servers from before it.
+    public internal(set) var weakReason: String?
+    /// What I last signed in with: "pin" or "password" (`ready.secretKind`).
     public internal(set) var secretKind: String?
     /// The latest search: what was asked, where, and the results (newest first).
     public internal(set) var search: SearchResults?

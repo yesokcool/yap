@@ -58,7 +58,7 @@ const LOG_WORDS = {
     if (e.detail === 'member' && e.actor !== 'admin') return `made ${who} a member again (no longer a mod)`;
     return `made ${who} ${ROLE_WORDS[e.detail] ?? e.detail ?? 'a member'}`;
   },
-  'member.resetPin': (e) => `reset ${nameIn(e.target)}'s PIN`,
+  'member.resetPin': (e) => `reset ${nameIn(e.target)}'s password`,
   'member.merge': (e) => `merged a duplicate account into ${nameIn(e.target)}'s`,
   'member.unmerge': () => 'split a merged account back out',
   'owner.claim': () => 'became the owner',

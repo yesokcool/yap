@@ -199,8 +199,9 @@ public struct Session: Codable, Sendable, Hashable, Identifiable {
 
     public var id: String { sid }
 
-    /// A listen-only OBS link (`client: "obs"`): shown in voice as "📺 Name's
-    /// OBS", never counts as that person being online.
+    /// A listen-only OBS link (`client: "obs"`): the call still connects to
+    /// it, but it never shows in voice (no row, no chimes, not counted) and
+    /// never counts as that person being online.
     public var isListener: Bool { client == "obs" }
 
     public init(sid: String, uid: String, client: String = "", voice: VoiceState? = nil, view: String? = nil, watching: Bool = false) {
@@ -655,11 +656,21 @@ public struct Device: Codable, Sendable, Hashable, Identifiable {
     public var isListener: Bool { scope == "listen" }
 }
 
-/// A sign-in secret: a 6-digit PIN or a password of 10–128 characters.
+/// A sign-in secret (PROTOCOL.md › Identity): a password of 8–128
+/// characters. Accounts from before passwords may still sign in with their
+/// old PIN, so signing in takes anything up to 128 characters and the
+/// server judges it; only a new password has a shape to check here (the
+/// server also refuses guessable ones, `weak_pin`).
 public enum Secret {
-    public static func isPIN(_ s: String) -> Bool { s.count == 6 && s.allSatisfy { $0.isASCII && $0.isNumber } }
-    public static func isPassword(_ s: String) -> Bool { (10...128).contains(s.count) }
-    public static func isValid(_ s: String) -> Bool { isPIN(s) || isPassword(s) }
+    /// The shortest new password the server takes ("8 characters or more.").
+    public static let minimum = 8
+    public static let maximum = 128
+
+    /// Long enough to send as a new password.
+    public static func isPassword(_ s: String) -> Bool { (minimum...maximum).contains(s.count) }
+
+    /// Something to sign in with: a password, or an old PIN.
+    public static func canSignIn(_ s: String) -> Bool { (1...maximum).contains(s.count) }
 }
 
 /// One line of the moderation log: who did what to whom (never message text).
@@ -699,7 +710,7 @@ public struct ModLogEntry: Codable, Sendable, Hashable, Identifiable {
             if detail == "member" && actor != "admin" { return "made \(who) a member again (no longer a mod)" }
             let role = ["mod": "a mod", "member": "a member", "owner": "the owner"][detail ?? ""] ?? detail ?? "a member"
             return "made \(who) \(role)"
-        case "member.resetPin": return "reset \(who)'s PIN"
+        case "member.resetPin": return "reset \(who)'s password"
         case "member.merge": return "merged a duplicate account into \(who)'s"
         case "member.unmerge": return "split a merged account back out"
         case "owner.claim": return "became the owner"

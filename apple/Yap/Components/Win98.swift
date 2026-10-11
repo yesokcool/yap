@@ -595,14 +595,14 @@ struct ToolbarMenuButton<Items: View>: View {
 }
 
 /// A date or time in a sunken white field (Win98's date picker look); taps
-/// open the system's picker (`SkinnedDatePicker`).
+/// open the system's picker (`DrawnDatePicker`).
 struct DateField98: View {
     var selection: Binding<Date>
     var range: ClosedRange<Date>? = nil
     var components: DatePickerComponents
 
     var body: some View {
-        SkinnedDatePicker(selection: selection, range: range, components: components) { text in
+        DrawnDatePicker(selection: selection, range: range, components: components) { text in
             Text(text)
                 .font(Theme.chat)
                 .foregroundStyle(Theme.text)

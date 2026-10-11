@@ -8,8 +8,11 @@
 // sealed, notes and a sealed picture read on the other side, both ways; a
 // deleted picture's blob erased), a big picture (shrunk and uploaded with the
 // per-connection upload token), Places links and personal invites, accounts
-// (PIN + device token), then voice in `lounge` with audio flowing in both
-// directions, in both join orders.
+// (password + device token; an old PIN account signing in, asked once for a
+// password, choosing one), the waiting room (only the owner and mods hear
+// about newcomers), then voice in `lounge` with audio flowing in both
+// directions, in both join orders, and an OBS link listening to native
+// without showing up (no chimes).
 //
 //   YAP_URL=http://localhost:8788 YAP_KEY=testkey YAP_ADMIN_KEY=testadmin \
 //     YAP_BIN=desktop/target/release/yap node desktop/tests/interop.mjs
@@ -17,7 +20,8 @@
 // Server (from the repo root; the test config with its stand-in board):
 //   npx wrangler dev -c test/wrangler.test.jsonc -c test/fixtures/board/wrangler.toml --port 8788 \
 //     --var YAP_KEY:testkey --var ADMIN_KEY:testadmin --var KLIPY_KEY:test --var PIN_PEPPER:testpepper \
-//     --var TEST_HANGS:1 --persist-to <scratch>
+//     --var TEST_HANGS:1 --var TEST_PINS:1 --persist-to <scratch>
+// (TEST_PINS lets the admin API give an account an old 6-digit PIN, for the old-PIN check.)
 // A local KLIPY mock (tests/klipy-mock.mjs) is started on YAP_KLIPY_PORT (8795).
 //
 // YAP_IMPAIR=wifi|cell|loss5|loss2 puts the voice calls behind an impairment
@@ -158,7 +162,8 @@ function mkProxy(host, port) {
   return new Promise((res) => sock.bind(0, '0.0.0.0', () => res(sock.address().port)));
 }
 
-const TEST_PIN = '582039';
+// The made-up test password every suite uses (PROTOCOL.md › Identity: 8+ characters, not guessable).
+const TEST_PASSWORD = 'correct-horse-582039';
 const ADMIN = process.env.YAP_ADMIN_KEY ?? 'testadmin';
 
 /**
@@ -232,7 +237,7 @@ function webMedia({ synthMic }) {
   };
 }
 
-/** Get a web test user online like a person would: set a PIN or sign in; admin lets newcomers in. */
+/** Get a web test user online like a person would: sign in or up; admin lets newcomers in. */
 async function settle(page, name) {
   let triedLogin = false;
   for (let i = 0; i < 8; i++) {
@@ -246,13 +251,14 @@ async function settle(page, name) {
       // Sign in first; if there's no such account yet, sign up.
       await page.click(`#welcome-form label:has(input[value=${triedLogin ? 'signup' : 'login'}])`);
       await page.fill('#welcome-form input[name=name]', name);
-      await page.fill('#welcome-form input[name=pin]', TEST_PIN);
+      await page.fill('#welcome-form input[name=pin]', TEST_PASSWORD);
       await page.click('#welcome-form button[type=submit]');
       triedLogin = true;
       await page.waitForFunction(() => !document.querySelector('#welcome-dialog')?.open || document.querySelector('#welcome-error:not([hidden])'), null, { timeout: 10000 });
     } else if (s === 'pin') {
-      await page.fill('#pin-form input[name=pin]', TEST_PIN);
-      await page.fill('#pin-form input[name=again]', TEST_PIN);
+      await page.fill('#pin-form input[name=pin]', TEST_PASSWORD);
+      // (Older pages asked for it twice.)
+      if (await page.locator('#pin-form input[name=again]').count()) await page.fill('#pin-form input[name=again]', TEST_PASSWORD);
       await page.click('#pin-form button[type=submit]');
       await page.waitForFunction(() => !document.querySelector('#pin-dialog')?.open);
     } else if (s === 'waiting') {
@@ -260,15 +266,15 @@ async function settle(page, name) {
       await admit(uid);
       await page.waitForFunction(() => yap.state.status === 'online', null, { timeout: 10000 });
     } else if (await page.evaluate(() => !document.querySelector('dialog[open]'))) {
-      await page.waitForTimeout(700); // a "set your PIN" prompt may still be on its way
+      await page.waitForTimeout(700); // a "choose a password" prompt may still be on its way
       if (await page.evaluate(() => !document.querySelector('dialog[open]'))) return;
     }
   }
   throw new Error(`${name} never got online`);
 }
 
-async function admit(uid) {
-  await fetch(`${BASE}/api/admin/role?uid=${uid}&role=member`, { method: 'POST', headers: { Authorization: `Bearer ${ADMIN}`, 'X-Yap-Key': KEY } });
+async function admit(uid, role = 'member') {
+  await fetch(`${BASE}/api/admin/role?uid=${uid}&role=${role}`, { method: 'POST', headers: { Authorization: `Bearer ${ADMIN}`, 'X-Yap-Key': KEY } });
 }
 
 async function webUser(name, uid, { synthMic = process.env.YAP_WEB_MIC === 'synth', inBrowser = browser } = {}) {
@@ -307,9 +313,9 @@ async function webUser(name, uid, { synthMic = process.env.YAP_WEB_MIC === 'synt
 }
 
 /** Start `yap --headless`; resolves to { done, lines } where done resolves with the SUMMARY. */
-/** A real account: sign in with the test PIN, or sign up (then the doorman lets it in). */
+/** A real account: sign in with the test password, or sign up (then the doorman lets it in). */
 function native(name, _unused, extra, env = {}) {
-  const args = ['--headless', '--server', BASE, '--name', name, '--pin', TEST_PIN, '--input-wav', nativeWav, '--bitrate', String(BITRATE), ...extra];
+  const args = ['--headless', '--server', BASE, '--name', name, '--password', TEST_PASSWORD, '--input-wav', nativeWav, '--bitrate', String(BITRATE), ...extra];
   if (KEY) args.push('--key', KEY);
   const child = spawn(BIN, args, { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...env } });
   const lines = [];
@@ -388,15 +394,18 @@ async function test(name, fn) {
   }
 }
 
-// The server has a waiting room: newcomers wait until a member lets them in.
-// A native "doorman" (a member — or the owner on a fresh server) admits
-// everyone for the length of the test.
-const doorman = native(process.env.YAP_DOORMAN_NAME ?? 'Doorman', null, ['--approve-all', '--duration', '400']);
-// On a fresh server the doorman's signup makes it the owner; otherwise the admin API lets it in.
+// The server has a waiting room: newcomers wait until the owner or a mod lets
+// them in. A native "doorman" (the owner on a fresh server, else made a mod
+// through the admin API) admits everyone for the length of the test.
+// (Killed at the end; its --duration only has to outlast the whole suite, ~7 minutes now.)
+const doorman = native(process.env.YAP_DOORMAN_NAME ?? 'Doorman', null, ['--approve-all', '--duration', '900']);
 await doorman.waitFor(/ready, sid|PENDING uid/, 15000);
 const pendingUid = doorman.lines.map((l) => l.match(/PENDING uid (\S+)/)?.[1]).find(Boolean);
-if (pendingUid) await admit(pendingUid);
-await doorman.waitFor(/ready, sid/, 15000);
+if (pendingUid) await admit(pendingUid, 'mod');
+await doorman.waitFor(/ACCOUNT uid=/, 15000);
+// A doorman left over as a plain member (an older run): only the owner and mods hear about newcomers.
+const doormanAccount = doorman.lines.map((l) => l.match(/ACCOUNT uid=(\S+) .* role=(\S+)/)).find(Boolean);
+if (doormanAccount && !['owner', 'mod'].includes(doormanAccount[2])) await admit(doormanAccount[1], 'mod');
 
 // KLIPY mock (KLIPY-style https media URLs, so the server's allowlist accepts the send).
 const KLIPY_PORT = Number(process.env.YAP_KLIPY_PORT ?? 8795);
@@ -839,14 +848,14 @@ await test('picture: native compresses a 3000×2000 PNG to 1600 px, uploads it (
   evidence.picture = { natural, noUt: res.status };
 });
 
-await test('places + invites: native adds a link (web sidebar shows it); a newcomer joins with a personal invite, the waiting room says who invited them, and they keep the main key', async () => {
+await test('places + invites: native adds a link (web sidebar shows it); a newcomer joins with a personal invite, the waiting room says who invited them, the inviter (a member, who never saw the request) says "joined — invited by", and they keep the main key', async () => {
   const n = native(nativeName, null, ['--add-link', `Docs${RUN}=https://example.com/${RUN}`, '--make-invite', `for New${RUN}`, '--duration', '25']);
   await n.waitFor(new RegExp(`LINKS .*Docs${RUN}`), 10000);
   await web.waitForSelector(`#links a:has-text("Docs${RUN}")`, { timeout: 8000 });
   await n.waitFor(/INVITE /, 10000);
   const link = n.lines.map((l) => l.match(/INVITE .* (\S+#key=\S+)$/)?.[1]).find(Boolean);
   assert.ok(link && /#key=yi_/.test(link), 'personal invite link');
-  const args = ['--headless', '--server', link, '--name', `New${RUN}`, '--pin', TEST_PIN, '--signup', '--duration', '6'];
+  const args = ['--headless', '--server', link, '--name', `New${RUN}`, '--password', TEST_PASSWORD, '--signup', '--duration', '6'];
   const out = await new Promise((resolve) => {
     const c = spawn(BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let o = '';
@@ -857,9 +866,12 @@ await test('places + invites: native adds a link (web sidebar shows it); a newco
   assert.match(out, /ready, sid/, 'newcomer got in (the doorman let them in)');
   assert.match(out, /keeping the server's main invite key/, 'newcomer adopted the main key');
   await doorman.waitFor(new RegExp(`join request from New${RUN} \\(\\S+\\) invited by ${nativeName} \\(for New${RUN}\\)`), 5000);
+  // The inviter is a member: no join request, but join.resolved.user says who joined and whose link.
+  await n.waitFor(new RegExp(`JOINED New${RUN} joined — invited by ${nativeName}$`), 5000);
+  assert.ok(!n.lines.some((l) => /join request/.test(l)), 'the member heard no join request');
   // The same link again: the join request says who else came in with it (invite.usedBy).
   const again = await new Promise((resolve) => {
-    const c = spawn(BIN, ['--headless', '--server', link, '--name', `Neu${RUN}`, '--pin', TEST_PIN, '--signup', '--duration', '6'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const c = spawn(BIN, ['--headless', '--server', link, '--name', `Neu${RUN}`, '--password', TEST_PASSWORD, '--signup', '--duration', '6'], { stdio: ['ignore', 'pipe', 'pipe'] });
     let o = '';
     c.stdout.on('data', (d) => (o += d));
     c.stderr.on('data', (d) => (o += d));
@@ -868,26 +880,76 @@ await test('places + invites: native adds a link (web sidebar shows it); a newco
   assert.match(again, /ready, sid/, 'the second newcomer got in too');
   await doorman.waitFor(new RegExp(`join request from Neu${RUN} \\(\\S+\\) invited by ${nativeName} \\(for New${RUN}\\) · link also used by New${RUN}`), 5000);
   await n.done;
-  evidence.invites = { link: link.replace(/key=(yi_.{4}).*/, 'key=$1…'), joined: true, usedBy: doorman.lines.filter((l) => l.includes(`Neu${RUN}`) && /also used by/.test(l)) };
+  evidence.invites = { link: link.replace(/key=(yi_.{4}).*/, 'key=$1…'), joined: true, usedBy: doorman.lines.filter((l) => l.includes(`Neu${RUN}`) && /also used by/.test(l)), inviterSaw: n.lines.filter((l) => /JOINED/.test(l)).map((l) => l.replace(/^\[\+\s*[\d.]+s\]\s*/, '')) };
 });
 
-await test('native account: sign in on a "new device" with name + PIN, then reconnect with the token', async () => {
-  const args = ['--headless', '--server', BASE, '--name', `Native${RUN}`, '--pin', TEST_PIN, '--duration', '3'];
-  const run = (a) => new Promise((resolve) => {
-    const c = spawn(BIN, KEY ? [...a, '--key', KEY] : a, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '';
-    c.stdout.on('data', (d) => (out += d));
-    c.on('exit', () => resolve(out));
-  });
-  const out1 = await run(args);
+/** Run `yap --headless …` to the end; resolves to everything it printed. */
+const runNative = (a) => new Promise((resolve) => {
+  const c = spawn(BIN, KEY ? [...a, '--key', KEY] : a, { stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  c.stdout.on('data', (d) => (out += d));
+  c.stderr.on('data', (d) => (out += d));
+  c.on('exit', () => resolve(out));
+});
+
+await test('native account: sign in on a "new device" with name + password, then reconnect with the token; a wrong password is turned away', async () => {
+  const out1 = await runNative(['--headless', '--server', BASE, '--name', `Native${RUN}`, '--password', TEST_PASSWORD, '--duration', '3']);
   const token = out1.match(/TOKEN (\S+)/)?.[1];
   assert.ok(token, 'login issued a device token');
   assert.match(out1, /ready, sid/);
-  const out2 = await run(['--headless', '--server', BASE, '--token', token, '--duration', '2']);
+  assert.match(out1, /ACCOUNT uid=\S+ secret=password weak=false prompt=none role=member/, 'a password account: no "Choose a password" prompt');
+  const out2 = await runNative(['--headless', '--server', BASE, '--token', token, '--duration', '2']);
   assert.match(out2, /ready, sid/, 'token reconnect');
-  const out3 = await run(['--headless', '--server', BASE, '--name', `Native${RUN}`, '--pin', '000000', '--duration', '2']);
-  assert.match(out3, /bad_login/, 'wrong PIN rejected');
-  evidence.accounts = { token: `${token.slice(0, 6)}…`, wrongPin: out3.match(/status SignIn (.*)/)?.[1] };
+  const out3 = await runNative(['--headless', '--server', BASE, '--name', `Native${RUN}`, '--password', 'wrong-horse-000000', '--duration', '2']);
+  assert.match(out3, /bad_login/, 'wrong password rejected');
+  evidence.accounts = { token: `${token.slice(0, 6)}…`, account: out1.match(/ACCOUNT .*/)?.[0].replace(/uid=\S+ /, ''), wrongPassword: out3.match(/status SignIn (.*)/)?.[1] };
+});
+
+await test('an old PIN account (made with the test server switch) signs in with its PIN and is asked once for a password; it chooses one with the PIN as the current, then the password signs in and the PIN no longer does; after a reset the temporary password signs in and asks again', async () => {
+  const name = `Old${RUN}`;
+  const made = await runNative(['--headless', '--server', BASE, '--name', name, '--password', TEST_PASSWORD, '--signup', '--duration', '3']);
+  const uid = made.match(/ACCOUNT uid=(\S+)/)?.[1];
+  assert.ok(uid, `the account was made and let in: ${made.match(/status .*/g)?.join(' | ')}`);
+  const admin = (route) => fetch(`${BASE}/api/admin/${route}`, { method: 'POST', headers: { Authorization: `Bearer ${ADMIN}`, 'X-Yap-Key': KEY } });
+  const set = await admin(`test-pin?uid=${uid}&pin=582039`);
+  assert.equal(set.status, 200, 'the server makes it an old PIN account (start it with --var TEST_PINS:1)');
+  // Its PIN still signs in; the "Choose a password" prompt would show (an old PIN), and it chooses one.
+  const onPin = await runNative(['--headless', '--server', BASE, '--name', name, '--password', '582039', '--set-password', TEST_PASSWORD, '--duration', '3']);
+  assert.match(onPin, /ACCOUNT uid=\S+ secret=pin weak=true prompt=Pin /, 'signed in with the PIN, asked for a password');
+  assert.match(onPin, /PASSWORD saved/, 'the PIN was taken as the current one');
+  const onPassword = await runNative(['--headless', '--server', BASE, '--name', name, '--password', TEST_PASSWORD, '--duration', '2']);
+  assert.match(onPassword, /ACCOUNT uid=\S+ secret=password weak=false prompt=none /, 'the new password signs in, nothing asked');
+  const oldPin = await runNative(['--headless', '--server', BASE, '--name', name, '--password', '582039', '--duration', '2']);
+  assert.match(oldPin, /bad_login/, 'the old PIN no longer works');
+  // An owner/mod reset (the admin API's twin): the temporary password signs in and asks again.
+  const reset = await (await admin(`reset-pin?uid=${uid}`)).json();
+  assert.ok(reset.ok && typeof reset.pin === 'string' && reset.pin.length >= 8, `a temporary password: ${JSON.stringify({ ...reset, pin: reset.pin ? '…' : reset.pin })}`);
+  const onTemp = await runNative(['--headless', '--server', BASE, '--name', name, '--password', reset.pin, '--set-password', `${TEST_PASSWORD}-2`, '--duration', '3']);
+  assert.match(onTemp, /ACCOUNT uid=\S+ secret=password weak=true prompt=Temporary /, `signed in with the temporary password (${reset.pin.replace(/[a-z]/g, 'x')}), asked to choose their own`);
+  assert.match(onTemp, /PASSWORD saved/);
+  evidence.oldPin = {
+    pin: onPin.match(/ACCOUNT .*/)?.[0].replace(/uid=\S+ /, ''),
+    password: onPassword.match(/ACCOUNT .*/)?.[0].replace(/uid=\S+ /, ''),
+    pinAfter: oldPin.match(/Error \{ code: "(\w+)"/)?.[1],
+    temporary: onTemp.match(/ACCOUNT .*/)?.[0].replace(/uid=\S+ /, ''),
+  };
+});
+
+await test("waiting room: only the owner and mods hear about a newcomer (a member's app gets no join request, only who joined); the doorman (a mod or the owner) lets them in", async () => {
+  const member = native(nativeName, null, ['--duration', '12']);
+  await member.waitFor(/ACCOUNT uid=\S+ .* role=member/, 10000);
+  const out = await runNative(['--headless', '--server', BASE, '--name', `Wait${RUN}`, '--password', TEST_PASSWORD, '--signup', '--duration', '4']);
+  assert.match(out, /PENDING uid/, 'the newcomer waited');
+  assert.match(out, /ready, sid/, 'and was let in');
+  assert.match(out, /JOINED we're in/, `the newcomer's "You're in"`);
+  assert.doesNotMatch(out, new RegExp(`JOINED Wait${RUN} joined`), 'and no "joined" line about itself');
+  await doorman.waitFor(new RegExp(`join request from Wait${RUN} `), 5000);
+  // The member meets them in the first channel (join.resolved.user): "joined — let in by" the doorman.
+  await member.waitFor(new RegExp(`JOINED Wait${RUN} joined — let in by `), 5000);
+  member.child.kill();
+  await member.done;
+  assert.ok(!member.lines.some((l) => /join request/.test(l)), `the member heard nothing: ${member.lines.filter((l) => /join request/.test(l)).join(' | ')}`);
+  evidence.waitingRoom = { doorman: doorman.lines.find((l) => l.includes(`join request from Wait${RUN}`))?.replace(/\(\S+\)/, '(…)'), memberJoinRequests: 0, memberSaw: member.lines.find((l) => l.includes(`JOINED Wait${RUN}`))?.replace(/^\[\+\s*[\d.]+s\]\s*/, '') };
 });
 
 // ── Voice ───────────────────────────────────────────────────────────────
@@ -985,6 +1047,48 @@ async function voiceScenario(label, nativeFirst) {
 
 await test('voice: native joins first, web offers, native answers; audio both ways', () => voiceScenario('nativeFirst', true));
 await test('voice: web joins first, native offers, web answers; audio both ways', () => voiceScenario('webFirst', false));
+
+// An OBS link (the web's /obs page, listen-only) listens without showing up:
+// native still connects to it and sends it audio, but no join or leave chime
+// (they're logged as CHIME lines whether or not sounds are on); the call
+// report still names it.
+await test("OBS link: native connects to it and it hears native, with no join or leave chime; the call report names it", async () => {
+  const reportFile = path.join(OUT, 'call-report-obs.txt');
+  const n = native(`Obs${RUN}`, null, ['--join-voice', 'lounge', '--duration', '24', '--call-report', reportFile]);
+  await n.waitFor(/voice joined lounge/);
+  await web.evaluate(() => { yap.state.obsToken = null; yap.ui.send({ t: 'obs.create' }); });
+  const token = await web.waitForFunction(() => yap.state.obsToken, null, { timeout: 8000 }).then((h) => h.jsonValue());
+  const obs = await web.context().newPage();
+  try {
+    await obs.goto(`${BASE}/obs#${new URLSearchParams({ key: KEY, listen: token, channel: 'lounge' })}`);
+    await obs.click('#start');
+    await obs.waitForFunction(() => yapObs.state.inCall && [...yapObs.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'), null, { timeout: 20000 });
+    const obsSid = await obs.evaluate(() => yapObs.state.sid);
+    await n.waitFor(new RegExp(`peer ${obsSid} connected`), 10000);
+    // Native's voice reaches it. (Polled from here: waitForFunction doesn't await an async predicate.)
+    const received = () => obs.evaluate(async () => {
+      let total = 0;
+      for (const p of yapObs.voice.peers.values()) (await p.pc.getStats()).forEach((r) => { if (r.type === 'inbound-rtp' && r.kind === 'audio') total += r.bytesReceived; });
+      return total;
+    });
+    let bytes = 0;
+    for (const until = Date.now() + 10000; (bytes = await received()) < 20000 && Date.now() < until;) await obs.waitForTimeout(250);
+    evidence.obs = { bytesFromNative: bytes };
+    assert.ok(bytes >= 20000, `the OBS link received ${bytes} bytes of native's voice`);
+    await obs.waitForTimeout(3000); // long enough for native's call report to sample it (the codec line)
+  } finally {
+    await obs.close();
+  }
+  // A lost connection's leave chime waits 5 s: give it longer.
+  await new Promise((r) => setTimeout(r, 7000));
+  const chimes = n.lines.filter((l) => / CHIME (join|leave)/.test(l));
+  await n.done;
+  await new Promise((r) => setTimeout(r, 500));
+  const report = fs.existsSync(reportFile) ? fs.readFileSync(reportFile, 'utf8') : '';
+  evidence.obs = { ...evidence.obs, chimes, report: report.split('\n').filter((l) => /OBS/.test(l)) };
+  assert.deepEqual(chimes, [], 'no join or leave chime for an OBS link');
+  assert.match(report, new RegExp(`\\n${webName}'s OBS\\n  Connection: [^\\n]*\\n  Codec: (red\\+)?opus out`), 'the call report names it, with the codec we sent it');
+});
 
 await test('screen share + Watch together: native asks what is on at connect; web shares its screen in voice (native sees it on, then off); web joins and leaves the Watch audience (native hears both)', async () => {
   const n = native(nativeName, null, ['--duration', '12']);

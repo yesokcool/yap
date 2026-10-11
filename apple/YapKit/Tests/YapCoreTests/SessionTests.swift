@@ -66,13 +66,13 @@ struct SessionTests {
         #expect(client.authError?.code == "bad_token" && client.authError?.mode == .login)
     }
 
-    /// A wrong PIN on the sign-in screen isn't a session ending.
+    /// A wrong password on the sign-in screen isn't a session ending.
     @Test func badLoginKeepsNothingToClear() {
         let store = MemoryCredentialStore(endpoint: ServerEndpoint(baseURL: URL(string: "https://chat.example.com")!, key: "k"))
         let voice = FakeVoice()
         let client = YapClient(credentials: store, client: "test")
         client.voice = voice
-        client.logIn(name: "Me", pin: "582039")
+        client.logIn(name: "Me", pin: "correct-horse-582039")
         client.receiveForTesting(.error(code: "bad_login", message: "", re: "hello"))
         #expect(voice.signedOut == 0)
         #expect(client.authError?.code == "bad_login")

@@ -6,7 +6,7 @@ use super::*;
 /// What People asks about someone before doing it (like the web's confirm sheets).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Ask {
-    ResetPin,
+    ResetPassword,
     Ban,
 }
 
@@ -19,15 +19,18 @@ pub(super) fn people(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts:
     everyone.sort_by_key(|u| u.name.to_lowercase());
     let i_own = m.users.get(&m.config.uid).is_some_and(|u| u.role == "owner");
     let moderator = m.am_moderator();
+    // The waiting room is only for the owner and mods to answer (an older
+    // server sent it to everyone).
+    let waiting: &[crate::protocol::User] = if moderator { &m.join_requests } else { &[] };
     let voice_of = |uid: &str| m.sessions.values().find(|s| s.uid == uid && !s.is_obs() && s.voice.is_some()).and_then(|s| s.voice.as_ref());
     // As tall as what's in it (up to most of the window).
-    let warned = m.join_requests.iter().filter(|u| u.invite.as_ref().is_some_and(|i| !i.used_by.is_empty())).count();
+    let warned = waiting.iter().filter(|u| u.invite.as_ref().is_some_and(|i| !i.used_by.is_empty())).count();
     // (An "invited by …" line that wraps makes its card taller: about as wide as it'll get.)
-    let wrapped: f32 = m.join_requests.iter().filter_map(|u| u.invited_by.as_ref()).map(|b| {
+    let wrapped: f32 = waiting.iter().filter_map(|u| u.invited_by.as_ref()).map(|b| {
         let g = ui.painter().layout(format!("invited by {b}"), theme::font(theme::small()), Color32::PLACEHOLDER, 120.0);
         (g.size().y - g.rows.first().map_or(0.0, |r| r.rect().height())).max(0.0)
     }).sum();
-    let content_h = 40.0 + m.join_requests.len() as f32 * 50.0 + wrapped + warned as f32 * 30.0 + if m.join_requests.is_empty() { 0.0 } else { 30.0 } + everyone.len() as f32 * 36.0 + if open.is_some() { 130.0 } else { 0.0 };
+    let content_h = 40.0 + waiting.len() as f32 * 50.0 + wrapped + warned as f32 * 30.0 + if waiting.is_empty() { 0.0 } else { 30.0 } + everyone.len() as f32 * 36.0 + if open.is_some() { 130.0 } else { 0.0 };
     let height = content_h.min((ui.ctx().content_rect().height() - 200.0).max(220.0));
     window(ui, p, "People", Some("users"), 380.0, Some(&mut k), |ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), egui::Sense::hover());
@@ -43,9 +46,9 @@ pub(super) fn people(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts:
                         ui.painter().text(pos2(r.left() + 4.0, r.center().y), egui::Align2::LEFT_CENTER, text, f, p.text);
                         ui.add_space(2.0);
                     };
-                    if !m.join_requests.is_empty() {
-                        heading(ui, format!("Waiting to join ({})", m.join_requests.len()));
-                        for u in &m.join_requests {
+                    if !waiting.is_empty() {
+                        heading(ui, format!("Waiting to join ({})", waiting.len()));
+                        for u in waiting {
                             // A personal link someone else already used: a warning line under it (W13).
                             let warning = u.invite.as_ref().and_then(|i| i.warning());
                             let warn_w = ui.available_width() - 20.0 - 26.0 - 20.0;
@@ -164,7 +167,7 @@ pub(super) fn people(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts:
 }
 
 /// Under an opened person (and in the voice list's popup): volume, then
-/// (owner/mods) mod, PIN reset, ban (those two ask first, in the web's
+/// (owner/mods) mod, password reset, ban (those two ask first, in the web's
 /// words). `indent`: from the left edge.
 #[allow(clippy::too_many_arguments)]
 pub fn person_controls(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>, u: &crate::protocol::User, moderator: bool, owner: bool, ask: &mut Option<(String, Ask)>, indent: i8) {
@@ -191,14 +194,14 @@ pub fn person_controls(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act
         }
         if let Some(what) = ask.as_ref().filter(|(uid, _)| *uid == u.id).map(|(_, what)| *what) {
             let (question, ok) = match what {
-                Ask::ResetPin => (format!("Reset {}'s PIN? They get a temporary PIN to sign in with; their old PIN or password stops working.", u.name), "Reset PIN"),
+                Ask::ResetPassword => (format!("Reset {}'s password? They get a temporary password to sign in with; their old one stops working.", u.name), "Reset password"),
                 Ask::Ban => (format!("Ban {}? They're signed out and can't come back. Their messages stay (mods can delete them).", u.name), "Ban"),
             };
             ui.label(theme::text(question, p.danger));
             ui.horizontal(|ui| {
                 if theme::button(ui, ok, Btn::Default, true, p).clicked() {
                     acts.push(Act::Cmd(match what {
-                        Ask::ResetPin => Cmd::ResetPin { uid: u.id.clone() },
+                        Ask::ResetPassword => Cmd::ResetPassword { uid: u.id.clone() },
                         Ask::Ban => Cmd::Ban { uid: u.id.clone() },
                     }));
                     *ask = None;
@@ -218,8 +221,8 @@ pub fn person_controls(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act
                 }
             }
             if can_ban {
-                if theme::button(ui, "Reset PIN…", Btn::Normal, true, p).clicked() {
-                    *ask = Some((u.id.clone(), Ask::ResetPin));
+                if theme::button(ui, "Reset password…", Btn::Normal, true, p).clicked() {
+                    *ask = Some((u.id.clone(), Ask::ResetPassword));
                 }
                 if theme::button(ui, "Ban…", Btn::Normal, true, p).clicked() {
                     *ask = Some((u.id.clone(), Ask::Ban));
