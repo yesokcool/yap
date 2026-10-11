@@ -2311,9 +2311,9 @@ await test('OBS link: a listen-only page joins the call and receives audio', asy
     console.log(`    OBS page: Ada's click heard ${obsMeasured.median?.toFixed(1)} ms later (${obsMeasured.heard}/${obsMeasured.sent} clicks), ${obsMeasured.pps} packets/s from her`);
     assert.equal(how.contexts, 0, 'no audio graph on the OBS page');
     assert.ok(how.played, 'Ada plays straight from her <audio> element, at full volume');
-    assert.ok(how.targets.length && how.targets.every((t) => t === 0), `shortest jitter buffer on every audio receiver (${how.targets})`);
-    assert.ok(how.ptime, 'asks for 10 ms packets');
-    assert.ok(obsMeasured.pps > 80, `10 ms packets: ${obsMeasured.pps} a second`);
+    // The shortest buffer and 10 ms packets are off again (distortion with a real Firefox sender, 2026-10-11).
+    assert.ok(!how.ptime, 'no 10 ms packets asked for');
+    assert.ok(obsMeasured.pps > 30, `packets keep coming: ${obsMeasured.pps} a second`);
     assert.ok(obsMeasured.heard >= 6, `Ada's clicks reached the OBS page (${obsMeasured.heard} of ${obsMeasured.sent})`);
     assert.ok(obsMeasured.median < 150, `the OBS page plays Ada ${obsMeasured.median} ms after she sends`);
 

@@ -133,6 +133,8 @@ function preferAudio(transceiver, { red }) {
 /** `?red=0` in the page's address: the voice goes as plain Opus (for measuring what RED does; not a setting). */
 const RED_DEFAULT = !/(?:^\?|&)red=0(?:&|$)/.test(globalThis.location?.search ?? '');
 
+const SHORTEST_BUFFER = false;
+
 /**
  * Ask a receiver for the shortest jitter buffer it can do (listen-only pages: an OBS link only
  * plays the call, so it wants the sound as soon as it can have it). `jitterBufferTarget` (ms) is
@@ -143,6 +145,7 @@ const RED_DEFAULT = !/(?:^\?|&)red=0(?:&|$)/.test(globalThis.location?.search ??
  * anyway, so nothing (a default, an A/V sync) can raise that floor for an OBS link.)
  */
 function shortestBuffer(receiver) {
+  if (!SHORTEST_BUFFER) return; // off since 2026-10-11 (see Peer's #tuning): Chrome's own buffer
   try {
     if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 0;
     else if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0;
@@ -1135,9 +1138,13 @@ class Peer {
     }
   }
 
-  /** How our descriptions are tuned (tuneOpus): a listen-only page asks for 10 ms packets. */
+  /**
+   * How our descriptions are tuned (tuneOpus). A listen-only page asked for 10 ms packets and the
+   * shortest jitter buffer in v0.45.0; with a real Firefox sender into OBS that came out badly
+   * distorted (2026-10-11), so both are off again while the OBS link is reworked.
+   */
   get #tuning() {
-    return this.voice.listenOnly ? { ptime: 10 } : {};
+    return {};
   }
 
   /**

@@ -1,6 +1,14 @@
 {
-  "current": "0.45.0",
+  "current": "0.45.1",
   "releases": [
+    {
+      "version": "0.45.1",
+      "date": "2026-10-11",
+      "title": "OBS link rollback",
+      "items": [
+        "The OBS link no longer distorts the call (yesterday's lower-delay settings are undone while it's reworked)."
+      ]
+    },
     {
       "version": "0.45.0",
       "date": "2026-10-11",
