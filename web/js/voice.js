@@ -1,0 +1,1453 @@
+import { settings } from './settings.js';
+
+/**
+ * RNNoise (the noise remover the desktop app uses too), as an AudioWorklet
+ * with WebAssembly. Loaded only when someone turns it on. Assumes 48 kHz,
+ * which is why the audio graph runs at 48 kHz.
+ */
+const NOISE = new URL('../vendor/noise/', import.meta.url);
+let rnnoiseBinary = null;
+async function rnnoiseNode(ctx) {
+  const { RnnoiseWorkletNode, loadRnnoise } = await import(new URL('noise-suppressor.js', NOISE).href);
+  rnnoiseBinary ??= await loadRnnoise({ url: new URL('rnnoise.wasm', NOISE).href, simdUrl: new URL('rnnoise_simd.wasm', NOISE).href });
+  if (!ctx.__rnnoiseLoaded) {
+    await ctx.audioWorklet.addModule(new URL('rnnoise-worklet.js', NOISE).href);
+    ctx.__rnnoiseLoaded = true;
+  }
+  return new RnnoiseWorkletNode(ctx, { maxChannels: 1, wasmBinary: rnnoiseBinary });
+}
+
+/*
+ * Voice = WebRTC mesh. Every pair of people in a channel has a direct
+ * peer-to-peer connection carrying Opus audio; the server only relays the
+ * setup messages ("signals"). Audio never touches the server, which is why
+ * bitrate is free.
+ *
+ * Who offers: the newcomer offers to everyone already in the channel.
+ * Glare (both sides renegotiating at once) is resolved with the standard
+ * "perfect negotiation" pattern: the session with the larger sid is polite.
+ *
+ * Calls outlive the WebSocket (PROTOCOL.md › Voice › Keeping calls across
+ * reconnects): while it's down, connections stay up and their signals wait
+ * in a queue; afterwards each connection is moved to the far side's new
+ * session id (`rekey`) instead of being rebuilt. js/app/voice-ui.js decides which.
+ *
+ * Events: 'level' (detail: local dBFS), 'speaking' ({sid, speaking}),
+ *         'peer' ({sid, state}), 'mic' ({ok, error}), 'health' (silent /
+ *         stalled changed), 'screen' ({sid, stream}: a screen we watch came
+ *         or went), 'screen-local' (our share started, stopped or changed),
+ *         'viewers' (who watches our share changed).
+ *
+ * The mic's path: getUserMedia (the browser's echo cancellation, noise
+ * suppression, gain) → RNNoise if on → the transmit gate (gate-worklet.js,
+ * on the audio thread: voice activity / push-to-talk with fades, a release
+ * tail and a short pre-roll) → the track every peer sends. Mute and deafen
+ * disable that track from here, so they hold even if the audio thread stalls.
+ *
+ * Never silently lose the mic or the speakers: a mic that ends (unplugged,
+ * revoked) is reopened; a device change reopens the mic when the one in use
+ * is gone, the one you picked came back, or the system default moved, and
+ * re-points the speakers; a suspended/interrupted AudioContext is resumed
+ * (on the next tap if the browser insists). If the gate stops reporting for
+ * 1.5 s, peers get the unprocessed mic instead (fail open) until it's back.
+ */
+
+const REMOTE_SPEAKING_LEVEL = 0.02; // RTP audio level, linear 0..1 (~-34 dBov)
+const REMOTE_HOLD_MS = 250;
+/** A connection reads as weak when this much of their audio is patched over (concealed) or the round trip is this slow. */
+const WEAK_CONCEALED = 0.03;
+const WEAK_RTT_MS = 300;
+
+/** The voice channel's quality, if it sets one; else your own setting. */
+let channelBitrate = null;
+const callBitrate = () => channelBitrate ?? settings.bitrate;
+
+/**
+ * Screen-share presets. Each viewer gets their own stream from the sharer
+ * (peer to peer), so the bitrate is per viewer: 1080p60 ≈ 8 Mbps each.
+ * Games want frames (hardware H.264 first), text wants pixels (VP9 first).
+ * Whatever comes first, every codec the browser has stays in the list, so
+ * H.264 is always there: the native apps send and receive only H.264
+ * (constrained baseline, packetization-mode=1).
+ */
+export const SCREEN_QUALITY = {
+  smooth: { label: 'Smooth', w: 1920, h: 1080, fps: 60, bitrate: 8_000_000, hint: 'motion', degradation: 'maintain-framerate', codecs: ['H264', 'VP9', 'VP8'] },
+  sharp: { label: 'Sharp', w: 2560, h: 1440, fps: 30, bitrate: 6_000_000, hint: 'detail', degradation: 'maintain-resolution', codecs: ['VP9', 'H264', 'VP8'] },
+  max: { label: 'Max', w: 3840, h: 2160, fps: 60, bitrate: 25_000_000, hint: 'motion', degradation: 'balanced', codecs: ['H264', 'VP9', 'VP8'] },
+};
+
+/** `codecs` with these names first, the rest in their order. Nothing is dropped (so H.264 always stays). */
+export function orderCodecs(codecs, names) {
+  const rank = (c) => {
+    const i = names.findIndex((n) => c.mimeType.toLowerCase() === `video/${n.toLowerCase()}`);
+    return i < 0 ? names.length : i;
+  };
+  return [...codecs].sort((a, b) => rank(a) - rank(b));
+}
+
+/** Put these video codecs first on a transceiver (if the browser has them). */
+function preferCodecs(transceiver, names) {
+  try {
+    const caps = RTCRtpReceiver.getCapabilities?.('video')?.codecs;
+    if (!caps || !transceiver.setCodecPreferences) return;
+    transceiver.setCodecPreferences(orderCodecs(caps, names));
+  } catch (err) {
+    console.warn('codec preference not applied', err);
+  }
+}
+
+export class Voice extends EventTarget {
+  mySid = null;
+  iceServers = [];
+  /** Only through the TURN relay (hides your IP from peers). Set before prepare(). */
+  relayOnly = false;
+  /** @type {Map<string, Peer>} */
+  peers = new Map();
+  rawStream = null; // the mic, as captured
+  sendTrack = null; // what's actually sent: the mic after processing and the gate
+  micOk = false;
+  muted = false;
+  deafened = false;
+  pttDown = false;
+  /** The gate is letting audio through (voice activity incl. its hold, push-to-talk incl. its tail, or always-on). */
+  gateOpen = false;
+  /** Where voice activity opens right now (your sensitivity, or higher in a noisy room). */
+  openAt = -50;
+  localDb = -100;
+  /** A mic test is running: push-to-talk acts like always-on. */
+  micTest = false;
+  /** The mic has sent nothing but digital silence for 5 s (a hardware mute switch, a dead device). */
+  silent = false;
+  /** The audio graph stopped reporting: peers get the plain mic meanwhile (fail open). */
+  stalled = false;
+  #fallback = null; // that plain mic track, while stalled
+  #lastLevelAt = 0;
+  #watchdog = null;
+  #deviceTimer = null;
+  #resumeOnGesture = null;
+  #ctx = null;
+  #out = null; // playback graph for volume past 100%
+  #denoise = null; // RNNoise node, when on
+  #source = null;
+  #gate = null; // the transmit gate (AudioWorkletNode 'yap-gate')
+  #gateSent = {}; // what the gate was last told
+  #dest = null;
+  #hush = null;
+  #pollTimer = null;
+  #handoverCheck = null;
+  #iceAt = 0;
+  #selfSpeaking = false;
+
+  /** Your screen share (getDisplayMedia), or null. */
+  screenStream = null;
+  /** The preset it goes out at (a SCREEN_QUALITY entry), while sharing. */
+  screenQuality = null;
+  /** Send the share's sound (when the browser gave it any): the Share sound switch. */
+  screenSound = true;
+  /** sid → that person's screen (video + any tab audio), while you watch it. */
+  screens = new Map();
+  /** Is the socket up? While it isn't, peers queue their signals (a call outlives the socket). */
+  online = true;
+  /** Sharers whose screen you asked to see. */
+  #watching = new Set();
+
+  constructor({ signal, uidOf, resumable = () => false, fetchIce = null }) {
+    super();
+    this.signal = signal; // (toSid, data) => void
+    this.uidOf = uidOf; // (sid) => uid
+    this.resumable = resumable; // (sid) => does that session keep calls across reconnects?
+    this.fetchIce = fetchIce; // async () => iceServers (fresh relay credentials for ICE restarts)
+    navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+      clearTimeout(this.#deviceTimer);
+      this.#deviceTimer = setTimeout(() => this.#devicesChanged(), 500); // they arrive in bursts
+    });
+    document.addEventListener?.('visibilitychange', () => document.visibilityState === 'visible' && this.#kickContext());
+  }
+
+  /** The track peers should send right now: the processed one, or the plain mic while that's stalled. */
+  get outTrack() {
+    return this.#fallback ?? this.sendTrack;
+  }
+
+  // ── Screen sharing (PROTOCOL.md › Screen sharing) ─────────────────────────
+  // Video goes over the same peer connections as voice, but only to people who
+  // ask for it ({screen: 'want'}), so a share costs upload per actual viewer.
+
+  /**
+   * @param {{ surface?: 'window' | 'monitor' | 'browser', quality?: keyof typeof SCREEN_QUALITY, sound?: boolean }} opts
+   * Call from a click (browsers need a user gesture). Nothing is encoded
+   * until someone asks to watch, and only for them.
+   */
+  async startScreen({ surface = 'window', quality = 'smooth', sound = true } = {}) {
+    const q = SCREEN_QUALITY[quality] ?? SCREEN_QUALITY.smooth;
+    const stream = await this.#pickScreen(surface, q);
+    this.screenQuality = q;
+    this.screenSound = sound;
+    this.#useScreen(stream);
+    return stream;
+  }
+
+  /** The browser's picker. Its sound is always asked for, so Share sound can go on mid-share. */
+  async #pickScreen(surface, q) {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: {
+        displaySurface: surface, // which tab of the browser's picker opens first
+        width: { ideal: q.w, max: q.w },
+        height: { ideal: q.h, max: q.h },
+        frameRate: { ideal: q.fps, max: q.fps },
+      },
+      audio: true, // tab audio, or system audio when sharing a whole screen (Chrome on Windows)
+      systemAudio: 'include',
+      surfaceSwitching: 'include',
+      selfBrowserSurface: 'exclude',
+    });
+    const video = stream.getVideoTracks()[0];
+    if (video) video.contentHint = q.hint;
+    // Tab/system audio is music or a game, not a voice: no speech tuning, keep it stereo.
+    for (const track of stream.getAudioTracks()) track.contentHint = 'music';
+    return stream;
+  }
+
+  /** Share `stream` from now on (to whoever watches); a stream it replaces is stopped. */
+  #useScreen(stream) {
+    const old = this.screenStream;
+    this.screenStream = stream;
+    // The browser's own "Stop sharing" (or the window closing).
+    stream.getVideoTracks()[0]?.addEventListener('ended', () => this.screenStream === stream && this.stopScreen());
+    for (const peer of this.peers.values()) peer.syncScreen();
+    for (const track of old?.getTracks() ?? []) track.stop();
+    this.#emit('screen-local', { on: true });
+  }
+
+  /**
+   * Share another window or screen without stopping: the browser's picker
+   * again, then the new tracks take the old ones' place on every connection
+   * (no renegotiation, viewers keep watching). Call from a click.
+   */
+  async changeScreen({ surface = 'window' } = {}) {
+    if (!this.screenStream) return;
+    const stream = await this.#pickScreen(surface, this.screenQuality ?? SCREEN_QUALITY.smooth);
+    if (!this.screenStream) {
+      for (const track of stream.getTracks()) track.stop(); // stopped while the picker was up
+      return;
+    }
+    this.#useScreen(stream);
+  }
+
+  /**
+   * Smooth / Sharp / Max while sharing, without stopping: the capture size and
+   * frame rate, the encoder's bitrate, and (when the preset prefers another
+   * codec) a renegotiation so the new codec takes over.
+   */
+  async setScreenQuality(quality) {
+    const q = SCREEN_QUALITY[quality];
+    if (!q || !this.screenStream || q === this.screenQuality) return;
+    const codecs = this.screenQuality?.codecs[0] !== q.codecs[0];
+    this.screenQuality = q;
+    const video = this.screenStream.getVideoTracks()[0];
+    if (video) {
+      video.contentHint = q.hint;
+      await video.applyConstraints({ width: { ideal: q.w, max: q.w }, height: { ideal: q.h, max: q.h }, frameRate: { ideal: q.fps, max: q.fps } })
+        .catch((err) => console.warn('screen quality: constraints not applied', err));
+    }
+    for (const peer of this.peers.values()) peer.syncScreen({ codecs });
+    this.#emit('screen-local', { on: true });
+  }
+
+  /** The Share sound switch: the share's sound goes out, or doesn't (no renegotiation when there's a track for it already). */
+  setScreenSound(on) {
+    this.screenSound = Boolean(on);
+    for (const peer of this.peers.values()) peer.syncScreen();
+    this.#emit('screen-local', { on: Boolean(this.screenStream) });
+  }
+
+  /** Did the browser give the share any sound (a tab's, or the system's)? */
+  get screenHasSound() {
+    return Boolean(this.screenStream?.getAudioTracks().some((t) => t.readyState === 'live'));
+  }
+
+  stopScreen() {
+    if (!this.screenStream) return;
+    for (const track of this.screenStream.getTracks()) track.stop();
+    this.screenStream = null;
+    for (const peer of this.peers.values()) {
+      peer.wantsScreen = false; // a new share is asked for again (LIVE / Watch screen)
+      peer.syncScreen();
+    }
+    this.#emit('screen-local', { on: false });
+    this.#emit('viewers');
+  }
+
+  /** Who is watching your share, by session, in the order they asked (from their want/stop signals). */
+  get viewers() {
+    return [...this.peers.values()].filter((p) => p.wantsScreen).sort((a, b) => a.wantedAt - b.wantedAt).map((p) => p.sid);
+  }
+
+  /** Ask a sharer (someone in your voice channel) to send you their screen, or stop. */
+  watchScreen(sid, on) {
+    if (on) this.#watching.add(sid);
+    else {
+      this.#watching.delete(sid);
+      this.#screenGone(sid);
+    }
+    this.peers.get(sid)?.send({ screen: on ? 'want' : 'stop' });
+  }
+
+  isWatching(sid) {
+    return this.#watching.has(sid);
+  }
+
+  /** A peer's screen arrived, changed (its sound came or went) or left (null). */
+  onRemoteScreen(sid, stream) {
+    if (!stream) return this.#screenGone(sid);
+    this.screens.set(sid, stream);
+    this.#emit('screen', { sid, stream });
+  }
+
+  #screenGone(sid) {
+    if (!this.screens.delete(sid)) return;
+    this.#emit('screen', { sid, stream: null });
+  }
+
+  get active() {
+    return this.rawStream !== null || this.peers.size > 0 || this.#ctx !== null;
+  }
+
+  /** The mic's audio graph (for tests and debugging). */
+  get context() {
+    return this.#ctx;
+  }
+
+  /** Get the mic and audio graph ready. Call from a user gesture. */
+  /** `listenOnly`: never open the mic (OBS links). */
+  async prepare(iceServers, { listenOnly = false } = {}) {
+    if (iceServers) this.iceServers = iceServers;
+    if (!this.#ctx) {
+      this.#ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+      this.#ctx.onstatechange = () => this.#kickContext();
+      await this.#ctx.audioWorklet.addModule(new URL('./gate-worklet.js', import.meta.url));
+    }
+    await this.#ctx.resume();
+    if (!this.rawStream && !listenOnly) await this.#openMic();
+  }
+
+  /** Re-open the mic after a device or processing change. */
+  async restartMic() {
+    if (!this.#ctx) return;
+    await this.#openMic();
+  }
+
+  async #openMic() {
+    const music = settings.music;
+    const audio = {
+      echoCancellation: music ? false : settings.echoCancellation,
+      // RNNoise replaces the browser's own noise suppression (not both).
+      noiseSuppression: music || settings.rnnoise ? false : settings.noiseSuppression,
+      autoGainControl: music ? false : settings.autoGain,
+      channelCount: music ? 2 : 1,
+      sampleRate: 48000,
+      sampleSize: 16,
+    };
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: settings.inputId ? { ...audio, deviceId: { exact: settings.inputId } } : audio,
+      });
+    } catch (err) {
+      if (settings.inputId && (err.name === 'OverconstrainedError' || err.name === 'NotFoundError')) {
+        // The saved mic is gone (unplugged); fall back to the default one.
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio });
+        } catch (err2) {
+          return this.#micFailed(err2);
+        }
+      } else {
+        return this.#micFailed(err);
+      }
+    }
+    this.#releaseMic();
+    this.rawStream = stream;
+    const ctx = this.#ctx;
+    const channels = music ? 2 : 1;
+    this.#source = ctx.createMediaStreamSource(stream);
+    this.#gate = new AudioWorkletNode(ctx, 'yap-gate', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      channelCount: channels,
+      channelCountMode: 'explicit',
+      outputChannelCount: [channels],
+      processorOptions: this.#gateSettings(),
+    });
+    this.#gateSent = this.#gateSettings();
+    this.#gate.port.onmessage = (e) => this.#onLevel(e.data);
+    this.#dest = ctx.createMediaStreamDestination();
+    this.#dest.channelCount = channels;
+    // Also into the speakers at zero volume, so the graph is always pulled.
+    const hush = ctx.createGain();
+    hush.gain.value = 0;
+    this.#gate.connect(this.#dest);
+    this.#gate.connect(hush).connect(ctx.destination);
+    this.#hush = hush;
+    this.rnnoise = false;
+    if (settings.rnnoise && !music) {
+      // mic → RNNoise → gate; voice activity hears the cleaned audio.
+      try {
+        this.#denoise = await rnnoiseNode(ctx);
+        this.#source.connect(this.#denoise).connect(this.#gate);
+        this.rnnoise = true;
+      } catch (err) {
+        console.warn('RNNoise unavailable; sending the plain mic', err);
+        this.#denoise = null;
+      }
+    }
+    if (!this.rnnoise) this.#source.connect(this.#gate);
+    this.sendTrack = this.#dest.stream.getAudioTracks()[0];
+    this.sendTrack.contentHint = music ? 'music' : 'speech';
+    const raw = stream.getAudioTracks()[0];
+    raw.addEventListener('ended', () => this.#micEnded(raw));
+    this.micOk = true;
+    this.#lastLevelAt = performance.now();
+    this.#setStalled(false);
+    for (const peer of this.peers.values()) peer.setTrack(this.outTrack);
+    this.#applyGate();
+    this.#startWatchdog();
+    this.#emit('mic', { ok: true });
+  }
+
+  /** The mic stopped by itself (unplugged, permission revoked, another app took it): reopen it. */
+  #micEnded(track) {
+    if (this.rawStream?.getAudioTracks()[0] !== track) return; // already replaced
+    console.warn('the microphone stopped; reopening it');
+    setTimeout(() => {
+      if (this.rawStream?.getAudioTracks()[0] === track) this.#openMic();
+    }, 300);
+  }
+
+  /** Devices came or went: follow the mic (and the speakers) like a native app would. */
+  async #devicesChanged() {
+    let devices = [];
+    try {
+      devices = await navigator.mediaDevices.enumerateDevices();
+    } catch {}
+    const has = (kind, id) => devices.some((d) => d.kind === kind && d.deviceId === id);
+    const track = this.rawStream?.getAudioTracks()[0];
+    if (track && this.#ctx) {
+      const using = track.getSettings?.() ?? {};
+      const def = devices.find((d) => d.kind === 'audioinput' && d.deviceId === 'default');
+      const reopen = track.readyState === 'ended'
+        || (using.deviceId && !has('audioinput', using.deviceId)) // the mic in use is gone
+        || (settings.inputId && using.deviceId !== settings.inputId && has('audioinput', settings.inputId)) // the one you picked is back
+        || (!settings.inputId && def?.groupId && using.groupId && def.groupId !== using.groupId); // the system default moved (Chrome)
+      if (reopen) await this.#openMic();
+    }
+    // Speakers: the picked one if it's there, else the system default.
+    for (const peer of this.peers.values()) peer.applyOutput({ force: true });
+    if (this.#out?.setSinkId) this.#out.setSinkId(settings.outputId && has('audiooutput', settings.outputId) ? settings.outputId : '').catch(() => {});
+  }
+
+  /**
+   * Keep the audio graph running: a suspended or interrupted context (Safari:
+   * a phone call, Siri; any browser: the OS took the device) gets resumed —
+   * on the next tap or key press if the browser wants a gesture.
+   */
+  #kickContext() {
+    const ctx = this.#ctx;
+    if (!ctx || ctx.state === 'closed') return;
+    if (ctx.state === 'running') {
+      if (this.#resumeOnGesture) {
+        removeEventListener('pointerdown', this.#resumeOnGesture, true);
+        removeEventListener('keydown', this.#resumeOnGesture, true);
+        this.#resumeOnGesture = null;
+      }
+      return;
+    }
+    ctx.resume().catch(() => {});
+    if (!this.#resumeOnGesture) {
+      this.#resumeOnGesture = () => this.#ctx?.resume().catch(() => {});
+      addEventListener('pointerdown', this.#resumeOnGesture, true);
+      addEventListener('keydown', this.#resumeOnGesture, true);
+    }
+  }
+
+  /** The gate reports every 20 ms; 1.5 s without one = the graph is stuck: fail open. */
+  #startWatchdog() {
+    if (this.#watchdog) return;
+    this.#watchdog = setInterval(() => {
+      if (!this.rawStream) return;
+      const stuck = performance.now() - this.#lastLevelAt > 1500;
+      if (stuck) this.#kickContext();
+      this.#setStalled(stuck);
+    }, 1000);
+  }
+
+  #setStalled(on) {
+    if (on === this.stalled) return;
+    this.stalled = on;
+    if (on) {
+      console.warn('the audio graph stopped; sending the plain mic until it is back');
+      this.#fallback = this.rawStream?.getAudioTracks()[0]?.clone() ?? null;
+      if (this.#fallback) this.#fallback.contentHint = this.sendTrack?.contentHint ?? 'speech';
+    } else {
+      this.#fallback?.stop();
+      this.#fallback = null;
+    }
+    for (const peer of this.peers.values()) peer.setTrack(this.outTrack);
+    this.#applyGate();
+    this.#emit('health', { stalled: on, silent: this.silent });
+  }
+
+  #micFailed(error) {
+    this.micOk = false;
+    this.#emit('mic', { ok: false, error });
+  }
+
+  #releaseMic() {
+    this.#source?.disconnect();
+    this.#source = null;
+    this.#denoise?.disconnect();
+    this.#denoise?.destroy();
+    this.#denoise = null;
+    if (this.#gate) this.#gate.port.onmessage = null;
+    this.#gate?.disconnect();
+    this.#gate = null;
+    this.#hush?.disconnect();
+    this.#hush = null;
+    this.#dest = null;
+    this.gateOpen = false;
+    this.#fallback?.stop();
+    this.#fallback = null;
+    this.stalled = false;
+    this.silent = false;
+    this.rawStream?.getTracks().forEach((t) => t.stop());
+    this.sendTrack?.stop();
+    this.rawStream = null;
+    this.sendTrack = null;
+  }
+
+  // ── Transmit gate: mute / deafen / voice activity / push-to-talk ─────────
+
+  setMuted(muted) {
+    this.muted = muted;
+    this.#applyGate();
+  }
+
+  setDeafened(deafened) {
+    this.deafened = deafened;
+    for (const peer of this.peers.values()) peer.applyOutput();
+    this.#applyGate();
+  }
+
+  /**
+   * Playback graph for people turned up past 100% (a media element tops out
+   * at 1.0). Separate from the mic graph so stopping the mic doesn't cut it.
+   */
+  outputContext() {
+    if (!this.#out || this.#out.state === 'closed') {
+      this.#out = new AudioContext({ latencyHint: 'interactive' });
+    }
+    if (settings.outputId && this.#out.setSinkId && this.#out.sinkId !== settings.outputId) this.#out.setSinkId(settings.outputId).catch(() => {});
+    this.#out.resume().catch(() => {});
+    return this.#out;
+  }
+
+  setPtt(down) {
+    if (this.pttDown === down) return;
+    this.pttDown = down;
+    this.#applyGate();
+  }
+
+  /** A report from the gate, every 20 ms (gate-worklet.js). */
+  #onLevel({ db, open, at, silent }) {
+    this.localDb = db;
+    this.gateOpen = open;
+    this.openAt = at;
+    this.#lastLevelAt = performance.now();
+    if (this.stalled) this.#setStalled(false);
+    if (silent !== this.silent) {
+      this.silent = silent;
+      this.#emit('health', { stalled: this.stalled, silent });
+    }
+    this.#applyGate();
+    this.#emit('level', db);
+  }
+
+  /**
+   * What the gate should do. Music mode + voice activity = always on: a gate
+   * would cut the quiet passages out of music.
+   */
+  #gateSettings() {
+    const mode = settings.mode === 'vad' && settings.music ? 'open' : settings.mode;
+    return { mode, threshold: settings.vadThreshold, ptt: this.pttDown, test: this.micTest };
+  }
+
+  /** Tell the gate whatever changed (mode, sensitivity, push-to-talk key). */
+  #syncGate() {
+    if (!this.#gate) return;
+    const now = this.#gateSettings();
+    const changed = Object.fromEntries(Object.entries(now).filter(([k, v]) => this.#gateSent[k] !== v));
+    if (!Object.keys(changed).length) return;
+    this.#gateSent = now;
+    this.#gate.port.postMessage(changed);
+  }
+
+  get transmitting() {
+    return Boolean(this.sendTrack) && !this.muted && !this.deafened && this.gateOpen;
+  }
+
+  #applyGate() {
+    this.#syncGate();
+    // Mute/deafen: certain, from here. Everything else is the gate's job.
+    const enabled = !this.muted && !this.deafened;
+    if (this.sendTrack && this.sendTrack.enabled !== enabled) this.sendTrack.enabled = enabled;
+    // The fail-open fallback has no gate: push-to-talk still works (from here), voice activity = always on.
+    if (this.#fallback) this.#fallback.enabled = enabled && (settings.mode !== 'ptt' || this.pttDown);
+    const speaking = this.transmitting && (settings.mode === 'vad' || this.localDb > settings.vadThreshold);
+    if (speaking !== this.#selfSpeaking && this.mySid) {
+      this.#selfSpeaking = speaking;
+      this.#emit('speaking', { sid: this.mySid, speaking });
+    }
+  }
+
+  // ── "Hear yourself" (Settings › Voice) ──────────────────────────────────
+
+  /**
+   * Record a few seconds of what peers would get — the browser's processing,
+   * RNNoise, the gate (so voice activity cuts in and out as it would) — sent
+   * through a local Opus connection at the call's bitrate, then play it back
+   * on your speakers. `phase('recording' | 'playing' | 'done', info)`.
+   * Outside a call, push-to-talk acts like always-on meanwhile; in a call it
+   * doesn't (others would hear you), so hold the key.
+   */
+  async hearYourself({ seconds = 4, phase = () => {} } = {}) {
+    if (!this.sendTrack || !this.#ctx) throw new Error('The microphone is not open.');
+    const ctx = this.#ctx;
+    const alone = this.peers.size === 0;
+    if (alone) {
+      this.micTest = true;
+      this.#applyGate();
+    }
+    const track = this.sendTrack.clone();
+    track.enabled = true; // even if you're muted: this goes nowhere but your own speakers
+    const cleanup = [() => track.stop()];
+    try {
+      const heard = await this.#loopback(track, cleanup).catch((err) => {
+        console.warn('hear yourself: no local connection, recording without the codec', err);
+        return null;
+      });
+      const source = ctx.createMediaStreamSource(new MediaStream([heard ?? track]));
+      const recorder = new AudioWorkletNode(ctx, 'yap-record');
+      const hush = ctx.createGain();
+      hush.gain.value = 0;
+      source.connect(recorder).connect(hush).connect(ctx.destination);
+      cleanup.push(() => {
+        recorder.port.onmessage = null;
+        source.disconnect();
+        recorder.disconnect();
+        hush.disconnect();
+      });
+      const chunks = [];
+      recorder.port.onmessage = (e) => chunks.push(e.data);
+      phase('recording', { codec: Boolean(heard), bitrate: callBitrate() });
+      await new Promise((r) => setTimeout(r, seconds * 1000));
+      recorder.port.onmessage = null;
+      const samples = new Float32Array(chunks.reduce((n, c) => n + c.length, 0));
+      let at = 0;
+      for (const c of chunks) {
+        samples.set(c, at);
+        at += c.length;
+      }
+      this.lastTest = { samples, sampleRate: ctx.sampleRate, codec: Boolean(heard) }; // (tests read this)
+      const out = this.outputContext(); // your picked speakers
+      const buffer = out.createBuffer(1, Math.max(1, samples.length), ctx.sampleRate);
+      buffer.copyToChannel(samples, 0);
+      const play = out.createBufferSource();
+      play.buffer = buffer;
+      play.connect(out.destination);
+      phase('playing');
+      await new Promise((resolve) => {
+        play.onended = resolve;
+        play.start();
+      });
+      phase('done');
+    } finally {
+      for (const undo of cleanup.reverse()) {
+        try {
+          undo();
+        } catch {}
+      }
+      if (alone) {
+        this.micTest = false;
+        this.#applyGate();
+      }
+    }
+  }
+
+  /** Send `track` through a local Opus connection tuned like a call; resolves to what comes out. */
+  async #loopback(track, cleanup) {
+    const a = new RTCPeerConnection();
+    const b = new RTCPeerConnection();
+    cleanup.push(() => {
+      a.close();
+      b.close();
+    });
+    a.onicecandidate = (e) => e.candidate && b.addIceCandidate(e.candidate).catch(() => {});
+    b.onicecandidate = (e) => e.candidate && a.addIceCandidate(e.candidate).catch(() => {});
+    const sender = a.addTrack(track, new MediaStream([track]));
+    const arrived = new Promise((resolve) => (b.ontrack = (e) => resolve(e.track)));
+    const connected = new Promise((resolve) => {
+      a.onconnectionstatechange = () => a.connectionState === 'connected' && resolve(true);
+    });
+    const offer = await a.createOffer();
+    await a.setLocalDescription({ type: 'offer', sdp: tuneOpus(offer.sdp) });
+    await b.setRemoteDescription(a.localDescription);
+    const answer = await b.createAnswer();
+    await b.setLocalDescription({ type: 'answer', sdp: tuneOpus(answer.sdp) });
+    await a.setRemoteDescription(b.localDescription);
+    const params = sender.getParameters();
+    if (params.encodings?.length) {
+      params.encodings[0].maxBitrate = callBitrate();
+      await sender.setParameters(params).catch(() => {});
+    }
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 3000));
+    const remote = await Promise.race([arrived, timeout]);
+    if (!remote || !(await Promise.race([connected, timeout]))) throw new Error('local connection did not come up');
+    // Chrome only feeds WebRTC audio to WebAudio while a media element plays it.
+    const element = new Audio();
+    element.muted = true;
+    element.srcObject = new MediaStream([remote]);
+    element.play().catch(() => {});
+    cleanup.push(() => (element.srcObject = null));
+    return remote;
+  }
+
+  // ── Peers ────────────────────────────────────────────────────────────────
+
+  /** We just joined: offer to everyone already in the channel. */
+  enter(sids) {
+    for (const sid of sids) if (sid !== this.mySid && !this.peers.has(sid)) this.#createPeer(sid, true);
+    this.#startPolling();
+  }
+
+  handleSignal(from, data) {
+    let peer = this.peers.get(from);
+    if (peer && data?.sdp?.type === 'offer' && peer.pc.remoteDescription) {
+      // A different DTLS fingerprint = the far side started a brand-new
+      // connection (it couldn't keep ours across a reconnect): start over too.
+      const print = (sdp) => sdp?.match(/^a=fingerprint:\S+ (\S+)/m)?.[1];
+      const had = print(peer.pc.remoteDescription.sdp);
+      const now = print(data.sdp.sdp);
+      if (had && now && had !== now) {
+        this.drop(from);
+        peer = null;
+      }
+    }
+    if (data?.screen) {
+      // A viewer asking for (or done with) our screen. (A late "want" for a share that already ended is ignored.)
+      if (!peer) return;
+      const want = data.screen === 'want' && Boolean(this.screenStream);
+      if (want !== peer.wantsScreen) {
+        peer.wantsScreen = want;
+        peer.wantedAt = Date.now();
+        this.#emit('viewers');
+      }
+      peer.syncScreen();
+      return;
+    }
+    if (!peer) {
+      // Only an offer may open a new connection.
+      if (data?.sdp?.type !== 'offer') return;
+      peer = this.#createPeer(from, false);
+      this.#startPolling();
+    }
+    peer.handle(data);
+  }
+
+  drop(sid) {
+    const peer = this.peers.get(sid);
+    if (!peer) return;
+    peer.close();
+    this.peers.delete(sid);
+    this.#screenGone(sid);
+    this.#emit('speaking', { sid, speaking: false });
+    this.#emit('peer', { sid, state: 'closed' });
+    if (peer.wantsScreen) this.#emit('viewers'); // they were watching us: not any more
+  }
+
+  /** Leave the call but keep the mic (e.g. socket reconnecting). */
+  hangupAll() {
+    for (const sid of [...this.peers.keys()]) this.drop(sid);
+    clearInterval(this.#pollTimer);
+    this.#pollTimer = null;
+    clearTimeout(this.#handoverCheck);
+    this.online = true;
+  }
+
+  // ── Keeping a call across a reconnect ────────────────────────────────────
+
+  /** Our socket dropped mid-call: keep every connection; signals wait until we're back. */
+  suspend() {
+    this.online = false;
+  }
+
+  /**
+   * Move a connection to the far side's new session id (they reconnected and
+   * continue the same call). Same RTCPeerConnection: no new ICE, no new DTLS,
+   * no gap. Returns false if there was nothing to move.
+   */
+  rekey(from, to) {
+    const peer = this.peers.get(from);
+    if (!peer || from === to) return false;
+    if (this.peers.has(to)) {
+      // Already connected to the new session (it offered first): the old one is spare.
+      this.drop(from);
+      return false;
+    }
+    this.peers.delete(from);
+    peer.sid = to;
+    this.peers.set(to, peer);
+    const screen = this.screens.get(from);
+    if (screen) {
+      this.screens.delete(from);
+      this.screens.set(to, screen);
+    }
+    if (this.#watching.delete(from)) this.#watching.add(to);
+    if (peer.speaking) {
+      peer.speaking = false;
+      this.#emit('speaking', { sid: from, speaking: false });
+    }
+    this.#emit('peer', { sid: from, state: 'closed' });
+    this.#emit('peer', { sid: to, state: peer.pc.connectionState });
+    if (peer.wantsScreen) this.#emit('viewers');
+    if (this.online) peer.resync();
+    return true;
+  }
+
+  /**
+   * Our own call was handed over to our new session (our `voice` echo came
+   * back with `prev`). `here` = the other sessions in the channel now.
+   * Connections to people who keep calls stay; older clients hung up on us
+   * when our socket dropped, so they (and anyone new) get a fresh offer, as
+   * from a newcomer. Connections to people not back yet are left alone:
+   * they may be reconnecting too (a deploy drops everyone at once).
+   */
+  handover(here) {
+    this.online = true;
+    for (const peer of [...this.peers.values()]) {
+      if (!here.includes(peer.sid)) continue;
+      if (!this.resumable(peer.sid)) this.drop(peer.sid);
+      else peer.resync();
+    }
+    for (const sid of here) if (sid !== this.mySid && !this.peers.has(sid)) this.#createPeer(sid, true);
+    this.#startPolling();
+    // A kept connection that hasn't come back in 4 s is rebuilt (the far side may have given up on it).
+    clearTimeout(this.#handoverCheck);
+    this.#handoverCheck = setTimeout(() => {
+      for (const sid of here) {
+        const peer = this.peers.get(sid);
+        if (peer && peer.pc.connectionState !== 'connected' && this.resumable(sid)) this.restart(sid);
+      }
+    }, 4000);
+  }
+
+  /** ICE servers for a restart: fetched again (relay credentials can expire), at most every 30 s. */
+  async freshIceServers() {
+    if (this.fetchIce && Date.now() - this.#iceAt > 30_000) {
+      this.#iceAt = Date.now();
+      try {
+        const servers = await this.fetchIce();
+        if (Array.isArray(servers) && servers.length) this.iceServers = servers;
+      } catch {}
+    }
+    return this.iceServers;
+  }
+
+  /** Throw a connection away and offer a brand-new one (the far side sees a new fingerprint and follows). */
+  restart(sid) {
+    if (!this.peers.has(sid)) return;
+    this.drop(sid);
+    this.#createPeer(sid, true);
+  }
+
+  /** Fully off: no peers, mic released, audio graph closed. */
+  stop() {
+    this.hangupAll();
+    this.#releaseMic();
+    clearInterval(this.#watchdog);
+    this.#watchdog = null;
+    this.micOk = false;
+    this.#ctx?.close();
+    this.#ctx = null;
+    this.#out?.close();
+    this.#out = null;
+    if (this.#selfSpeaking && this.mySid) this.#emit('speaking', { sid: this.mySid, speaking: false });
+    this.#selfSpeaking = false;
+  }
+
+  /** Space view: scale one person's volume by how far away they are (1 = full). */
+  setProximity(sid, factor) {
+    const peer = this.peers.get(sid);
+    if (!peer || Math.abs((peer.proximity ?? 1) - factor) < 0.02) return;
+    peer.proximity = factor;
+    peer.applyOutput();
+  }
+
+  /**
+   * A voice channel can set one quality for everyone in it; null = each
+   * person's own setting. Renegotiates live calls when it changes.
+   */
+  setChannelBitrate(bitrate) {
+    if ((channelBitrate ?? null) === (bitrate ?? null)) return;
+    channelBitrate = bitrate ?? null;
+    this.applySettings({ renegotiate: true });
+  }
+
+  /** Apply output device, per-person volume and bitrate to live calls. */
+  applySettings({ renegotiate = false } = {}) {
+    for (const peer of this.peers.values()) {
+      peer.applyOutput();
+      peer.applySenderParams();
+      if (renegotiate) peer.renegotiate();
+    }
+  }
+
+  #createPeer(sid, initiator) {
+    const peer = new Peer(this, sid, initiator);
+    this.peers.set(sid, peer);
+    return peer;
+  }
+
+  // ── Remote speaking indicators + stats ───────────────────────────────────
+
+  #startPolling() {
+    if (this.#pollTimer) return;
+    this.#pollTimer = setInterval(() => {
+      const now = performance.now();
+      for (const peer of this.peers.values()) {
+        const level = peer.audioLevel();
+        if (level > REMOTE_SPEAKING_LEVEL) peer.speakingUntil = now + REMOTE_HOLD_MS;
+        const speaking = now < peer.speakingUntil && !this.deafened;
+        if (speaking !== peer.speaking) {
+          peer.speaking = speaking;
+          this.#emit('speaking', { sid: peer.sid, speaking });
+        }
+      }
+    }, 100);
+  }
+
+  /** Average round-trip time (ms) and what we're actually sending (kbps). */
+  async stats() {
+    let rtt = 0;
+    let rttCount = 0;
+    let sendKbps = 0;
+    for (const peer of [...this.peers.values()]) {
+      const s = await peer.stats();
+      if (s.rtt != null) {
+        rtt += s.rtt;
+        rttCount++;
+      }
+      sendKbps = Math.max(sendKbps, s.sendKbps ?? 0);
+      if (s.weakChanged) this.#emit('quality', { sid: peer.sid, weak: peer.weak });
+    }
+    return { rtt: rttCount ? Math.round(rtt / rttCount) : null, sendKbps: Math.round(sendKbps) };
+  }
+
+  #emit(type, detail) {
+    this.dispatchEvent(new CustomEvent(type, { detail }));
+  }
+}
+
+class Peer {
+  speaking = false;
+  speakingUntil = 0;
+  #makingOffer = false;
+  #ignoreOffer = false;
+  #lastStats = null;
+  #lastLevelTs = 0;
+  #lastLevelSeenAt = 0;
+  #queue = Promise.resolve();
+
+  /** Signals waiting for the socket to come back (a call outlives it). */
+  #outbox = [];
+  #recoverTimer = null;
+  /** ICE restarts since the last time this connection was up. */
+  restarts = 0;
+  /** Their audio reaches us badly (see stats()): null, or { concealed: 0..1, rtt: ms }. */
+  weak = null;
+  #weakRun = 0; // consecutive bad (+) or good (−) readings
+  #connectedAt = 0;
+  /** ICE failed since it was last connected (no route between you: may need the relay). */
+  failed = false;
+  /** They asked to watch our screen (signal {screen: 'want'}), and when. */
+  wantsScreen = false;
+  wantedAt = 0;
+  /**
+   * The transceivers our screen goes out on to this peer (video, its sound).
+   * Kept after they stop watching and used again next time, so watching on
+   * and off doesn't pile up m-lines in the SDP.
+   */
+  #screenOut = { video: null, audio: null };
+  /** Their screen as we hand it to Voice (video + its sound), or null. */
+  #screenIn = null;
+
+  constructor(voice, sid, initiator) {
+    this.voice = voice;
+    this.sid = sid; // changes if the far side resumes the call under a new session (Voice.rekey)
+    this.uid = voice.uidOf(sid);
+    this.pc = new RTCPeerConnection({ iceServers: voice.iceServers, bundlePolicy: 'max-bundle', iceTransportPolicy: voice.relayOnly ? 'relay' : 'all' });
+    this.audio = document.createElement('audio');
+    this.audio.autoplay = true;
+    this.audio.muted = voice.deafened;
+    document.getElementById('audio-sink')?.append(this.audio);
+    this.applyOutput();
+
+    this.pc.ontrack = ({ track, transceiver }) => {
+      // The voice is always the first audio transceiver (some clients send it
+      // with a stream id, so that can't tell them apart); anything else — the
+      // video, a tab's audio — is a screen share.
+      const mic = this.#micTransceiver();
+      if (track.kind === 'video' || (mic && transceiver !== mic)) {
+        this.syncRemoteScreen();
+        return;
+      }
+      this.audio.srcObject = new MediaStream([track]);
+      this.audio.play().catch(() => {});
+      this.#unboost();
+      this.applyOutput();
+    };
+    this.pc.onicecandidate = ({ candidate }) => {
+      if (candidate) this.send({ candidate: candidate.toJSON() });
+    };
+    this.pc.onnegotiationneeded = () => this.renegotiate();
+    // Each finished negotiation says what they send us now: a screen came, changed or went.
+    this.pc.onsignalingstatechange = () => this.pc.signalingState === 'stable' && this.syncRemoteScreen();
+    this.pc.onconnectionstatechange = () => {
+      const state = this.pc.connectionState;
+      voice.dispatchEvent(new CustomEvent('peer', { detail: { sid: this.sid, state } }));
+      if (state === 'connected') {
+        this.applySenderParams();
+        // (Re)connected to someone whose screen we're watching: ask again.
+        if (voice.isWatching(this.sid)) this.send({ screen: 'want' });
+      }
+      this.#watchPath(state);
+    };
+
+    if (initiator) {
+      // Adding the transceiver fires negotiationneeded → we send the offer.
+      this.pc.addTransceiver(voice.outTrack ?? 'audio', { direction: 'sendrecv' });
+    }
+  }
+
+  /**
+   * The path died (Wi-Fi → cellular, a NAT rebinding, a sleeping laptop): the
+   * impolite side restarts ICE after 3.5 s of `disconnected` (at once on
+   * `failed`) with freshly fetched ICE servers; the polite side does it after
+   * 10 s in case the other app only restarts on `failed`. It keeps trying
+   * every 10 s; after the third try with someone whose app can start over,
+   * it rebuilds the connection from scratch.
+   */
+  #watchPath(state) {
+    clearTimeout(this.#recoverTimer);
+    this.#recoverTimer = null;
+    if (state === 'connected') {
+      this.restarts = 0;
+      this.failed = false;
+      this.#connectedAt = performance.now();
+      return;
+    }
+    if (state === 'failed') this.failed = true;
+    if (state !== 'disconnected' && state !== 'failed') return;
+    const wait = this.polite ? 10_000 : state === 'failed' ? 0 : 3500;
+    this.#recoverTimer = setTimeout(() => this.#recover(), wait);
+  }
+
+  async #recover() {
+    const state = this.pc.connectionState;
+    if (state !== 'disconnected' && state !== 'failed') return;
+    if (!this.voice.peers.has(this.sid) || this.voice.peers.get(this.sid) !== this) return; // closed meanwhile
+    this.restarts++;
+    if (this.restarts > 3 && !this.polite && this.voice.resumable(this.sid)) return this.voice.restart(this.sid);
+    const iceServers = await this.voice.freshIceServers();
+    try {
+      this.pc.setConfiguration({ ...this.pc.getConfiguration(), iceServers });
+    } catch {}
+    if (this.pc.signalingState === 'closed') return;
+    this.pc.restartIce(); // → negotiationneeded → an offer with new ICE credentials
+    this.#voiceEvent();
+    this.#recoverTimer = setTimeout(() => this.#recover(), 10_000);
+  }
+
+  #voiceEvent() {
+    this.voice.dispatchEvent(new CustomEvent('peer', { detail: { sid: this.sid, state: this.pc.connectionState } }));
+  }
+
+  /** The session with the larger sid is polite (recomputed: either side's sid can change on a resume). */
+  get polite() {
+    return this.voice.mySid > this.sid;
+  }
+
+  /** A signal to the far side, or into the queue while our socket is down. */
+  send(data) {
+    if (this.voice.online) this.voice.signal(this.sid, data);
+    else this.#outbox.push(data);
+  }
+
+  /**
+   * After a reconnect/resume: send what waited, and if an offer of ours is
+   * still unanswered, send it again (the answer may have gone to our old
+   * session and been lost).
+   */
+  resync() {
+    const queued = this.#outbox.splice(0);
+    for (const data of queued) this.voice.signal(this.sid, data);
+    const local = this.pc.localDescription;
+    if (this.pc.signalingState === 'have-local-offer' && local && !queued.some((d) => d.sdp?.sdp === local.sdp)) {
+      this.voice.signal(this.sid, { sdp: local.toJSON() });
+    }
+  }
+
+  async renegotiate() {
+    try {
+      this.#makingOffer = true;
+      const offer = await this.pc.createOffer();
+      if (this.pc.signalingState !== 'stable') return;
+      await this.pc.setLocalDescription({ type: 'offer', sdp: tuneOpus(offer.sdp) });
+      this.send({ sdp: this.pc.localDescription.toJSON() });
+    } catch (err) {
+      console.warn('offer failed', err);
+    } finally {
+      this.#makingOffer = false;
+    }
+  }
+
+  /** Signals are applied strictly in order (a candidate can't beat its offer). */
+  handle(data) {
+    this.#queue = this.#queue.then(() => this.#handle(data));
+  }
+
+  async #handle({ sdp, candidate }) {
+    try {
+      if (sdp) {
+        const collision = sdp.type === 'offer' && (this.#makingOffer || this.pc.signalingState !== 'stable');
+        this.#ignoreOffer = !this.polite && collision;
+        if (this.#ignoreOffer) return;
+        await this.pc.setRemoteDescription(sdp);
+        if (sdp.type === 'offer') {
+          // Answer with our mic on the transceiver they offered.
+          const tr = this.pc.getTransceivers().find((t) => t.receiver.track.kind === 'audio');
+          if (tr && !tr.sender.track && this.voice.outTrack) await tr.sender.replaceTrack(this.voice.outTrack);
+          if (tr) tr.direction = 'sendrecv';
+          const answer = await this.pc.createAnswer();
+          await this.pc.setLocalDescription({ type: 'answer', sdp: tuneOpus(answer.sdp) });
+          this.send({ sdp: this.pc.localDescription.toJSON() });
+        }
+        this.applySenderParams();
+      } else if (candidate) {
+        try {
+          await this.pc.addIceCandidate(candidate);
+        } catch (err) {
+          if (!this.#ignoreOffer) throw err;
+        }
+      }
+    } catch (err) {
+      console.warn('signal handling failed', err);
+    }
+  }
+
+  /** The mic is always the first audio transceiver (screen audio comes later). */
+  #micTransceiver() {
+    return this.pc.getTransceivers().find((t) => t.receiver.track.kind === 'audio');
+  }
+
+  setTrack(track) {
+    this.#micTransceiver()?.sender.replaceTrack(track).catch((err) => console.warn('replaceTrack failed', err));
+  }
+
+  // ── Our screen, to this one peer ─────────────────────────────────────────
+
+  /** The senders carrying our screen to this peer right now, or null. */
+  get screenSenders() {
+    const senders = [this.#screenOut.video, this.#screenOut.audio].filter((t) => t?.sender.track).map((t) => t.sender);
+    return senders.length ? senders : null;
+  }
+
+  /**
+   * Send what this peer should get: our screen if they asked to watch it
+   * (video, plus its sound while Share sound is on), else nothing — so
+   * nothing is encoded for someone who isn't watching. `codecs`: the preset's
+   * codec order changed, renegotiate so it takes effect.
+   */
+  syncScreen({ codecs = false } = {}) {
+    const stream = this.wantsScreen ? this.voice.screenStream : null;
+    const video = stream?.getVideoTracks()[0] ?? null;
+    const audio = video && this.voice.screenSound ? stream.getAudioTracks()[0] ?? null : null;
+    const q = this.voice.screenQuality ?? SCREEN_QUALITY.smooth;
+    this.#sendOn('video', video, stream, { codecs: q.codecs });
+    // Share sound off mid-share: the sound's track just goes quiet (no renegotiation, no flicker for viewers).
+    this.#sendOn('audio', audio, stream, { keep: Boolean(video) });
+    if (codecs && video && this.#screenOut.video) {
+      preferCodecs(this.#screenOut.video, q.codecs);
+      this.renegotiate();
+    }
+    this.applySenderParams();
+  }
+
+  /**
+   * Put `track` (or nothing) on our screen's `kind` transceiver, making or
+   * reusing it. A new source (Share something else) is a replaceTrack: no
+   * renegotiation. `keep`: with no track, stay negotiated as sending.
+   */
+  #sendOn(kind, track, stream, { codecs = null, keep = false } = {}) {
+    let tr = this.#screenOut[kind];
+    if (tr && tr.currentDirection === 'stopped') tr = this.#screenOut[kind] = null;
+    const sending = Boolean(tr) && (tr.direction === 'sendrecv' || tr.direction === 'sendonly');
+    if (!track) {
+      if (!sending) return;
+      if (tr.sender.track) tr.sender.replaceTrack(null).catch(() => {});
+      if (!keep) tr.direction = tr.direction === 'sendrecv' ? 'recvonly' : 'inactive'; // → renegotiation: they see it go
+      return;
+    }
+    if (!tr) {
+      // addTrack (not addTransceiver): like every other client, so either side may reuse the other's m-line.
+      const sender = this.pc.addTrack(track, stream);
+      tr = this.#screenOut[kind] = this.pc.getTransceivers().find((t) => t.sender === sender) ?? null;
+      if (tr && codecs) preferCodecs(tr, codecs);
+      return;
+    }
+    if (tr.sender.track !== track) tr.sender.replaceTrack(track).catch((err) => console.warn('replaceTrack failed', err));
+    if (!sending) tr.direction = tr.direction === 'recvonly' ? 'sendrecv' : 'sendonly';
+  }
+
+  // ── Their screen ────────────────────────────────────────────────────────
+
+  /**
+   * Their screen, from what is negotiated rather than from stream ids: every
+   * transceiver but the mic that they send on. Works with any WebRTC stack —
+   * a video track with no stream id, or its sound in a stream of its own.
+   */
+  syncRemoteScreen() {
+    const mic = this.#micTransceiver();
+    const tracks = this.pc.getTransceivers()
+      .filter((t) => t !== mic && (t.currentDirection === 'recvonly' || t.currentDirection === 'sendrecv'))
+      .map((t) => t.receiver.track)
+      .filter((t) => t?.readyState === 'live');
+    const video = tracks.find((t) => t.kind === 'video');
+    if (!video) {
+      if (this.#screenIn) {
+        this.#screenIn = null;
+        this.voice.onRemoteScreen(this.sid, null);
+      }
+      return;
+    }
+    const want = [video, ...tracks.filter((t) => t.kind === 'audio')];
+    const have = this.#screenIn?.getTracks() ?? [];
+    if (want.length === have.length && want.every((t) => have.includes(t))) return;
+    this.#screenIn = new MediaStream(want);
+    this.voice.onRemoteScreen(this.sid, this.#screenIn);
+  }
+
+  /**
+   * Volume, deafen and output device. Up to 100% the <audio> element plays it;
+   * past that a WebAudio gain node does (the element keeps playing, muted,
+   * because Chrome only feeds WebRTC audio to WebAudio while an element plays it),
+   * followed by a limiter so a boosted shout can't clip or blast your ears.
+   */
+  applyOutput({ force = false } = {}) {
+    const uid = this.voice.uidOf(this.sid);
+    const level = Math.max(0, (settings.volumes[uid] ?? 1) * (this.proximity ?? 1));
+    if (level > 1.001 && this.audio.srcObject) {
+      if (!this.boost) {
+        const ctx = this.voice.outputContext();
+        const source = ctx.createMediaStreamSource(this.audio.srcObject);
+        const gain = ctx.createGain();
+        // A brick-wall-ish limiter just under full scale (the boost is for quiet talkers, not loud ones).
+        const limiter = ctx.createDynamicsCompressor();
+        limiter.threshold.value = -3;
+        limiter.knee.value = 0;
+        limiter.ratio.value = 20;
+        limiter.attack.value = 0.002;
+        limiter.release.value = 0.15;
+        source.connect(gain).connect(limiter).connect(ctx.destination);
+        this.boost = { source, gain, limiter };
+      }
+      this.boost.gain.gain.value = this.voice.deafened ? 0 : level;
+      this.audio.muted = true;
+    } else {
+      this.#unboost();
+      this.audio.muted = this.voice.deafened;
+      this.audio.volume = Math.min(1, level);
+    }
+    // The picked speakers (after a device change, again: they may have just come back, or gone).
+    if (this.audio.setSinkId && (force || this.audio.sinkId !== settings.outputId)) {
+      this.audio.setSinkId(settings.outputId).catch(() => this.audio.setSinkId('').catch(() => {}));
+    }
+  }
+
+  #unboost() {
+    if (!this.boost) return;
+    this.boost.source.disconnect();
+    this.boost.gain.disconnect();
+    this.boost.limiter.disconnect();
+    this.boost = null;
+  }
+
+  applySenderParams() {
+    for (const sender of this.pc.getSenders()) {
+      const params = sender.getParameters();
+      if (!params.encodings?.length) continue;
+      if (sender === this.#screenOut.video?.sender || sender.track?.kind === 'video') {
+        // A screen: the quality picked when sharing (games: frame rate first; text: sharpness first).
+        const q = this.voice.screenQuality ?? SCREEN_QUALITY.smooth;
+        params.encodings[0].maxBitrate = q.bitrate;
+        params.encodings[0].maxFramerate = q.fps;
+        params.encodings[0].scaleResolutionDownBy = 1;
+        params.degradationPreference = q.degradation;
+        sender.setParameters(params).catch(() => {});
+        continue;
+      }
+      // The voice, or a screen share's audio (stereo music: its own, higher cap).
+      params.encodings[0].maxBitrate = sender === this.#screenOut.audio?.sender ? screenAudioBitrate() : callBitrate();
+      params.encodings[0].priority = 'high';
+      params.encodings[0].networkPriority = 'high';
+      sender.setParameters(params).catch(() => {});
+    }
+  }
+
+  /** Latest RTP audio level from the remote side, or 0 if packets stopped. */
+  audioLevel() {
+    const receiver = this.pc.getReceivers()[0];
+    const source = receiver?.getSynchronizationSources?.()[0];
+    if (!source) return 0;
+    const now = performance.now();
+    if (source.timestamp !== this.#lastLevelTs) {
+      this.#lastLevelTs = source.timestamp;
+      this.#lastLevelSeenAt = now;
+    }
+    return now - this.#lastLevelSeenAt > 400 ? 0 : source.audioLevel ?? 0;
+  }
+
+  /**
+   * Round trip, what we send, and how well their voice reaches us. "Weak" =
+   * more than 3 % of their audio concealed (patched over after loss or late
+   * packets) or a round trip over 300 ms, judged only while they're actually
+   * sending (an app that stops sending in silence isn't "weak") and not in
+   * the first 10 s of a connection (the jitter buffer is still settling).
+   * Shown after three bad readings in a row (~6 s), cleared after three good.
+   */
+  async stats() {
+    const report = await this.pc.getStats();
+    let rtt = null;
+    let bytesSent = 0;
+    const voiceMid = this.pc.getTransceivers().find((t) => t.receiver.track.kind === 'audio')?.mid;
+    let inbound = null;
+    report.forEach((s) => {
+      if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded' && s.currentRoundTripTime != null) {
+        rtt = s.currentRoundTripTime * 1000;
+      }
+      if (s.type === 'outbound-rtp' && s.kind === 'audio') bytesSent += s.bytesSent;
+      if (s.type === 'inbound-rtp' && s.kind === 'audio' && (s.mid === voiceMid || !inbound)) inbound = s;
+    });
+    const now = performance.now();
+    const last = this.#lastStats;
+    let sendKbps = null;
+    let weakChanged = false;
+    if (last) {
+      const secs = (now - last.at) / 1000;
+      if (secs > 0) sendKbps = ((bytesSent - last.bytesSent) * 8) / 1000 / secs;
+      const pps = inbound && last.inbound ? (inbound.packetsReceived - last.inbound.packetsReceived) / secs : 0;
+      if (pps >= 30 && this.pc.connectionState === 'connected' && now - this.#connectedAt > 10_000) {
+        const samples = inbound.totalSamplesReceived - last.inbound.totalSamplesReceived;
+        const concealed = (inbound.concealedSamples - last.inbound.concealedSamples) - ((inbound.silentConcealedSamples ?? 0) - (last.inbound.silentConcealedSamples ?? 0));
+        const share = samples > 0 ? Math.max(0, concealed) / samples : 0;
+        const bad = share > WEAK_CONCEALED || (rtt ?? 0) > WEAK_RTT_MS;
+        this.#weakRun = bad ? Math.max(1, this.#weakRun + 1) : Math.min(-1, this.#weakRun - 1);
+        const was = Boolean(this.weak);
+        if (this.#weakRun >= 3) this.weak = { concealed: share, rtt };
+        else if (this.#weakRun <= -3) this.weak = null;
+        else if (this.weak && bad) this.weak = { concealed: share, rtt };
+        weakChanged = was !== Boolean(this.weak);
+      }
+    }
+    this.#lastStats = { at: now, bytesSent, inbound };
+    return { rtt, sendKbps, weakChanged };
+  }
+
+  close() {
+    clearTimeout(this.#recoverTimer);
+    this.pc.ontrack = this.pc.onicecandidate = this.pc.onnegotiationneeded = this.pc.onconnectionstatechange = this.pc.onsignalingstatechange = null;
+    this.#unboost();
+    this.pc.close();
+    this.audio.srcObject = null;
+    this.audio.remove();
+  }
+}
+
+/** Screen-share audio (a tab, a game) is music: stereo and at least this rich. */
+export const screenAudioBitrate = () => Math.max(callBitrate(), 160_000);
+
+const TWCC = /^a=(?:rtcp-fb:\d+ transport-cc|extmap:\d+(?:\/\w+)? http:\/\/www\.ietf\.org\/id\/draft-holmer-rmcat-transport-wide-cc-extensions-01)$/;
+
+/**
+ * Tune every audio section of our SDP (offer or answer) before
+ * setLocalDescription. The Opus parameters describe what *we* want to
+ * receive, so each side tunes its own description:
+ *  - maxaveragebitrate: our quality setting (the call runs at the lower of
+ *    the two people's settings; the sender also caps itself via maxBitrate)
+ *  - useinbandfec=1: forward error correction — survives packet loss
+ *  - usedtx=0: keep sending during silence (no clipped first syllables)
+ *  - stereo=1: we can play stereo (music mode, screen-share audio)
+ *  - sprop-stereo: whether *we* send stereo there (music mode; our own
+ *    screen's audio)
+ *  - minptime=10, maxplaybackrate=48000: low latency, full band
+ * The first audio section is the voice; any later one is a screen share's
+ * audio (PROTOCOL.md › Screen sharing).
+ *
+ * Audio sections also drop `transport-cc` (both the rtcp-fb and the header
+ * extension): with it, Chrome's bandwidth probing pads the audio stream
+ * (~18 kbps per direction per person when the network is clean, hundreds
+ * when it's lossy) and gains nothing, since Opus runs at a fixed target.
+ * Video (screen sharing) keeps it. An answer can't add back what the offer
+ * left out, so this works whoever offers.
+ */
+export function tuneOpus(sdp) {
+  const eol = sdp.includes('\r\n') ? '\r\n' : '\n';
+  const [head, ...sections] = sdp.split(`${eol}m=`);
+  let audio = 0;
+  const tuned = sections.map((body) => {
+    if (!body.startsWith('audio')) return body;
+    const voice = audio++ === 0;
+    const sending = /^a=(sendrecv|sendonly)$/m.test(body);
+    return tuneAudio(body, eol, {
+      'sprop-stereo': (voice ? settings.music : sending) ? '1' : '0',
+      maxaveragebitrate: String(voice ? callBitrate() : screenAudioBitrate()),
+    });
+  });
+  return [head, ...tuned].join(`${eol}m=`);
+}
+
+function tuneAudio(body, eol, own) {
+  const pt = body.match(/^a=rtpmap:(\d+) opus\/48000/im)?.[1];
+  const want = {
+    minptime: '10',
+    useinbandfec: '1',
+    usedtx: '0',
+    stereo: '1',
+    'sprop-stereo': own['sprop-stereo'],
+    maxaveragebitrate: own.maxaveragebitrate,
+    maxplaybackrate: '48000',
+    'sprop-maxcapturerate': '48000',
+  };
+  const join = (params) => Object.entries(params).map(([k, v]) => `${k}=${v}`).join(';');
+  const lines = body.split(eol).filter((line) => !TWCC.test(line));
+  if (!pt) return lines.join(eol);
+  const fmtp = lines.findIndex((line) => line.startsWith(`a=fmtp:${pt} `));
+  if (fmtp >= 0) {
+    const params = Object.fromEntries(
+      lines[fmtp].slice(`a=fmtp:${pt} `.length).split(';').map((kv) => kv.trim().split('=')).filter(([k]) => k),
+    );
+    lines[fmtp] = `a=fmtp:${pt} ${join({ ...params, ...want })}`;
+  } else {
+    const rtpmap = lines.findIndex((line) => line.toLowerCase().startsWith(`a=rtpmap:${pt} opus/48000`));
+    lines.splice(rtpmap + 1, 0, `a=fmtp:${pt} ${join(want)}`);
+  }
+  return lines.join(eol);
+}

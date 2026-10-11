@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>What's new · Yap</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="js/theme.js"></script>
+  <style>
+    body { overflow: auto; }
+    .log { max-width: 620px; margin: 24px auto; padding: 0 8px 40px; }
+    .log-window { padding: 3px; background: var(--face); box-shadow: var(--frame); }
+    .log-body { margin-top: 3px; padding: 4px 12px; background: var(--window); box-shadow: var(--sunken); }
+    .release { padding: 12px 0; }
+    .release + .release { box-shadow: inset 0 1px var(--shadow), inset 0 2px var(--hilight); }
+    .release header { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    .release h2 { margin: 0; font-size: 13px; }
+    .ver { font-weight: 700; color: var(--link); }
+    .release:first-child .ver::after { content: ' (latest)'; color: var(--gray); font-weight: 400; }
+    .release time { color: var(--gray); font-size: 11px; }
+    .release ul { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
+    .release li { margin: 3px 0; }
+    .log-actions { display: flex; justify-content: flex-end; padding: 8px 4px 4px; }
+    .highlights { padding: 12px 0 14px; box-shadow: inset 0 -1px var(--shadow); }
+    .highlights h2 { margin: 0 0 8px; font-size: 14px; }
+    .highlights ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px 16px; }
+    .highlights li { display: flex; gap: 10px; align-items: flex-start; }
+    .hl-emoji { flex: none; font-size: 22px; line-height: 1.1; }
+    .highlights b { display: block; font-size: 13px; }
+    .highlights p { margin: 2px 0; font-size: 12px; line-height: 1.4; }
+    /* Where to find it: a direction, not a link, so it doesn't wear link blue. */
+    .highlights small { color: var(--gray); font-size: 11px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <main class="log">
+    <div class="log-window">
+      <div class="title-bar"><img class="title-icon" src="icon.svg" alt=""><span class="title-text">What's New in Yap</span></div>
+      <div class="log-body">
+        <section class="highlights" id="highlights" hidden></section>
+        <div id="releases"><p class="release muted">Loading…</p></div>
+      </div>
+      <div class="log-actions"><a class="btn primary" href="/">Back to Yap</a></div>
+    </div>
+  </main>
+  <script type="module" src="js/changelog.js"></script>
+</body>
+</html>

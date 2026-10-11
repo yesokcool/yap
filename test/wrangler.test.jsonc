@@ -1,0 +1,53 @@
+// The local test server (CLAUDE.md › Commands): wrangler.example.jsonc plus the
+// stand-in board and a Minecraft address that never answers. Keep the two in step.
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "yap",
+  "main": "../worker/index.ts",
+  "compatibility_date": "2026-10-01",
+
+  // Where it's served. Out of the box: https://yap.<your-subdomain>.workers.dev.
+  // With your own domain on Cloudflare, use a custom domain instead (Cloudflare
+  // makes the DNS record and certificate) and turn workers.dev off:
+  //   "routes": [{ "pattern": "chat.example.com", "custom_domain": true }],
+  //   "workers_dev": false,
+  "workers_dev": true,
+  "preview_urls": false,
+
+  // The web client. Static files are served straight from Cloudflare's edge
+  // (free, unmetered); only these paths ever run the Worker.
+  "assets": {
+    "directory": "../web",
+    "binding": "ASSETS",
+    "run_worker_first": ["/ws", "/api/*", "/emoji/*", "/media/*", "/board", "/board/"]
+  },
+
+  // One Durable Object instance ("main") is the whole server: channels,
+  // message history (SQLite) and voice signaling. A second one, Media, holds
+  // pictures and custom emojis so they don't eat the chat database's 1 GB.
+  // SQLite-backed Durable Objects are the only kind on the Workers Free plan.
+  "durable_objects": {
+    "bindings": [
+      { "name": "HUB", "class_name": "Hub" },
+      { "name": "MEDIA", "class_name": "Media" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Hub"] },
+    { "tag": "v2", "new_sqlite_classes": ["Media"] }
+  ],
+
+  // Per-IP request cap inside the Worker (keeps floods off the Durable Object).
+  // For a real wall, add a Cloudflare WAF rate-limit rule too (SECURITY.md).
+  "ratelimits": [{ "name": "PER_IP", "namespace_id": "4141", "simple": { "limit": 120, "period": 10 } }],
+
+  "observability": { "enabled": true },
+
+  "services": [{ "binding": "BOARD", "service": "yap-test-board" }],
+  "vars": {
+    "MINECRAFT_SERVER": "127.0.0.1:9",
+    "MINECRAFT_NAME": "Minecraft",
+    "BOARD_PATHS": "^/api/board$",
+    "BOARD_NAME": "Test board"
+  }
+}

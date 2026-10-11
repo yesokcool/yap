@@ -1,0 +1,53 @@
+// What the Hub's feature modules (hub-*.ts) may use of it, and nothing else.
+// These members are public on Hub for that. Only Yap's own Worker holds a
+// stub to the Hub, so being public adds no outside surface (and TypeScript's
+// `private` never stopped a call at runtime anyway).
+import type { Hub } from './hub';
+
+export type HubHost = Pick<
+  Hub,
+  'admit'
+  | 'aliasMap'
+  | 'aliases'
+  | 'allow'
+  | 'broadcast'
+  | 'canonical'
+  | 'channel'
+  | 'channelFor'
+  | 'closeQuietly'
+  | 'ctx'
+  | 'emptyTrash'
+  | 'env'
+  | 'hasMembers'
+  | 'hideSession'
+  | 'identitiesOf'
+  | 'isMod'
+  | 'kick'
+  | 'lastJoinPush'
+  | 'lastPush'
+  | 'lastTs'
+  | 'limit'
+  | 'log'
+  | 'nameTaken'
+  | 'nextTs'
+  | 'peek'
+  | 'pendingUsers'
+  | 'pepper'
+  | 'personalChannel'
+  | 'publicUrl'
+  | 'readableChannels'
+  | 'reconnectEveryone'
+  | 'relayToView'
+  | 'resumeKey'
+  | 'send'
+  | 'sendWhere'
+  | 'setVoice'
+  | 'showSession'
+  | 'sockets'
+  | 'sql'
+  | 'toAudience'
+  | 'toOwner'
+  | 'uploader'
+  | 'user'
+  | 'users'
+>;

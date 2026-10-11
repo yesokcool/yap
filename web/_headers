@@ -1,0 +1,15 @@
+# Security headers for the web client (Workers static assets).
+# Worker responses (/ws, /api/*, /board, /emoji/*, /media/*) set their own.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://*.klipy.com https://i.ytimg.com; media-src 'self' blob: https://*.klipy.com; connect-src 'self' https://api.klipy.com; font-src 'self'; frame-src 'self' https://www.youtube-nocookie.com; frame-ancestors 'self'; base-uri 'none'; form-action 'self'; object-src 'none'; manifest-src 'self'; worker-src 'self'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), geolocation=(), payment=(), usb=(), microphone=(self), display-capture=(self)
+  Cross-Origin-Opener-Policy: same-origin
+/downloads/latest.json
+  Cache-Control: no-cache
+/downloads/yap-*
+  Cache-Control: public, max-age=31536000, immutable
+  Content-Disposition: attachment
+/sw.js
+  Cache-Control: no-cache

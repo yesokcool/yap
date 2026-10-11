@@ -1,0 +1,37 @@
+{
+  "name": "yap",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "node tools/stamp.mjs && wrangler dev",
+    "dev:test": "node tools/stamp.mjs && wrangler dev -c test/wrangler.test.jsonc -c test/fixtures/board/wrangler.toml --var YAP_KEY:testkey --var ADMIN_KEY:testadmin --var PIN_PEPPER:testpepper --var KLIPY_KEY:test",
+    "deploy": "node tools/stamp.mjs && wrangler deploy",
+    "types": "wrangler types -c wrangler.example.jsonc",
+    "check": "node tools/stamp.mjs --quiet && tsc --noEmit",
+    "test": "node test/protocol.test.mjs",
+    "postinstall": "wrangler types -c wrangler.example.jsonc && node tools/stamp.mjs",
+    "test:e2e": "node test/e2e.test.mjs",
+    "release": "node tools/release.mjs",
+    "test:unit": "node test/unit.test.mjs && node test/voice.test.mjs",
+    "test:gif": "node test/gif.test.mjs",
+    "stamp": "node tools/stamp.mjs",
+    "test:webpush": "node --experimental-strip-types --no-warnings test/webpush.test.mjs",
+    "test:extras": "node --experimental-strip-types --no-warnings test/extras.test.mjs",
+    "test:vault": "node test/vault.test.mjs",
+    "test:all": "node tools/test-all.mjs",
+    "test:migrations": "node --experimental-strip-types --no-warnings test/migrations.test.mjs",
+    "test:worker": "node --experimental-strip-types --no-warnings test/worker.test.mjs",
+    "test:tools": "node test/tools.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "devDependencies": {
+    "emojibase-data": "^17.0.0",
+    "playwright": "^1.63.0",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.147.0"
+  },
+  "version": "0.41.0"
+}

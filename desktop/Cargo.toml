@@ -1,0 +1,251 @@
+[package]
+name = "yap"
+version = "0.12.0"
+edition = "2024"
+description = "Native desktop client for Yap (text + voice)"
+license = "AGPL-3.0-only"
+publish = false
+
+[[bin]]
+name = "yap"
+path = "src/main.rs"
+
+[dependencies]
+# UI: egui on OpenGL (glow) — no webview, no wgpu.
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "links", "wayland", "x11"] }
+# Draw: animated GIFs (pure Rust) and glyph outlines for pixel text
+gif = "0.14"
+skrifa = "0.44"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
+# Networking
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Voice
+webrtc = { version = "0.21", default-features = false, features = ["runtime-tokio", "crypto-ring"] }
+rtc = { version = "0.21", default-features = false, features = ["crypto-ring"] }
+bytes = "1"
+async-trait = "0.1"
+cpal = "0.18"
+ropus = "0.12"
+nnnoiseless = { version = "0.5", default-features = false }
+parking_lot = "0.12"
+
+# Soundboard uploads: decode what people pick (WAV, MP3, M4A/AAC, OGG Vorbis, FLAC…), pure Rust.
+symphonia = { version = "0.6", default-features = false, features = ["wav", "pcm", "adpcm", "mp3", "aac", "isomp4", "ogg", "vorbis", "flac", "aiff", "caf", "alac", "id3v2"] }
+
+# Screen sharing: H.264 (encode and decode), OpenH264 built from its bundled source.
+openh264 = { version = "0.9", default-features = false, features = ["source"] }
+# (Its raw types, to change the bitrate without a new keyframe.)
+openh264-sys2 = { version = "0.9", default-features = false }
+
+# Misc
+dirs = "6"
+getrandom = "0.3"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Quiet hours name your time zone (IANA); already in the tree through chrono.
+iana-time-zone = "0.1"
+sha2 = "0.10"
+sys-locale = "0.3"
+# Signed updates: Ed25519 via ring (already here for TLS), base64, exe swap.
+ring = "0.17"
+base64 = "0.22"
+self-replace = "1.5"
+# Pictures: the native file picker (XDG portal on Linux, no GTK) and clipboard images.
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+# Encrypted Personal space (byte-compatible with web/js/vault.js): pure Rust.
+aes-gcm = "0.10"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+unicode-normalization = "0.1"
+# The space key lives in the OS keychain (Keychain, Credential Manager, Secret Service via zbus — no libdbus).
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "tokio", "crypto-rust"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_System_Console"] }
+# Notifications, the registry, and screen sharing (Windows.Graphics.Capture + D3D11 for the
+# picture, WASAPI process loopback without Yap's own audio for the sound).
+windows = { version = "0.62", features = [
+    "Data_Xml_Dom", "UI_Notifications", "Win32_System_WinRT", "Win32_System_Registry",
+    "Foundation", "Graphics", "Graphics_Capture", "Graphics_DirectX", "Graphics_DirectX_Direct3D11",
+    "Security_Authorization_AppCapabilityAccess", "Win32_Foundation", "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_Security", "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage", "Win32_System_Threading", "Win32_System_Variant",
+    "Win32_System_WinRT_Direct3D11", "Win32_System_WinRT_Graphics_Capture", "Win32_UI_WindowsAndMessaging",
+] }
+# `#[implement]` (the loopback activation callback) expands to `::windows_core` paths.
+windows-core = "0.62"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Only for the screenshot aid (debug builds): a YAP_DEBUG_SHOT window opens
+# without taking focus from whatever you're typing in (`ui::quiet_shots`).
+# Already in the build through eframe; no features of its own.
+winit = { version = "0.30", default-features = false }
+# Screen sharing: ScreenCaptureKit (weakly linked, see build.rs: macOS < 12.3 still starts),
+# and on macOS 14+ its system picker (SCContentSharingPicker) chooses what is shared.
+# No default features on objc2-screen-capture-kit: they pull in AVFoundation and
+# UniformTypeIdentifiers (a hard link that needs macOS 11).
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSError", "NSObject", "NSProcessInfo", "NSString", "objc2-core-foundation"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFBase", "CFCGTypes", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGColorSpace", "CGDirectDisplay", "CGDisplayConfiguration", "CGWindow", "libc"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "objc2", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMTime", "objc2-core-audio-types", "objc2-core-video"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "SCContentSharingPicker", "SCError", "SCShareableContent", "SCStream", "block2", "dispatch2", "libc", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"] }
+# Screen sharing: H.264 on the Mac's hardware encoder (VideoToolbox, macOS 10.8+).
+objc2-video-toolbox = { version = "0.3", default-features = false, features = ["std", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession", "objc2-core-media", "objc2-core-video"] }
+block2 = "0.6"
+dispatch2 = "0.3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl = "2.21"
+libc = "0.2"
+
+[dev-dependencies]
+# The screen-capture backends' pure helpers are unit-tested on every OS.
+x11-dl = "2.21"
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSDictionary"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Small over fast for code that's rarely hot (file decoding, fonts, TLS, the OS's window, clipboard and
+# keychain glue), so the Linux download stays under Cloudflare's 25 MiB per file. Voice, video and the
+# UI keep opt-level 3.
+[profile.release.package.symphonia]
+opt-level = "s"
+[profile.release.package.symphonia-bundle-flac]
+opt-level = "s"
+[profile.release.package.symphonia-bundle-mp3]
+opt-level = "s"
+[profile.release.package.symphonia-codec-aac]
+opt-level = "s"
+[profile.release.package.symphonia-codec-adpcm]
+opt-level = "s"
+[profile.release.package.symphonia-codec-alac]
+opt-level = "s"
+[profile.release.package.symphonia-codec-pcm]
+opt-level = "s"
+[profile.release.package.symphonia-codec-vorbis]
+opt-level = "s"
+[profile.release.package.symphonia-common]
+opt-level = "s"
+[profile.release.package.symphonia-core]
+opt-level = "s"
+[profile.release.package.symphonia-format-caf]
+opt-level = "s"
+[profile.release.package.symphonia-format-isomp4]
+opt-level = "s"
+[profile.release.package.symphonia-format-ogg]
+opt-level = "s"
+[profile.release.package.symphonia-format-riff]
+opt-level = "s"
+[profile.release.package.symphonia-metadata]
+opt-level = "s"
+[profile.release.package.image]
+opt-level = "s"
+[profile.release.package.image-webp]
+opt-level = "s"
+[profile.release.package.png]
+opt-level = "s"
+[profile.release.package.gif]
+opt-level = "s"
+[profile.release.package.zune-jpeg]
+opt-level = "s"
+[profile.release.package.zune-core]
+opt-level = "s"
+[profile.release.package.fdeflate]
+opt-level = "s"
+[profile.release.package.miniz_oxide]
+opt-level = "s"
+[profile.release.package.flate2]
+opt-level = "s"
+[profile.release.package.skrifa]
+opt-level = "s"
+[profile.release.package.read-fonts]
+opt-level = "s"
+[profile.release.package.font-types]
+opt-level = "s"
+[profile.release.package.rustls]
+opt-level = "s"
+[profile.release.package.rustls-webpki]
+opt-level = "s"
+[profile.release.package.ureq]
+opt-level = "s"
+[profile.release.package.ureq-proto]
+opt-level = "s"
+[profile.release.package.tungstenite]
+opt-level = "s"
+[profile.release.package.tokio-tungstenite]
+opt-level = "s"
+[profile.release.package.serde_json]
+opt-level = "s"
+[profile.release.package.chrono]
+opt-level = "s"
+[profile.release.package.keyring]
+opt-level = "s"
+[profile.release.package.secret-service]
+opt-level = "s"
+[profile.release.package.zbus]
+opt-level = "s"
+[profile.release.package.zbus_names]
+opt-level = "s"
+[profile.release.package.zvariant]
+opt-level = "s"
+[profile.release.package.ashpd]
+opt-level = "s"
+[profile.release.package.rfd]
+opt-level = "s"
+[profile.release.package.arboard]
+opt-level = "s"
+[profile.release.package.x11rb]
+opt-level = "s"
+[profile.release.package.x11rb-protocol]
+opt-level = "s"
+[profile.release.package.wayland-backend]
+opt-level = "s"
+[profile.release.package.wayland-client]
+opt-level = "s"
+[profile.release.package.wayland-cursor]
+opt-level = "s"
+[profile.release.package.wayland-protocols]
+opt-level = "s"
+[profile.release.package.wayland-protocols-experimental]
+opt-level = "s"
+[profile.release.package.wayland-protocols-misc]
+opt-level = "s"
+[profile.release.package.wayland-protocols-plasma]
+opt-level = "s"
+[profile.release.package.wayland-protocols-wlr]
+opt-level = "s"
+[profile.release.package.smithay-client-toolkit]
+opt-level = "s"
+[profile.release.package.smithay-clipboard]
+opt-level = "s"
+[profile.release.package.winit]
+opt-level = "s"
+[profile.release.package.accesskit]
+opt-level = "s"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

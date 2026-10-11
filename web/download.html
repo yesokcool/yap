@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Get Yap</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="js/theme.js"></script>
+  <style>
+    body { overflow: auto; }
+    .dl { max-width: 560px; margin: 24px auto; padding: 0 8px 40px; }
+    .dl-window { padding: 3px; background: var(--face); box-shadow: var(--frame); }
+    .dl-body { padding: 12px 10px 4px; }
+    .dl-body > p { margin: 0 0 12px; }
+    .platform { display: grid; grid-template-columns: 32px 1fr auto; gap: 10px; align-items: center; padding: 8px; }
+    .platform + .platform { box-shadow: inset 0 1px var(--shadow), inset 0 2px var(--hilight); }
+    .platform b { display: block; }
+    .platform .muted { font-size: 11px; }
+    .platform-icon { font-size: 24px; line-height: 1; text-align: center; }
+    .group { position: relative; margin-top: 18px; padding-top: 14px; }
+    .group > legend, .group-title { position: absolute; top: -8px; left: 8px; padding: 0 4px; background: var(--face); }
+    .group ol { margin: 0 0 8px; padding-left: 20px; }
+    .group li { margin: 3px 0; }
+    code { font: 11px var(--mono); background: var(--window); padding: 0 3px; box-shadow: var(--thin-in); }
+    .dl-actions { display: flex; justify-content: flex-end; padding: 4px 6px 8px; }
+  </style>
+</head>
+<body>
+  <main class="dl">
+    <div class="dl-window">
+      <div class="title-bar"><img class="title-icon" src="icon.svg" alt=""><span class="title-text">Get Yap</span></div>
+      <div class="dl-body">
+        <p>Yap runs right in your browser. The desktop app adds push-to-talk that works while you're in a game, and it's tiny: no Electron.</p>
+        <div class="well-list" id="platforms"><p class="muted">Loading…</p></div>
+        <div class="group">
+          <span class="group-title">First launch</span>
+          <ol>
+            <li><b>Windows:</b> SmartScreen may warn about an unknown app. Click <b>More info</b> › <b>Run anyway</b>.</li>
+            <li><b>Linux:</b> <code>chmod +x yap-*-linux-x86_64</code>, then run it.</li>
+            <li><b>Mac:</b> in Terminal, <code>chmod +x yap-*-macos-aarch64 &amp;&amp; xattr -d com.apple.quarantine yap-*-macos-aarch64</code>, then run it.</li>
+            <li>Sign on with your screen name and PIN. After that the app updates itself: when a new version is out, click <b>Update</b> in its status bar.</li>
+          </ol>
+        </div>
+        <div class="group">
+          <span class="group-title">iPhone and iPad</span>
+          <p style="margin: 0 0 8px">The iPhone app is on its way through TestFlight. Until then, open Yap in Safari and choose Share › <b>Add to Home Screen</b>.</p>
+        </div>
+      </div>
+      <div class="dl-actions"><a class="btn primary" href="/">Back to Yap</a></div>
+    </div>
+  </main>
+  <script type="module" src="js/download.js"></script>
+</body>
+</html>

@@ -1,0 +1,73 @@
+// Copy to wrangler.jsonc and make it yours (SELF_HOSTING.md walks through it).
+// wrangler.jsonc is gitignored, so your domain and settings stay out of git.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "yap",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-10-01",
+
+  // Where it's served. Out of the box: https://yap.<your-subdomain>.workers.dev.
+  // With your own domain on Cloudflare, use a custom domain instead (Cloudflare
+  // makes the DNS record and certificate) and turn workers.dev off:
+  //   "routes": [{ "pattern": "chat.example.com", "custom_domain": true }],
+  //   "workers_dev": false,
+  "workers_dev": true,
+  "preview_urls": false,
+
+  // The web client. Static files are served straight from Cloudflare's edge
+  // (free, unmetered); only these paths ever run the Worker.
+  "assets": {
+    "directory": "./web",
+    "binding": "ASSETS",
+    "run_worker_first": ["/ws", "/api/*", "/emoji/*", "/media/*", "/board", "/board/"]
+  },
+
+  // One Durable Object instance ("main") is the whole server: channels,
+  // message history (SQLite) and voice signaling. A second one, Media, holds
+  // pictures and custom emojis so they don't eat the chat database's 1 GB.
+  // SQLite-backed Durable Objects are the only kind on the Workers Free plan.
+  "durable_objects": {
+    "bindings": [
+      { "name": "HUB", "class_name": "Hub" },
+      { "name": "MEDIA", "class_name": "Media" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Hub"] },
+    { "tag": "v2", "new_sqlite_classes": ["Media"] }
+  ],
+
+  // Per-IP request cap inside the Worker (keeps floods off the Durable Object).
+  // For a real wall, add a Cloudflare WAF rate-limit rule too (SECURITY.md).
+  "ratelimits": [{ "name": "PER_IP", "namespace_id": "4141", "simple": { "limit": 120, "period": 10 } }],
+
+  "observability": { "enabled": true },
+
+  // Optional settings (all of them can stay out):
+  "vars": {
+    // Your server's address, for links in phone pushes. Default: wherever people connect.
+    // "PUBLIC_URL": "https://chat.example.com",
+    // Yap is AGPL-3.0: if you run a changed copy for others, link your changed source here.
+    // "SOURCE_URL": "https://github.com/you/yap",
+    // A Minecraft server's status in the sidebar.
+    // "MINECRAFT_SERVER": "mc.example.com:25565",
+    // "MINECRAFT_NAME": "Minecraft",
+  }
+
+  // Optional: another Worker of yours shown inside Yap at /board, with live
+  // pointers (web/js/cursors.js). Bind it as BOARD, list the other root paths
+  // its page uses in BOARD_PATHS (a regex), and add those to run_worker_first:
+  //   "services": [{ "binding": "BOARD", "service": "my-board-worker" }],
+  //   vars: "BOARD_PATHS": "^/(?:api/board|img/[^/]+)$", "BOARD_ORIGIN": "https://board.example.com"
+  //   and optionally "BOARD_NAME": "Our board" (its name in the sidebar; default "Board")
+
+  // Secrets (set with `npx wrangler secret put <NAME>`, never committed):
+  //   YAP_KEY             the invite key (required: without it anyone can join)
+  //   PIN_PEPPER          random string mixed into PIN hashes (required; keep a copy: restores need it)
+  //   ADMIN_KEY           for backups/restore (Authorization: Bearer); unset = admin API off
+  //   KLIPY_KEY           optional: KLIPY GIF API key (the GIF picker)
+  //   VAPID_PRIVATE_JWK   optional: browser push notifications (tools/make-vapid.mjs)
+  //   TURN_URLS / TURN_USERNAME / TURN_CREDENTIAL, or TURN_KEY_ID / TURN_KEY_API_TOKEN
+  //                       optional: a TURN relay for voice behind strict networks
+  //   NTFY_SERVER / NTFY_TOKEN   optional: your own ntfy server for phone pushes
+}

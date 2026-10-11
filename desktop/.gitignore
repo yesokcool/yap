@@ -1,0 +1,3 @@
+target/
+# This instance's update public key (not a secret; README › Self-update).
+update-pubkey.txt

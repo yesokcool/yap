@@ -1,0 +1,5 @@
+# The stand-in board for Yap's tests (worker.js). Run with Yap's test config:
+#   npx wrangler dev -c test/wrangler.test.jsonc -c test/fixtures/board/wrangler.toml …
+name = "yap-test-board"
+main = "worker.js"
+compatibility_date = "2026-10-01"

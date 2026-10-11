@@ -1,0 +1,5 @@
+// Copy this file to Local.xcconfig (git ignores it) and use your own values.
+// See Yap.xcconfig for what each one does.
+
+YAP_TEAM = ABCDE12345
+YAP_BUNDLE_ID = com.yourname.yap

@@ -1,0 +1,938 @@
+{
+  "current": "0.41.0",
+  "releases": [
+    {
+      "version": "0.41.0",
+      "date": "2026-10-11",
+      "title": "One look, and screen sharing in every app",
+      "items": [
+        "One look: Windows 98, in light or dark. The Apple and Arch looks are gone; if you used one, Yap switches you over.",
+        "Screen sharing: see who's watching, switch quality, window or sound without stopping, and a bigger viewer with its own volume that tells you when a screen is paused or has stopped.",
+        "Screen sharing: the web can watch shares from the desktop and iPhone/Mac apps.",
+        "A screen share's sound follows the speakers you pick in Settings, like voices do.",
+        "Desktop app: share your screen and watch other people's right in the app, sound included.",
+        "Desktop app: on a Mac, sharing your screen uses the hardware video encoder, so it's lighter on the computer.",
+        "Desktop app: click or right-click someone in a voice channel for their volume, Watch screen and mod actions.",
+        "Desktop app: the same single look, Windows 98 in light or dark.",
+        "iPhone and Mac: watch someone's screen right in the app (tap LIVE; pop it out, go full screen, set its sound), and share your screen from the Mac, seeing who's watching.",
+        "iPhone and Mac: tap or right-click someone in a voice channel to change their volume or watch their screen.",
+        "iPhone and Mac: the same single look, Windows 98 in light or dark."
+      ]
+    },
+    {
+      "version": "0.40.1",
+      "date": "2026-10-08",
+      "title": "Polish everywhere",
+      "items": [
+        "Desktop app: in People, a long \"invited by …\" line under someone waiting now wraps instead of being cut off.",
+        "Desktop app: in the Arch skin, the pinned and waiting counts in the chat header no longer hide their buttons.",
+        "iPhone and Mac: after resetting someone's PIN, the temporary PIN shows in Yap's own box for your skin, with a Copy PIN button.",
+        "Arch skin: drop-down menus (microphone, notifications, away message…) show their little arrow again, so you can tell they open.",
+        "The reaction picker, doodle pad, soundboard and a person's volume menu open above what you clicked when there's no room below, instead of covering it.",
+        "Windows 98 skin: you can reach a message's buttons (reply, react, edit…) with the Tab key, and screen readers read them.",
+        "Windows 98 skin on phones: the little dot on the ☰ button (new messages or a mention elsewhere) sits on the button again instead of half off the screen.",
+        "Personal space on phones: the title is readable again (\"Personal\" instead of \"P…\") and the message box hint fits on one line.",
+        "iPhone and Mac: in the Windows 98 and Apple looks, people waiting to join now show as a bar above the chat with Let in and Turn away, like on the web.",
+        "Keyboard: you can reach people in a voice channel and in People with Tab (volume, mod tools), and the sidebar no longer loses your place when something changes.",
+        "Keyboard: sliders, switches and drop-down menus show a focus ring (or highlight) when you Tab onto them, in every skin.",
+        "Screen readers: dialogs say their names, a reaction says who reacted and whether yours is on.",
+        "iPhone and Mac: in the Arch look with very large text, the message box gets the whole width instead of a narrow strip.",
+        "Windows 98 skin: long messages that fold behind \"Show more\" no longer indent every line, and don't jump when you open them.",
+        "Arch skin: \"Show more\" under a long message lines up with the text.",
+        "Catch up on a phone says \"Tap one…\" instead of \"Click one…\".",
+        "Longer notices at the bottom of the screen use the full width on phones instead of a thin column (and in the Apple skin they're no longer a circle).",
+        "iPhone and Mac: questions use the same words as the web, and cancelling a hang asks first.",
+        "Esc closes the doodle pad and the soundboard too, and after closing any picker you're back in the message box (or on the button you came from).",
+        "A mistyped address shows a \"Page not found\" window with a way back to Yap instead of a blank page.",
+        "The OBS page now says where to get a new link: Settings › Voice › Advanced › Stream to OBS.",
+        "Signing in with a wrong PIN now tells you the owner or a mod can reset it if you forgot it.",
+        "Windows 98 dark: the × on the \"easy to guess\" PIN bar is visible again.",
+        "Draw: when the toolbar takes two rows, Undo, Save, GIF, Share and Clear stay on the right.",
+        "Draw: Clear's question shows its three buttons on one row.",
+        "Draw on phones: the gallery is a tidy grid of bigger thumbnails.",
+        "When's good on phones: best times no longer break in the middle, and planned hangs wrap cleanly.",
+        "Apple and Arch skins: the voice panel's \"Voice connected\" and \"Reconnecting…\" no longer run under the Share and Sounds buttons.",
+        "When's good: the \"8 AM\" label under the folded night hours is no longer half hidden.",
+        "When's good: the voice channel picker in \"Plan a hang\" looks like a dropdown in every skin (and Space's voice picker in Arch).",
+        "When's good (Apple, Arch): the time you tap is outlined even when everyone is free then.",
+        "Cancel works in \"Change PIN or password\" and in the Personal space passcode sheet (it used to complain and stay open).",
+        "Changing your PIN: a mistake is explained plainly (\"Your new PIN is exactly 6 digits.\") instead of the browser's \"Please match the requested format\".",
+        "Arch: Draw's and Space's buttons no longer zoom on hover; the picked brush, tool and layer get a thin accent border.",
+        "Windows 98 skin: writing a long message no longer stretches the Send, GIF and emoji buttons into tall slabs.",
+        "Space on phones: the room's \"here · elsewhere\" count no longer runs out of its box.",
+        "Space on phones: the Character picker opens above the button bar instead of covering it, and the bar fits the screen.",
+        "Screen readers: the channel list says which channels have new messages or mentions, who in a voice channel is muted, and Pictures & GIFs names each picture.",
+        "Space: a drawing you walk up to in the Gallery opens beside the room card instead of covering its wall buttons.",
+        "Apple on phones: Watch together's row of seats fits the screen.",
+        "Windows 98 on phones: places show their whole name in the title bar (\"Watch together\", not \"Watch toge… - Yap\").",
+        "Board: the names on other people's pointers match your skin (a yellow tooltip in Windows 98, flat and monospace in Arch).",
+        "Windows 98 skin: the small grey hints in Settings and other windows are easier to read, especially in the light theme.",
+        "iPhone and Mac: Settings › Owner & mods › Activity uses the same plain words as the web.",
+        "iPhone and Mac: a folded long message says how long it is (\"Show more (3,440 characters)\"), like on the web.",
+        "Watch together: the video's title lines up with \"3 watching\" and Leave.",
+        "Draw: pointing at a saved drawing shows who drew it and when, and screen readers read it out.",
+        "Signing in or up with a password: the hint above the form talks about your password, not a PIN.",
+        "iPhone and Mac: the new sign-in alert's buttons are no longer cut off in the Mac sidebar.",
+        "\"Ping everyone?\" explains what happens in plainer words (and the same ones the iPhone app uses).",
+        "iPhone and Mac: in the Arch look on iPhone, the edit bar no longer mentions an Esc key.",
+        "Keyboard: in Settings, the left and right arrow keys switch tabs.",
+        "Watch together on phones: the mini player no longer covers the newest messages.",
+        "Desktop app: in the Apple skin's dark mode, buttons, fields and switches in Settings are visible again.",
+        "Desktop app: the Personal space passcode dialog puts Unlock / Encrypt before Cancel, like every other dialog.",
+        "Desktop app: search results show a short date and time (\"Oct 6, 7:19 PM\") that no longer runs over the author's name.",
+        "The list of people that pops up when you type @ keeps its \"People\" heading when you move through it with the arrow keys.",
+        "Screen readers: moving through the quick switcher (Ctrl/⌘+K) and the @-mention and emoji suggestions reads out the picked row.",
+        "The Get Yap page: the iPhone steps are no longer greyed out.",
+        "What's new: the \"where to find it\" line under each highlight no longer looks like a link.",
+        "When's good: on next week, the clear button says \"Clear next week\".",
+        "Windows 98 skin: a doodle reaction opened big has its title bar at the top, like every other window.",
+        "Windows 98 skin on phones: the \"Sign out\" buttons in Your devices no longer break onto two lines.",
+        "On phones, small text links like \"Cancel\", \"Let in\" and \"Show all\" are easier to tap.",
+        "Windows 98 skin on phones: the invite links in Settings line up the same way on every row.",
+        "Draw on phones: the layer chips in the palette are bigger, easier to tap and show what's on each layer.",
+        "Apple on phones: drawings you open in Space's Gallery show bigger.",
+        "Keyboard: in a call, the Share/Sounds/Leave buttons and Mute/Deafen keep the keyboard focus (it used to vanish every couple of seconds).",
+        "Desktop app: pinned messages, search results, Catch up, reply quotes and notifications show plain words instead of **formatting marks**.",
+        "Desktop app: the sign-on window uses the same words as the web, and its hint changes with I'm new / I have an account.",
+        "Desktop app: the Ping, Delete and Archive questions use the same words as the web.",
+        "Desktop app: People asks before resetting someone's PIN, like the web.",
+        "Desktop app: turning off an invite link and signing out your other devices ask first, like the web.",
+        "Desktop app: in the Apple skin's dark mode, the buttons under someone in People are visible.",
+        "Desktop app: when a search in one channel finds nothing, a Search everywhere link tries the whole server.",
+        "Desktop app: the sign-on, Set a PIN and custom emoji dialogs start with the cursor in the first field, and Enter finishes them.",
+        "Desktop app: the update window shows every note in full, with a friendlier date, and never says you're up to date before it has checked.",
+        "Desktop app: in People, an away message says which day the person is back (\"back tomorrow, 9:00 AM\").",
+        "iPhone and Mac: in the Windows 98 look, radio buttons have their full sunken edge, so the dark scheme's ones are easy to see.",
+        "iPhone and Mac: in the Apple look, the \"Jump to first unread\" button is easy to read over messages.",
+        "iPhone and Mac: with large text, Settings buttons wrap instead of being cut off.",
+        "iPhone and Mac: in the Apple look with very large text, Mute and Deafen match and the call's Leave button stays whole.",
+        "iPhone and Mac: VoiceOver reads the Mac's Windows 98 title-bar buttons by name, and says \"1 mention\".",
+        "iPhone and Mac: in the Windows 98 look on a sideways iPhone, the blue title bar reaches both edges.",
+        "Desktop app: long channel names and long names in a voice channel end in \"…\" instead of being cut off or running under the icons.",
+        "Desktop app: Windows 98's voice panel is tidier: just the channel name under \"Voice connected\" (the numbers are still in the status bar).",
+        "iPhone and Mac: in the Arch look on a sideways iPhone, sheets' borders line up with their title bars.",
+        "iPhone and Mac: in the Apple look, every away-message suggestion is visible.",
+        "iPhone and Mac: on the Mac, the Apple look's window can be made small again while a sign-in alert shows.",
+        "Desktop app: when you move around with Tab, the button, box or option that has the focus is marked (Windows 98's dotted box, a ring in Apple and Arch).",
+        "Desktop app: the Add a sound window no longer splits \"(≤ 5 s)\" over two lines.",
+        "Desktop app: in the Apple skin, Turn away and Later on the waiting-room and PIN bars look like buttons again in light mode.",
+        "Desktop app: in the Windows 98 skin, a message that starts with a quote no longer has a grey bar over the sender's name.",
+        "Desktop app: in a channel with a long name, the empty message box no longer grows to two lines in a narrow window.",
+        "Desktop app: the search panel's tips line wraps neatly in a narrow window.",
+        "Desktop app: when it can't reach the server, the app says why in plain words instead of an error code.",
+        "Desktop app: in the Arch skin, unread channels are bold with a \"*\" and read ones are dimmed, like the web (no more extra bar and square).",
+        "iPhone and Mac: ⇧⌘F searches messages from anywhere, like on the web.",
+        "Desktop app: in the Windows 98 skin, the people on Draw or Space are greyed so they don't look like more places.",
+        "Desktop app: in the Apple skin's light mode, green words like \"Voice connected\" are easier to read.",
+        "Desktop app: the reply bar and search results cut long text at a word, with a single \"…\".",
+        "Desktop app: the waiting room tells you everyone got a ping and that it opens by itself, like the web.",
+        "iPhone and Mac: the waiting room uses the same friendly words as the web.",
+        "iPhone and Mac: the away-message note in Settings explains who sees it, the same way in every look.",
+        "Desktop app: in a narrow window, the yellow bars over the chat (new sign-in, weak PIN, a hang starting) wrap their words instead of hiding them under the buttons.",
+        "Desktop app: signing in with a password, the hint talks about your password; after a wrong PIN it says the owner or a mod can reset it.",
+        "iPhone and Mac: after a wrong PIN, sign-on says the owner or a mod can reset it.",
+        "iPhone and Mac: the sign-on hint mentions a password when you choose one.",
+        "iPhone and Mac: in the Windows 98 look, the small grey hints in Settings and on your card are easier to read.",
+        "iPhone and Mac: jumping to a message further up (a search result, a pin, a reply's quote) scrolls there again, even when it's above a poll or dice.",
+        "iPhone and Mac: an away message ends the same ways as on the web and desktop: until your next message, 1 hour, 3 hours or tomorrow morning."
+      ]
+    },
+    {
+      "version": "0.40.0",
+      "date": "2026-10-07",
+      "title": "Smoother voice and a big polish pass",
+      "items": [
+        "Settings no longer turns your microphone on; use Test mic in Settings › Voice to see your level.",
+        "Settings no longer jumps around when you switch tabs.",
+        "When Yap can't reach the server at launch it says so, with Try again.",
+        "Long channel names and notes no longer run under the header buttons on narrow windows.",
+        "Search, Pinned and Pictures now open on narrow windows too (floating over the chat).",
+        "The voice panel's quality picker reads \"Own quality\" / \"128k for everyone\", like the web.",
+        "Lots of join requests collapse into one bar with Review.",
+        "Screen sharing now sends the shared tab's sound in stereo and in higher quality.",
+        "Voice calls use less data, especially on shaky connections.",
+        "Settings tabs are in the same order as on the web; Join & mute sounds moved to Voice.",
+        "Wording matches the web app (Yap Properties, Theme, Color…), and Settings' tabs fit in the Apple skin.",
+        "Signing out asks first, and Draw's Clear buttons no longer look like the safe choice.",
+        "The mic meter's mark and the reaction picker's size.",
+        "Voice activation no longer clips the start of what you say, and holds on a little longer at the end of sentences.",
+        "Push-to-talk keeps sending for a moment after you let go, so your last word isn't cut off.",
+        "A noisy room (fan, computer hum) no longer keeps your mic open in voice activity mode.",
+        "Settings › Voice › Hide my IP address in calls (when the server has a voice relay).",
+        "Screen sharing works in the browser now. Before, pressing Share quietly did nothing.",
+        "If your microphone is unplugged, swapped or switched by your computer during a call, Yap picks it back up by itself.",
+        "Yap tells you when your mic is sending pure silence (like a mute switch on the headset).",
+        "An old backup can't bring deleted posts back.",
+        "Deleted pictures leave the backups; a restore brings back only what's used.",
+        "Turning pushes off now stays off. Before, they could quietly come back on the next time Yap reconnected.",
+        "iPhone/Mac: being signed out from another device now fully signs this one out (it no longer rejoins voice or keeps the Personal space unlocked).",
+        "Mentions are exact: \"@Sam Lee\" only notifies Sam Lee (not Sam too), and @names inside code or links don't notify anyone.",
+        "iPhone/Mac: invites are personal links for everyone; the main invite link is for the owner and mods, with a warning.",
+        "iPhone/Mac: Ping everyone always asks first (with an optional message).",
+        "iPhone (Apple skin): no more second search box under the message field; search is the magnifier at the top.",
+        "Arch sheets keep their border down to the screen's edge.",
+        "Mac (Windows 98 skin): sheets like People, Find and Plan a Hang have a real title bar with a close box.",
+        "iPhone (Apple skin): large accessibility text sizes no longer squash the message box, the waiting room or Mute / Deafen.",
+        "On a Yap with its own ntfy server, Settings › Notifications now sends you to the right place to subscribe.",
+        "Watch together: adding two videos at once when nothing is playing no longer loses one.",
+        "A change with one bad field saves nothing.",
+        "Your devices list calls the Mac app \"Yap for Mac\" (it said iPhone) for new sign-ins.",
+        "A merged account's emojis show the real account as uploader.",
+        "Calls keep going when your connection to Yap blips or Yap updates — no more dropouts or chime bursts.",
+        "If someone's connection drops for a moment, they show as \"reconnecting…\" instead of leaving and rejoining.",
+        "When your network changes mid-call (Wi-Fi to mobile data, a laptop waking up), voice comes back noticeably faster.",
+        "Banning through the admin API takes people out of voice at once.",
+        "Error messages about sizes and PINs now say the actual limits (and that a password works too).",
+        "Draw's \"Clear for everyone?\" wraps on narrow windows.",
+        "The moderation log reads in plain words for every action (some showed up as code, like \"obs.revoke\").",
+        "Sending a picture while the connection is down no longer loses the picture and what you wrote with it.",
+        "\"Match system\" looks right everywhere: checkboxes show their tick in the Windows 98 look on a light computer, Draw's workspace goes dark on a dark one, and the Arch top bar's note is readable in light mode.",
+        "Locked encrypted pictures look right in the dark Windows 98 theme (no more light grey box).",
+        "iPhone/Mac: turning on Personal space encryption with long notes now seals all of them, or says how many it couldn't.",
+        "iPhone/Mac: calls use less data (no more bandwidth-probe padding on voice).",
+        "iPhone/Mac: voice activity no longer clips the start of what you say, and uses the same sensitivity scale as the web and desktop apps.",
+        "iPhone/Mac: the mic level meter works while you're alone in a voice channel.",
+        "iPhone/Mac: new voice setting, Hide my IP address in calls (when the server has a voice relay).",
+        "iPhone: new voice setting, High-quality headphone audio (uses the phone's mic).",
+        "iPhone (Arch skin): text follows your text size setting.",
+        "Arch join requests take less of the chat on iPhone.",
+        "If someone's connection to you is bad, a small note next to their name says so (and \"needs the voice relay\" when your networks can't reach each other).",
+        "Turning a quiet friend up past 100% no longer makes their loud moments harsh.",
+        "Locked encrypted notes get Arch's own quiet colour.",
+        "iPhone/Mac: replies, pins, search results and notifications no longer show Markdown symbols.",
+        "iPhone: Settings is a short list of pages (Look, Profile, Voice, Notifications, Account, Owner & mods, Invite, About) instead of one long page.",
+        "iPhone/Mac: Account has its own Settings page; your devices show five at first.",
+        "Settings › Voice › \"Hear yourself\": record a few seconds and hear exactly how you sound to others.",
+        "iPhone/Mac: a locked Personal space shows one line for its encrypted notes and one Unlock button.",
+        "iPhone/Mac: Sign out everywhere else asks first; a new sign-in alert can be answered with It was me.",
+        "Deleting a message says it's erased for good.",
+        "Win98 radio buttons, check boxes, tabs and small toggles are easy to tap on iPhone.",
+        "Small Apple and Arch buttons are easy to tap on iPhone.",
+        "OBS links connect on servers whose key has odd characters; ?key= documented as it is.",
+        "Apple search clears when it closes and doesn't stack up requests.",
+        "iPhone/Mac: closing Plan a Hang, a new poll or a sound upload by accident no longer loses what you typed.",
+        "iPhone/Mac (Apple and Arch skins): a new name is saved when you leave the field, not only on Return.",
+        "Win98 spoilers are a gray bar, like the web's.",
+        "Poll hint says tap on iPhone and click on the Mac; Arch keeps capitals inside words.",
+        "The mod log says \"made Ben a member\"",
+        "IPad signs in as \"ipad\"",
+        "iPhone/Mac (Windows 98 skin): you can remove the caption from a GIF or picture you sent.",
+        "Change Password says so for password accounts.",
+        "iPhone/Mac: pasting a new invite link for the same server keeps you signed in.",
+        "iPhone/Mac: deleted messages disappear from pins, search results and Media too.",
+        "Catch up shows from two channels and says how many channels.",
+        "iPhone/Mac: the sidebar shows the server's version; the app's version is in Settings › About.",
+        "Win98 sheets on iPhone are square.",
+        "The Mac Win98 People badge isn't clipped.",
+        "Apple voice status is readable in light mode.",
+        "Dates read the same in every skin, like the web.",
+        "Sign-on offers I'm new first, in the web's words.",
+        "iPhone/Mac: wording matches the web app in every skin (for example Always on instead of Open mic, Jump to instead of Run).",
+        "The Win98 waiting room says it once, with a hourglass you can see.",
+        "Apple pickers keep the skin tones and KLIPY's credit in a bar.",
+        "Color swatches have spoken names; Arch's sit five to a row.",
+        "iPhone (Windows 98 skin): large text sizes no longer squash the message box.",
+        "An away message's end stays what you picked.",
+        "Win98 and Arch date fields look like their skin; Paste shows only when it can paste.",
+        "In the desktop app, voice holds up much better on shaky Wi-Fi and mobile networks.",
+        "Devices from older Mac builds get the laptop icon.",
+        "A loading GIF shows its still, not a Win98 grey box.",
+        "Arch choices stack at large text sizes instead of pushing the page off screen.",
+        "In the desktop app, voice activity opens just before you speak, ignores a steady fan, and push-to-talk keeps a short tail after you let go.",
+        "Desktop app: automatic gain evens out how loud you come across (Settings › Voice).",
+        "In the desktop app, calls keep going through server updates and Wi-Fi blips: no gap, no join/leave chimes.",
+        "In the desktop app, voice comes back faster when your network changes mid-call.",
+        "The desktop app says quietly when someone's connection is weak or can't get through, and warns when your mic is sending only silence.",
+        "Desktop app: Settings › Voice › Hear yourself plays back a few seconds of exactly how you sound to others.",
+        "The desktop app follows your system's default mic and speakers mid-call and recovers when a device drops out.",
+        "iPhone and Mac: a dropped connection or a server update no longer cuts your call: no gap, no leave/join chimes.",
+        "iPhone and Mac: voice activity uses the web's sensitivity scale, ignores steady room noise and keeps word endings; push to talk keeps going 200 ms after you let go.",
+        "iPhone and Mac: a call whose network path died comes back in about 10 s instead of up to 16 s.",
+        "iPhone and Mac: turning someone up past 100 % no longer distorts their loud bits.",
+        "Mod-log words for bringing a channel back and deleting a clip.",
+        "The desktop app no longer pings Sam when someone writes \"@Sam Lee\".",
+        "Reply quotes, pins, search results, catch-up and notifications show plain words instead of formatting marks like **this**, and custom emojis as small pictures.",
+        "After you let someone in, the People sheet no longer shows them as still waiting.",
+        "Deleted messages disappear from pins, search results and Pictures & GIFs right away.",
+        "Your devices names an iPad running the Yap app \"Yap for iPad\".",
+        "A join request says who else came in with the same personal link.",
+        "Catch-up counts say how many new messages mention you.",
+        "Mentions that came in while you were away now show their badge, and Catch up lists them first.",
+        "Catch up has a \"Mark all read\" button.",
+        "The newest message no longer slides out of view when a bar appears above the chat or a picture finishes loading.",
+        "If someone asks to join with a personal link that was already used, the request says who used it and whose link it is.",
+        "On phones, the join request and Home Screen bars no longer squash their buttons.",
+        "Signing in shows just the sign-in window; a wrong PIN no longer puts your name in the sidebar.",
+        "The waiting room tells newcomers that everyone got a ping and that it opens by itself, and lets them start over.",
+        "New people (and new devices) start with everything read instead of every channel unread, and get a quiet \"You're in. Say hi\" line.",
+        "When someone is let in, a quiet \"Theo joined — invited by Priya\" line appears in the first channel instead of a popup.",
+        "Questions like \"Delete this message?\" and the ping note now appear in Yap's own window, in your skin, instead of the browser's pop-up.",
+        "Settings: the invite list and the activity log show the five newest, with \"Show all\" for the rest.",
+        "The activity log in Settings › Owner & mods reads in plain words for everything (for example \"made Rosa a member\" and \"The owner (admin key)\").",
+        "Settings › Voice is easier to find your way around: mic & output, how you talk, sounds, and the rarely needed options under Advanced.",
+        "Settings › Notifications is split into this device, your phone (ntfy) and quiet hours.",
+        "Stream to OBS: pick one person or sound only from a menu, no link editing.",
+        "Settings keeps its tabs and OK button in view however long a tab is; on phones every tab is visible.",
+        "Settings opens on the tab you last used.",
+        "Settings › Account uses proper icons instead of emoji; the Arch skin's mic meter track is visible in the dark.",
+        "Apple skin, dark: text fields and buttons in Settings, sign-up and other windows are visible again.",
+        "On phones, tap a message to reply, react, pin, save or delete it.",
+        "Arch skin on phones: messages use the full width of the screen.",
+        "The sidebar's footer links sit in two tidy rows; \"Desktop app\" is now \"Apps\".",
+        "On phones, the sidebar's archive buttons only appear after you tap Edit.",
+        "People in a voice channel are indented under it again.",
+        "iPhone and Mac: a quiet note next to someone in a call when their connection is weak, can't get through, or is reconnecting.",
+        "iPhone and Mac: \"Your mic is sending silence\" when nothing at all comes from your microphone.",
+        "iPhone and Mac: Settings › Voice › Hear yourself plays back 4 seconds of you the way others hear it.",
+        "The voice panel is calmer: the channel's sound quality is under ⋯, and the panel only mentions it when it's set for everyone.",
+        "Watch together is calmer when nothing's on: one line and a place to paste a link, no dead buttons.",
+        "Draw on phones: one row of tools, colors and layers in a palette, and the buttons under a bigger page.",
+        "When's good opens on the day and evening hours (night hours are one tap away), with the best times at the top.",
+        "Space on phones: names in your room are never cut off, the lap records board is in view, and a hint says to tap where you want to walk.",
+        "The doodle reaction pad is laid out in neat rows, with React at the bottom right.",
+        "When's good asks \"Cancel this plan?\" in Yap's own sheet too.",
+        "The soundboard fits on phones, and deleting a clip is behind Edit.",
+        "Typing @ suggests people first, with their pictures; @everyone only shows up once you start typing it.",
+        "A message you send while offline says \"Waiting to send…\" until it goes out.",
+        "Search shows how to search as soon as it opens, and when a channel has nothing, one click searches everywhere.",
+        "On phones, Places show their full name in the header.",
+        "Replying shows the first words of the message you're answering, and the message you're editing is highlighted.",
+        "Turning on encryption for your Personal space now seals long older notes too, and tells you if any couldn't be.",
+        "Pictures open big inside Yap, with a button for every picture in the channel.",
+        "iPads that were listed as \"Yap for iPhone\" in Your devices show as \"Yap for iPad\" once they reconnect with the updated app.",
+        "Mentions: custom emojis are skipped like code, and the highlight agrees exactly.",
+        "Settings › Voice: \"Hide my IP address in calls\" now says your voice goes through the server's voice relay.",
+        "Apple light: off switches stay visible inside Settings' grey groups.",
+        "Snippets cut at a word, with one ellipsis.",
+        "Space's \"Tap where you want to walk\" moves to the bottom bar.",
+        "Settings opens with its long lists short again, straight away.",
+        "Fixed: after a shaky connection, you could briefly show up twice in your own call, once as \"reconnecting…\".",
+        "Desktop app: an @mention right against a custom emoji or `code` no longer pings anyone, and the highlight always matches who gets pinged.",
+        "Desktop app: turning on encryption for your Personal space now seals long older notes too, and tells you if any couldn't be.",
+        "Desktop app: mentions that came in while you were away now show their badge, and Catch up lists them first and has \"Mark all read\".",
+        "Desktop app: new people (and new computers) start with everything read, and when someone is let in a quiet \"Theo joined — invited by Priya\" line appears instead of a popup.",
+        "Desktop app: a join request from a personal link that was already used says who used it and whose link it is.",
+        "A custom emoji right next to an @name no longer pings anyone, the same as on the web.",
+        "Mentions from while you were away get their badge, Catch up lists them first and can mark everything read, a new phone starts caught up, and someone being let in shows as a quiet \"joined\" line.",
+        "Desktop app: Settings › Voice is easier to find your way around (mic & output, how you talk, sounds, and the rarely needed options under Advanced), and Notifications is split into this device and quiet hours.",
+        "Desktop app: the invite list and the activity log in Settings show the five newest, with \"Show all\" for the rest, and the activity log reads in plain words.",
+        "Desktop app: the voice panel is calmer: the channel's sound quality is under ⋯, and the panel only mentions it when it's set for everyone.",
+        "Desktop app: Space's lap records board is on the Plaza where you start, the same spot as on the web.",
+        "Desktop app: replying shows the first words of the message you're answering, and the message you're editing is highlighted.",
+        "The call is calmer: the channel's sound quality is under ⋯, and it's only mentioned when it's set for everyone.",
+        "In Windows 98 and Arch, questions like \"Delete this message?\" and the ping note now appear in Yap's own window style.",
+        "Settings › Voice and Notifications are grouped like the web's, with the rarely used voice options under Advanced; long lists show five, then \"Show all\".",
+        "A join request's words wrap short of its buttons.",
+        "Arch: a slider's track shows on Settings' panes.",
+        "The message you start editing comes into view.",
+        "The reply bar's quote and a join request's words keep their width."
+      ]
+    },
+    {
+      "version": "0.39.0",
+      "date": "2026-10-06",
+      "title": "Desktop layers",
+      "items": [
+        "Desktop app 0.8.0: Draw has three layers — pick one with the chips or 1 2 3, hide any just for you (Save, GIF and Share export what you see), and Clear can empty just your layer.",
+        "The privacy page is now written for any Yap server. Nothing about what is stored or who can see it changed."
+      ]
+    },
+    {
+      "version": "0.38.0",
+      "date": "2026-10-06",
+      "title": "Draw layers",
+      "items": [
+        "Draw has three layers: sketch on one, colour on another, ink on top. The eraser only touches the layer you're on.",
+        "Hide a layer just for you with its eye; Save, GIF and Share give you what you see. Press 1, 2 or 3 to switch layers.",
+        "Clear asks whether to clear just this layer or the whole page (either way the page goes to the gallery first).",
+        "Fixed: clicking the black colour in Draw opened the colour picker instead."
+      ]
+    },
+    {
+      "version": "0.37.0",
+      "date": "2026-10-06",
+      "title": "Desktop catches up",
+      "items": [
+        "Clip bus for sounds (limiter, two soundboard clips at once, idle output)",
+        "Draw and Space in the iPhone app no longer hide their top bar under the app's title bar, and match the app's look.",
+        "Encrypted Personal-space pictures open full size on desktop.",
+        "The \"Set a PIN\" prompt on desktop also takes a password.",
+        "Protocol for the v0.36 extras in YapKit",
+        "Merge branch 'main' into agent/apple-qol",
+        "Protocol and core for the v0.36 extras",
+        "Merge main (server for the v0.36 extras)",
+        "Desktop Space has everything the web's has now: the Music room's floor piano and drums, the Pond, the Gallery with everyone's drawings, the race track, fire, water and water balloons.",
+        "Decode sound files for the soundboard (Symphonia + our Opus)",
+        "The doodle box and the sound upload dialog",
+        "Sound player, clip import, doodle drawing and switcher model",
+        "Tidy the doodle box and sound dialog layout; debug-only screenshot hooks",
+        "Desktop has polls, dice, spoilers, a soundboard and join chimes, away messages, quiet hours, hangs, doodle reactions, the media shelf, Catch up and a quick switcher (Ctrl/⌘+K).",
+        "Space fits small windows; a web-sized Gallery viewer",
+        "Extras polish (hang notice icon, spacing under Apple bubbles); more screenshot aids",
+        "Merge agent/desktop-media (doodle box, sound upload, decoder)",
+        "Extras in the Apple and Windows 98 skins",
+        "Merge agent/desktop-space (Space catches up with the web)",
+        "The idle sound-effects stream loop (clippy)",
+        "Soundboard buttons get their own row; emoji the font lacks fall back to a note",
+        "Merge main (web extras, docs)",
+        "Extras match the web (chime names and loudness, away choices, live YouTube links, switcher search row)",
+        "The voice panel's Share and Sounds buttons no longer look like Leave.",
+        "Extras in the Arch skin, soundboard in every call sheet, away in People",
+        "Arch polls no longer blank the whole log",
+        "Slash-command hints, mute blips; remove dead code",
+        "Watch together finds YouTube links the way the web does (embed, nocookie, trailing punctuation)",
+        "UI pass (Windows 98 poll options like the web's, Space's hint wraps, Arch's short voice status, no tofu in Draw one…)",
+        "Merge main (v0.36.0, extras rules refactor, web polish)",
+        "The jump-to-unread tab is readable in every skin (yellow in Windows 98, its text was white); Arch's unread rows get the web's square dot and accent edge; \"Voice connected\"",
+        "Desktop app 0.7.0: search moves to Ctrl+Shift+F (⌘F on a Mac) and Ctrl/⌘+K opens the quick switcher; web places (Watch, When's good, Watch together) open in your browser already signed in.",
+        "UI pass fixes for the extras",
+        "Merge branch 'main' into agent/apple-qol",
+        "Match the web's extras rules after merging v0.36",
+        "Draw and Space inside the iPhone and Mac app no longer show the web's own header, and always open signed in."
+      ]
+    },
+    {
+      "version": "0.36.0",
+      "date": "2026-10-06",
+      "title": "Thirteen extras",
+      "items": [
+        "Draw and Space open signed in, straight to the place",
+        "Extras — polls, server-rolled dice, soundboard + chimes, away messages, quiet hours, hang reminders, doodle reactions, media shelf, catch-up counts, save to Personal",
+        "Spoilers — wrap text in ||double bars|| and it stays hidden until someone clicks it.",
+        "Polls — type /poll Question? | option | option; everyone votes with one click.",
+        "/roll and /flip — dice and coin flips rolled by the server, so nobody can fake a nat 20.",
+        "Doodle reactions — draw a tiny wiggly pixel doodle and stick it on any message.",
+        "Soundboard — short clips anyone in voice can play for the channel, with a volume cap so nothing blasts.",
+        "Join chimes — pick the sound everyone hears when you join their voice channel (or upload your own).",
+        "Away messages — like AIM: set one, and people who mention you get it as a quiet reply.",
+        "Quiet hours — no pushes at night, or snooze them until tomorrow morning.",
+        "Hang reminders — plan a time from When's good; whoever's free gets one reminder when it starts.",
+        "Catch up — one list of what's new in the channels you haven't read, plus a 'New since' line.",
+        "Pictures & GIFs shelf — every picture in a channel as a grid.",
+        "Save to Personal — bookmark any message into your Personal space.",
+        "Quick switcher — Ctrl/⌘+K to jump to any channel, place or person.",
+        "YouTube links get a 'Watch together' button.",
+        "The privacy page now covers poll votes, soundboard clips, away messages, hangs and quiet hours."
+      ]
+    },
+    {
+      "version": "0.35.0",
+      "date": "2026-10-05",
+      "title": "Art Gallery",
+      "items": [
+        "Compressed pictures by default (JPEG ≤ 1600 px) with Full res; export-compliance key",
+        "Desktop app 0.6.2: pictures are compressed by default (tick Full res for the original), the Windows 98 title bars no longer flash, and the version / updates / privacy links sit at the bottom of the sidebar.",
+        "Space has an Art Gallery: everything saved in Draw hangs framed on the walls (newest first); walk up to a drawing to see it big, wiggles and all."
+      ]
+    },
+    {
+      "version": "0.34.0",
+      "date": "2026-10-05",
+      "title": "New stuff",
+      "items": [
+        "Pictures are compressed by default to save space (a phone photo is about 150–300 KB); tick \"Full res\" in the preview to send the original."
+      ]
+    },
+    {
+      "version": "0.33.0",
+      "date": "2026-10-05",
+      "title": "New stuff",
+      "items": [
+        "Version · what's new · Privacy pinned at the bottom of the sidebar",
+        "Unread channels are much easier to spot: bold, bright and with a dot; on phones the menu button shows a dot when something's new elsewhere.",
+        "What's new now opens with the highlights from the past week."
+      ]
+    },
+    {
+      "version": "0.32.0",
+      "date": "2026-10-05",
+      "title": "New stuff",
+      "items": [
+        "Screen sharing: pick a window, your whole screen or a tab, and Smooth (1080p 60 fps, for games), Sharp (text) or Max (up to 4K 60 fps).",
+        "Windows 98 skin: the sidebar's title bar no longer flashes when you click it.",
+        "The version, desktop app and privacy links now sit at the bottom of the left panel."
+      ]
+    },
+    {
+      "version": "0.31.0",
+      "date": "2026-10-05",
+      "title": "Watch together",
+      "items": [
+        "Watch together (Places › Watch): paste a YouTube link and everyone watches the same moment, with theater seats, your own volume and a queue. It keeps playing in a mini player while you chat, and voice stays on.",
+        "Share your screen in a voice channel (Share in the voice panel); friends click LIVE to watch, and can pop it out while they chat.",
+        "Space: walk into the campfire and you're on fire, splash in water and you drip; a Music room with a floor piano and drums, a Pond, a race track, water balloons (F) and timed laps.",
+        "Tell the voice track from a screen share by transceiver, not stream id",
+        "Desktop app 0.6.1: bigger text and buttons by default (more on 4K screens), a Size setting (Settings › Look, or Ctrl/⌘ + and −), the pixel-art Draw with the GIF button, and LIVE / Watch links."
+      ]
+    },
+    {
+      "version": "0.30.0",
+      "date": "2026-10-05",
+      "title": "New stuff",
+      "items": [
+        "Camera purpose string for App Store (ITMS-90683), build 2",
+        "LIVE badge for screen shares, Watch together row (open in the browser)",
+        "Unarchive channels; screen-share flag; Watch together state"
+      ]
+    },
+    {
+      "version": "0.29.0",
+      "date": "2026-10-05",
+      "title": "Pixel Draw",
+      "items": [
+        "Draw is now pixel-art, like WigglyPaint: chunky pixels at a smaller size.",
+        "New GIF button in Draw: saves the wiggling page as an animated GIF (and keeps it in the gallery). Clearing the page archives it as a GIF too."
+      ]
+    },
+    {
+      "version": "0.28.0",
+      "date": "2026-10-05",
+      "title": "New stuff",
+      "items": [
+        "Any TURN relay with a fixed login (free, no-card plans)"
+      ]
+    },
+    {
+      "version": "0.27.0",
+      "date": "2026-10-05",
+      "title": "Desktop 0.6",
+      "items": [
+        "Search, pins, Arch skin, TestFlight-ready",
+        "Desktop app 0.6.0: search and pins, Draw and Space right inside the app (with the new rooms, football and tag), and the Arch skin. Click Update in the app."
+      ]
+    },
+    {
+      "version": "0.26.0",
+      "date": "2026-10-05",
+      "title": "Space games",
+      "items": [
+        "Space: each room is its own voice zone (hear only your room), plus a Cinema, Arcade, Garden fountain, Campfire and a football Pitch.",
+        "Space games: kick a football into the goals, or press T to start a round of tag."
+      ]
+    },
+    {
+      "version": "0.25.0",
+      "date": "2026-10-05",
+      "title": "Arch, search and pins",
+      "items": [
+        "New \"Arch\" skin (Settings › Look): a tiling-window, terminal-style look with IRC-style chat lines.",
+        "Search messages (🔍 or Ctrl/⌘+K): words, from:Name, has:image / gif / link.",
+        "Pin messages to a channel; the pin button lists them.",
+        "Replies and search results now jump to old messages, loading them if needed.",
+        "Archive channels by name"
+      ]
+    },
+    {
+      "version": "0.24.0",
+      "date": "2026-10-05",
+      "title": "Desktop 0.5",
+      "items": [
+        "Desktop app 0.5.0: everything above (no online lights, People, replies, encrypted Personal space, devices and sign-in alerts), plus edit your messages, send pictures and preview them before sending. Click Update in the app."
+      ]
+    },
+    {
+      "version": "0.23.0",
+      "date": "2026-10-05",
+      "title": "New stuff",
+      "items": [
+        "No presence, People sheet, replies, encrypted Personal space, account protection",
+        "Changing your Personal space passcode now asks your other devices for the new one."
+      ]
+    },
+    {
+      "version": "0.22.0",
+      "date": "2026-10-05",
+      "title": "Account protection",
+      "items": [
+        "Someone signing in to your account on a new device now shows an alert on your other devices, with \"Sign out everywhere else\".",
+        "Settings › Account › Your devices: see everywhere you're signed in and sign any of them out.",
+        "Easy-to-guess PINs (like 123456 or a birthday) aren't allowed anymore, and you can use a password instead of a PIN."
+      ]
+    },
+    {
+      "version": "0.21.0",
+      "date": "2026-10-05",
+      "title": "Chill mode",
+      "items": [
+        "No more online/offline lights or member list: drop in and chill. The People button shows everyone.",
+        "Reply to a specific message (hover a message → Reply). A reply to you pings you.",
+        "Deleting a message now erases it for good, picture included.",
+        "Messages can be up to 40,000 characters; long ones fold behind \"Show more\".",
+        "When's good: paint when you're free this week and see when everyone overlaps (Places). Starts fresh every Monday.",
+        "Your Personal space can be end-to-end encrypted with a passcode only you know.",
+        "A plain-words privacy page (link at the bottom of the sidebar)."
+      ]
+    },
+    {
+      "version": "0.20.0",
+      "date": "2026-10-05",
+      "title": "Personal space",
+      "items": [
+        "Apple app: edit messages, send pictures (with a preview), invite links, places and shared voice quality"
+      ]
+    },
+    {
+      "version": "0.19.0",
+      "date": "2026-10-05",
+      "title": "Preview before sending",
+      "items": [
+        "See the GIF or picture you're about to send (and add a caption) before it goes out",
+        "Home Screen icon: if it opens signed out, tap \"Paste the sign-in link\" (Show me copies it for you)"
+      ]
+    },
+    {
+      "version": "0.18.0",
+      "date": "2026-10-05",
+      "title": "Home Screen",
+      "items": [
+        "Add Yap to your iPhone Home Screen in two taps (it opens signed in, full screen like an app)"
+      ]
+    },
+    {
+      "version": "0.17.1",
+      "date": "2026-10-05",
+      "title": "Upload fix",
+      "items": [
+        "Security fix: nobody can change your picture or upload as you"
+      ]
+    },
+    {
+      "version": "0.17.0",
+      "date": "2026-10-05",
+      "title": "Noise removal",
+      "items": [
+        "Stronger noise removal (RNNoise) for your mic: Settings › Voice"
+      ]
+    },
+    {
+      "version": "0.16.0",
+      "date": "2026-10-05",
+      "title": "OBS and browser pushes",
+      "items": [
+        "Stream your calls: Settings › Voice › Stream to OBS gives a link for an OBS Browser Source (everyone in the call sees 📺 while it listens)",
+        "Browser pushes: pings and @mentions pop up even when Yap is closed (Settings › Notifications)"
+      ]
+    },
+    {
+      "version": "0.15.0",
+      "date": "2026-10-05",
+      "title": "Pictures, drawing, space",
+      "items": [
+        "Backups now keep everything (reactions, drawings, edits…) and can rebuild Yap from scratch",
+        "Send pictures: attach, paste or drag them into the chat",
+        "Draw: lines, boxes, circles and (wobbly) text, plus Share to post your drawing in the chat",
+        "Space: emotes (keys 1–6), sit on the sofas and around the campfire (E), and \"same room only\" voice"
+      ]
+    },
+    {
+      "version": "0.14.0",
+      "date": "2026-10-05",
+      "title": "Invites & places",
+      "items": [
+        "Personal invite links: Settings › Invite. Turn one off any time; everyone sees whose link a newcomer used",
+        "Add your own links under Places (the + next to it)",
+        "Set the voice quality for everyone in a channel, right in the voice panel",
+        "An activity log (who let people in, banned, made invites…) in Settings › Owner & mods"
+      ]
+    },
+    {
+      "version": "0.13.0",
+      "date": "2026-10-05",
+      "title": "Edit, favorites, tones",
+      "items": [
+        "Apple app: the new Apple skin, built from native iPhone and Mac parts",
+        "Edit your messages (hover › Edit, or press ↑ in an empty message box)",
+        "Turn quiet friends up to 200% (click their name in voice)",
+        "GIF favorites (tap the ★) and quick moods in the GIF picker",
+        "Skin tones for emojis",
+        "Desktop notifications: choose every message, only mentions, or off",
+        "A proper Yap icon when you add it to your iPhone home screen"
+      ]
+    },
+    {
+      "version": "0.12.0",
+      "date": "2026-10-05",
+      "title": "Desktop skins",
+      "items": [
+        "Desktop app 0.3.0: the new Apple skin too (Settings › Look › Skin)"
+      ]
+    },
+    {
+      "version": "0.11.0",
+      "date": "2026-10-05",
+      "title": "Skins",
+      "items": [
+        "Skins! Settings › Look › Skin: keep Windows 98, or switch to the new clean Apple look with message bubbles and smooth animations"
+      ]
+    },
+    {
+      "version": "0.10.0",
+      "date": "2026-10-05",
+      "title": "Windows 98",
+      "items": [
+        "A whole new look: Windows 98 / AIM. Charcoal (dark) by default, Windows Standard (light) in Settings › Look.",
+        "Click your profile card to open your settings; Mute and Deafen are big buttons now.",
+        "Yap updates itself after a release. No more refreshing.",
+        "Desktop apps for Windows, Mac and Linux: grab them from \"Get the desktop app\" at the bottom of the sidebar. They update themselves with one click.",
+        "Desktop app: reactions, @mentions, pings, GIFs and the Minecraft status.",
+        "Draw has the classic Paint colour box.",
+        "Reactions stay in the order they were added.",
+        "An iPhone and Mac app is on its way (through TestFlight)."
+      ]
+    },
+    {
+      "version": "0.9.1",
+      "date": "2026-10-05",
+      "title": "Code review fixes",
+      "items": [
+        "Opening the board no longer breaks images.",
+        "Links that contain an @name stay clickable.",
+        "Erasing while lines wiggle now erases cleanly.",
+        "Space doesn't go blank if your connection hiccups."
+      ]
+    },
+    {
+      "version": "0.9.0",
+      "date": "2026-10-05",
+      "title": "Yap OS",
+      "items": [
+        "A small native desktop app for Windows and Linux (and Mac) with push-to-talk that works even while you're in a game.",
+        "A whole new look — a cozy 90s desktop. Dark by default, Beige box if you like it light (Settings › Look).",
+        "React to messages with any emoji, including custom ones.",
+        "@mention people to ping them — mentions are highlighted and counted in the sidebar.",
+        "Space: pick an emoji to walk around as, and Yap remembers where you left off.",
+        "Draw: lines wiggle now, like WigglyPaint (there's a toggle).",
+        "Channels just have names now — no more #.",
+        "Stronger security: tougher PIN protection, stricter page rules, and flood limits.",
+        "The members button shows how many people are waiting to be let in.",
+        "A little 'what's new' link at the bottom of the sidebar (you're reading it)."
+      ]
+    },
+    {
+      "version": "0.8.0",
+      "date": "2026-10-04",
+      "title": "Places to hang out",
+      "items": [
+        "Draw: a shared drawing board — everyone sees strokes as they happen, with undo, eraser, and a gallery of saved drawings.",
+        "Space: walk around a little world together, with a CS:GO-style radar and optional proximity voice.",
+        "📣 Ping button and @mentions: everyone online hears a chime, and phones can buzz through the free ntfy app.",
+        "Profile pictures."
+      ]
+    },
+    {
+      "version": "0.7.0",
+      "date": "2026-10-04",
+      "title": "Real accounts",
+      "items": [
+        "Sign up with a name and a 6-digit PIN; sign in on any device with the same name and PIN.",
+        "Wrong PINs lock the name for a while, so nobody can guess yours.",
+        "Owners and mods can reset a forgotten PIN."
+      ]
+    },
+    {
+      "version": "0.6.0",
+      "date": "2026-10-04",
+      "title": "The board, the door, the server",
+      "items": [
+        "A board can open right inside Yap — keep talking while you browse it, and see everyone's mouse pointers.",
+        "Waiting room: new people wait until someone here lets them in.",
+        "Owners and mods can ban people and delete any message.",
+        "The Minecraft server's address and whether it's up, right in the sidebar."
+      ]
+    },
+    {
+      "version": "0.5.1",
+      "date": "2026-10-04",
+      "title": "Backup fix",
+      "items": [
+        "Daily backups land in the right folder."
+      ]
+    },
+    {
+      "version": "0.5.0",
+      "date": "2026-10-04",
+      "title": "One you, one name",
+      "items": [
+        "Names are unique, and duplicate accounts got merged.",
+        "Rename custom emojis."
+      ]
+    },
+    {
+      "version": "0.4.0",
+      "date": "2026-10-04",
+      "title": "All the emojis",
+      "items": [
+        "The full standard emoji set with categories and search; type :shortcodes: like :joy:."
+      ]
+    },
+    {
+      "version": "0.3.0",
+      "date": "2026-10-04",
+      "title": "Make it ours",
+      "items": [
+        "Upload your own custom emojis — no limit.",
+        "Moved to its own domain.",
+        "Nightly backups of everything."
+      ]
+    },
+    {
+      "version": "0.2.0",
+      "date": "2026-10-04",
+      "title": "GIFs",
+      "items": [
+        "Search and send GIFs."
+      ]
+    },
+    {
+      "version": "0.1.0",
+      "date": "2026-10-04",
+      "title": "Hello, Yap",
+      "items": [
+        "Text channels and voice channels. That's it.",
+        "Voice goes straight between friends in crisp Opus — 128 kbps by default, up to 510."
+      ]
+    }
+  ],
+  "highlights": [
+    {
+      "date": "2026-10-08",
+      "emoji": "🧹",
+      "title": "A polish pass everywhere",
+      "text": "Over a hundred small fixes across the web, desktop and iPhone/Mac apps: every button reachable with the keyboard and screen readers, tidier phone layouts in all three skins, the same plain words in every app, and on iPhone, jumping to an older message scrolls there again.",
+      "where": "Everywhere"
+    },
+    {
+      "date": "2026-10-07",
+      "emoji": "📞",
+      "title": "Calls ride out hiccups",
+      "text": "A Wi-Fi blip or a Yap update no longer cuts your call: no gap, no burst of leave/join chimes. Someone whose connection drops for a moment shows as \"reconnecting…\" instead of leaving. Works on the web, the desktop app and the iPhone/Mac app.",
+      "where": "Any voice channel"
+    },
+    {
+      "date": "2026-10-07",
+      "emoji": "🎙️",
+      "title": "Your first word gets through",
+      "text": "Voice activity opens just before you start talking instead of clipping your first syllable, ignores a steady fan, and keeps word endings. Settings › Voice › Hear yourself plays back how you sound to others.",
+      "where": "Settings › Voice"
+    },
+    {
+      "date": "2026-10-06",
+      "emoji": "🖌️",
+      "title": "Layers in Draw",
+      "text": "Draw has three layers: sketch on the bottom one, colour in the middle and ink on top, and the eraser only touches the layer you're on. Hide a layer just for you with its eye; Save, GIF and Share give you what you see.",
+      "where": "Places › Draw › the 1 2 3 chips (or press 1, 2, 3)"
+    },
+    {
+      "date": "2026-10-06",
+      "emoji": "🔊",
+      "title": "Soundboard and join chimes",
+      "text": "Play short clips for everyone in your voice channel, and pick the sound people hear when you join (or upload your own). Loud clips are turned down for everyone, and your own soundboard volume and mute switch are in Settings › Voice.",
+      "where": "Voice panel › Sounds"
+    },
+    {
+      "date": "2026-10-06",
+      "emoji": "📊",
+      "title": "Polls, dice and spoilers",
+      "text": "/poll Question? | A | B makes a poll anyone can vote in. /roll and /flip are rolled by the server, so nobody can fake a nat 20. Wrap text in ||double bars|| to hide a spoiler.",
+      "where": "Any channel"
+    },
+    {
+      "date": "2026-10-06",
+      "emoji": "✏️",
+      "title": "Doodle reactions",
+      "text": "Draw a tiny wiggly pixel doodle and stick it on a message, like WigglyPaint in a reaction.",
+      "where": "Hover a message › squiggle"
+    },
+    {
+      "date": "2026-10-06",
+      "emoji": "☕",
+      "title": "Away messages (like AIM)",
+      "text": "Set one in Settings › Profile. Anyone who mentions you gets it as a quiet reply; it ends by itself when you're back.",
+      "where": "Settings › Profile"
+    },
+    {
+      "date": "2026-10-06",
+      "emoji": "🗓️",
+      "title": "Hang reminders and quiet hours",
+      "text": "Pick a time in When's good and plan a hang: whoever's free gets one reminder when it starts. Quiet hours keep pushes away at night, or snooze them until morning.",
+      "where": "When's good · Settings › Notifications"
+    },
+    {
+      "date": "2026-10-06",
+      "emoji": "✨",
+      "title": "Catch up, quick switcher, media shelf",
+      "text": "See what's new in the channels you missed in one list, jump anywhere with Ctrl/⌘+K, and browse every picture and GIF in a channel. Bookmark any message into your Personal space.",
+      "where": "Sidebar · Ctrl/⌘+K · header"
+    },
+    {
+      "date": "2026-10-05",
+      "emoji": "🎬",
+      "title": "Watch together",
+      "text": "Paste a YouTube link and everyone watches the same moment, with theater seats, your own volume and a queue. It keeps playing in a mini player while you chat, and voice stays on.",
+      "where": "Places › Watch"
+    },
+    {
+      "date": "2026-10-05",
+      "emoji": "🖥️",
+      "title": "Screen sharing, up to 1080p 60 fps (or 4K)",
+      "text": "Share a window, your whole screen or a tab with your voice channel; friends click LIVE to watch, or pop it out while they chat.",
+      "where": "Voice panel › Share"
+    },
+    {
+      "date": "2026-10-05",
+      "emoji": "🗺️",
+      "title": "Space got big",
+      "text": "Eight rooms that are their own voice zones, football, tag, water balloons, timed race laps, a floor piano, and yes: walk into the campfire and you're on fire.",
+      "where": "Places › Space"
+    },
+    {
+      "date": "2026-10-05",
+      "emoji": "💻",
+      "title": "The desktop app",
+      "text": "A real app for Windows, Linux and Mac (no Electron): push-to-talk that works in games, Draw and Space built in, and one-click updates.",
+      "where": "Desktop app (bottom of the sidebar)"
+    },
+    {
+      "date": "2026-10-05",
+      "emoji": "🔒",
+      "title": "An encrypted Personal space",
+      "text": "Notes to yourself, locked with a passcode only you know; not even the server can read them.",
+      "where": "Personal space"
+    },
+    {
+      "date": "2026-10-05",
+      "emoji": "🔎",
+      "title": "Search and pins",
+      "text": "Find any message (from:Name, has:image) and pin the good ones to a channel.",
+      "where": "🔍 or Ctrl/⌘+K · 📌 on a message"
+    },
+    {
+      "date": "2026-10-05",
+      "emoji": "🎨",
+      "title": "Three looks",
+      "text": "Windows 98 / AIM, a clean Apple-style skin, and a terminal-y Arch skin with IRC-style chat.",
+      "where": "Settings › Look"
+    },
+    {
+      "date": "2026-10-05",
+      "emoji": "↩️",
+      "title": "Replies and long messages",
+      "text": "Reply to a specific message (it pings them), and messages can be up to 40,000 characters.",
+      "where": "Hover a message › Reply"
+    },
+    {
+      "date": "2026-10-05",
+      "emoji": "😌",
+      "title": "Chill mode",
+      "text": "No online/offline lights or member list watching you; deleted posts are really erased.",
+      "where": "People button for the member list"
+    },
+    {
+      "date": "2026-10-05",
+      "emoji": "🖍️",
+      "title": "Pixel-art Draw with GIFs",
+      "text": "Wobbly WigglyPaint-style lines; save the page as an animated GIF.",
+      "where": "Places › Draw"
+    }
+  ]
+}

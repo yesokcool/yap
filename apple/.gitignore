@@ -1,0 +1,10 @@
+# Build products and per-user Xcode state (builds use -derivedDataPath outside the repo).
+YapKit/.build/
+YapKit/.swiftpm/
+xcuserdata/
+*.xcuserstate
+DerivedData/
+
+# Your own signing identity and upload settings (copy the .example files).
+Config/Local.xcconfig
+ExportOptions.plist

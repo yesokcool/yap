@@ -1,0 +1,20 @@
+// Signing and app identity for every target and configuration.
+//
+// These are neutral defaults, so a fresh clone builds as is. Put your own
+// values in Local.xcconfig next to this file (copy Local.example.xcconfig).
+// Git ignores it, and it's read last, so it wins.
+
+// Your Apple Developer team ID (Xcode › Settings › Accounts). Empty means no
+// team: the simulator and the Mac still build, a real iPhone doesn't.
+YAP_TEAM =
+
+// The App Store bundle id. Yap DEV uses this plus ".dev"; the tests add
+// ".tests" (".dev.tests" under Yap DEV).
+YAP_BUNDLE_ID = com.example.yap
+
+// The App Group the iPhone app shares with its screen-broadcast extension
+// (<id>.broadcast). Follows the bundle id; Yap DEV gets its own.
+YAP_APP_GROUP = group.$(YAP_BUNDLE_ID)
+YAP_APP_GROUP[config=Dev] = group.$(YAP_BUNDLE_ID).dev
+
+#include? "Local.xcconfig"

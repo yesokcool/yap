@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy · Yap</title>
+  <meta name="description" content="What Yap stores, who can see it, and how to delete it.">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="js/theme.js"></script>
+  <style>
+    body { overflow: auto; }
+    .log { max-width: 680px; margin: 24px auto; padding: 0 8px 40px; }
+    .log-window { padding: 3px; background: var(--face); box-shadow: var(--frame); }
+    .log-body { margin-top: 3px; padding: 6px 16px 14px; background: var(--window); box-shadow: var(--sunken); font-size: 13px; line-height: 1.5; }
+    .log-body h2 { margin: 18px 0 6px; font-size: 14px; }
+    .log-body h2:first-child { margin-top: 8px; }
+    .log-body ul { margin: 6px 0; padding-left: 20px; }
+    .log-body li { margin: 4px 0; }
+    .log-body p { margin: 6px 0; }
+    .log-body table { width: 100%; margin: 8px 0; border-collapse: collapse; font-size: 12.5px; }
+    .log-body th, .log-body td { padding: 5px 6px; border-bottom: 1px solid color-mix(in srgb, currentColor 18%, transparent); text-align: left; vertical-align: top; }
+    .log-body th { font-weight: 700; }
+    .updated { color: var(--gray, #888); font-size: 12px; }
+    .log-actions { display: flex; justify-content: flex-end; padding: 8px 4px 4px; }
+  </style>
+</head>
+<body>
+  <main class="log">
+    <div class="log-window">
+      <div class="title-bar"><img class="title-icon" src="icon.svg" alt=""><span class="title-text">Privacy</span></div>
+      <div class="log-body">
+        <p class="updated">Last updated 6 October 2026</p>
+        <p>Yap is a small chat for a group of friends, run by one of them on their own server. It's free, open-source software, not a business: there are no ads, no analytics, no tracking, and nothing is ever sold. This page explains in plain words what Yap keeps and who can see it. It describes Yap as it comes; whoever runs this server can tell you if they changed anything.</p>
+
+        <h2>The short version</h2>
+        <ul>
+          <li><b>Everything you post in channels is visible to every member</b>, including people who join later. Treat it like a group chat with friends.</li>
+          <li><b>Your Personal space is only for you.</b> Turn on encryption (Settings › Account) and even Yap's server can't read it.</li>
+          <li><b>Yap doesn't show who's online.</b> No status dots, no "last seen", no read receipts. People only see you when you're in a voice channel or on a shared place like Draw or Space.</li>
+          <li><b>Deleting a message erases it</b> from the server right away; old backups catch up within 60 days.</li>
+          <li>Whoever runs this server can technically read anything stored on it, except encrypted Personal-space notes.</li>
+        </ul>
+
+        <h2>Who can see what</h2>
+        <table>
+          <tr><th>What</th><th>Who sees it</th></tr>
+          <tr><td>Messages, pictures, GIFs, reactions and replies in channels</td><td>Every member</td></tr>
+          <tr><td>Your name, color, picture and role (owner/mod)</td><td>Every member</td></tr>
+          <tr><td>That you're in a voice channel, and muted/deafened</td><td>Every member</td></tr>
+          <tr><td>Your voice</td><td>Only the people in the call with you, sent directly between devices</td></tr>
+          <tr><td>Being on Draw, Space or the board, and your pointer/spot there (and Space's mini-games, which aren't saved)</td><td>Everyone on the same place</td></tr>
+          <tr><td>Your times in When's good</td><td>Every member (wiped every week)</td></tr>
+          <tr><td>Being in the Watch together audience, and what's playing</td><td>Every member</td></tr>
+          <tr><td>Your screen, when you share it (and its sound, while Share sound is on)</td><td>Only the people in your voice channel who choose to watch it, sent directly between devices; never stored</td></tr>
+          <tr><td>That you're typing (not in your Personal space)</td><td>Every member, for a few seconds</td></tr>
+          <tr><td>Your Personal space</td><td>Only you (and, unless encrypted, the server)</td></tr>
+          <tr><td>The mod log (who let someone in, banned, made an invite…)</td><td>Every member; it never contains message text</td></tr>
+        </table>
+
+        <h2>What Yap stores</h2>
+        <ul>
+          <li><b>Your account:</b> name, color, picture, role, and your PIN as a salted, scrambled hash (nobody can read your PIN back, not even whoever runs the server).</li>
+          <li><b>Your devices:</b> a sign-in token for each device (stored scrambled), what kind of browser or app it is (like "Chrome on Windows"), and when it was added and last connected. That's for account security: you can see this list in Settings › Account, and nobody else can.</li>
+          <li><b>What you post:</b> messages, pictures, reactions (doodle reactions too), poll votes, custom emojis, drawings, soundboard clips, and earlier versions of messages you edited (until you delete the message). Everyone can see who voted for what in a poll.</li>
+          <li><b>Small extras:</b> your Space character and where you last stood, your When's good times (wiped weekly) and hangs you planned, your away message (until it ends), your join chime, invite links you made (only a scrambled copy of the link), and your notification settings — including your quiet hours and the time zone they're in, so pushes stay quiet at your night.</li>
+          <li><b>Not stored:</b> your IP address (it's only held in memory for a short time to slow down spam), your location, your contacts, or anything about what you do outside Yap.</li>
+        </ul>
+        <p>Pictures and avatars live at long random links. Anyone who has the exact link can open it, so think twice before sharing a picture link outside Yap.</p>
+
+        <h2>Deleting things</h2>
+        <ul>
+          <li><b>Messages:</b> deleting erases the text, picture, GIF, reactions (doodles included), poll votes and earlier edits from the server immediately. An empty placeholder stays so replies can say "Original message was deleted". A message someone saved to their Personal space is only a link to it, so it disappears for them too.</li>
+          <li><b>Backups:</b> Cloudflare keeps 30 days of recovery points, and whoever runs this server may keep daily backups (Yap's backup tool keeps 60 days). Deleted things disappear from those as they age out.</li>
+          <li><b>Your whole account:</b> ask whoever runs this server to remove it along with your messages.</li>
+          <li><b>This device:</b> “Sign out of this device” in Settings removes this device's sign-in.</li>
+        </ul>
+
+        <h2>Encrypted Personal space</h2>
+        <p>When you turn it on, your Personal-space notes and pictures are locked on your device with a passcode only you know, before they're sent. The server and backups only ever hold scrambled data. Each of your devices asks for the passcode once. Yap can't recover it: forget it and those notes are gone for good. Someone holding your unlocked device can still read them, so lock it in Settings if you share a device.</p>
+        <p>Channels aren't encrypted this way: the server can read them, which is how history, backups and moderation work. If you use “Save to Personal” with encryption on, the server can see which message you saved (a link to it), but never what you wrote next to it.</p>
+
+        <h2>Other services Yap uses</h2>
+        <ul>
+          <li><b>Cloudflare</b> hosts Yap and its data. Like any web host, it sees your IP address when you connect.</li>
+          <li><b>KLIPY</b> powers GIF search. Your searches go straight from your device to KLIPY with a random ID (not your name), so KLIPY sees your IP address and what you searched. GIFs load from KLIPY's servers.</li>
+          <li><b>Voice</b> connects your devices directly, so people in a call with you can see your IP address. Connection helpers from Cloudflare and Google (STUN) see it too while the call sets up.</li>
+          <li><b>Phone pushes through ntfy</b> (only if you turn them on): the notification (who posted and a preview of the text) goes through ntfy (ntfy.sh, unless this server uses its own), which can read it.</li>
+          <li><b>Browser pushes</b> (only if you turn them on): sent through Apple, Google or Mozilla, encrypted so they can't read them.</li>
+          <li><b>A board</b> (if this server has one) is a separate site with its own data; whoever runs it can tell you what it keeps.</li>
+          <li><b>YouTube</b> (only when you use Watch together): videos and their thumbnails load from YouTube (youtube-nocookie.com), so Google sees your IP address and what's playing. Video titles are looked up by Yap's server, not your device.</li>
+        </ul>
+
+        <h2>On your device</h2>
+        <p>Yap saves your settings and sign-in token in your browser's storage (or the app's), plus your Personal-space key if you unlocked it. There are no tracking cookies.</p>
+
+        <h2>Questions</h2>
+        <p>Ask whoever runs this server, in Yap. If this page changes, the <a href="/changelog">changelog</a> will say so.</p>
+      </div>
+      <div class="log-actions"><a class="btn primary" href="/">Back to Yap</a></div>
+    </div>
+  </main>
+</body>
+</html>

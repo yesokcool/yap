@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <title>Yap</title>
+  <meta name="description" content="Text and voice. That's it.">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#000080">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-title" content="Yap">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+  <script src="js/theme.js"></script>
+  <script type="module" src="js/app.js"></script>
+  <!-- The page's parts (js/app/), fetched alongside app.js rather than after it. -->
+  <link rel="modulepreload" href="js/app/state.js">
+  <link rel="modulepreload" href="js/app/ui.js">
+  <link rel="modulepreload" href="js/app/look.js">
+  <link rel="modulepreload" href="js/app/uploads.js">
+  <link rel="modulepreload" href="js/app/updates.js">
+  <link rel="modulepreload" href="js/app/push.js">
+  <link rel="modulepreload" href="js/app/places.js">
+  <link rel="modulepreload" href="js/app/voice-ui.js">
+  <link rel="modulepreload" href="js/app/sidebar.js">
+  <link rel="modulepreload" href="js/app/messages.js">
+  <link rel="modulepreload" href="js/app/chat.js">
+  <link rel="modulepreload" href="js/app/composer.js">
+  <link rel="modulepreload" href="js/app/people.js">
+  <link rel="modulepreload" href="js/app/account.js">
+  <link rel="modulepreload" href="js/app/personal.js">
+  <link rel="modulepreload" href="js/app/search.js">
+  <link rel="modulepreload" href="js/app/extras.js">
+  <link rel="modulepreload" href="js/app/settings-ui.js">
+</head>
+<body>
+  <div class="app" id="app">
+    <nav class="sidebar" id="sidebar" aria-label="Channels">
+      <header class="server-header title-bar">
+        <img class="title-icon" src="icon.svg" alt="">
+        <span class="title-text">Yap</span>
+        <span class="conn" id="conn" data-status="connecting" title="Connecting…"></span>
+      </header>
+      <div class="user-panel" id="user-panel"></div>
+      <div class="voice-panel" id="voice-panel" hidden></div>
+      <div class="share-panel" id="share-panel" hidden></div>
+      <div class="channel-scroll">
+        <button class="catchup-row" id="catchup-row" type="button" data-action="catchup" title="What's new in the channels you haven't read" hidden></button>
+        <section class="channel-group personal-group" id="personal-group" hidden>
+          <ul id="personal"></ul>
+        </section>
+        <section class="channel-group">
+          <h2><span>Text channels</span><button class="link-btn edit-rows" type="button" data-action="edit-rows" aria-pressed="false">Edit</button><button class="icon-btn tiny" data-action="new-channel" data-kind="text" title="New text channel" aria-label="New text channel"></button></h2>
+          <ul id="text-channels"></ul>
+        </section>
+        <section class="channel-group">
+          <h2><span>Voice channels</span><button class="link-btn edit-rows" type="button" data-action="edit-rows" aria-pressed="false">Edit</button><button class="icon-btn tiny" data-action="new-channel" data-kind="voice" title="New voice channel" aria-label="New voice channel"></button></h2>
+          <ul id="voice-channels"></ul>
+        </section>
+        <section class="channel-group" id="links-group" hidden>
+          <h2><span>Places</span><button class="link-btn edit-rows" type="button" data-action="edit-rows" aria-pressed="false">Edit</button><button class="icon-btn tiny" data-action="add-link" title="Add a link" aria-label="Add a link"></button></h2>
+          <ul id="links"></ul>
+        </section>
+        <section class="channel-group" id="mc-group" hidden>
+          <h2><span>Minecraft</span></h2>
+          <div id="mc"></div>
+        </section>
+      </div>
+      <footer class="sidebar-footer">
+        <a class="version-link" id="version-link" href="/changelog" target="_blank" rel="noopener" title="What's new">yap</a>
+        <span class="footer-links">
+          <a class="version-link app-link" href="/download" target="_blank" rel="noopener" title="Yap for your computer and phone">Apps</a>
+          <a class="version-link app-link" href="/privacy" target="_blank" rel="noopener">Privacy</a>
+          <a class="version-link app-link" id="source-link" target="_blank" rel="noopener" title="Yap is open source (AGPL-3.0)" hidden>Source</a>
+        </span>
+      </footer>
+    </nav>
+    <div class="scrim" id="scrim" data-action="close-drawers"></div>
+
+    <main class="chat">
+      <header class="chat-header">
+        <button class="icon-btn mobile-only" data-action="toggle-sidebar" aria-label="Channels" data-icon="menu"></button>
+        <h1 id="channel-title"></h1>
+        <span class="spacer"></span>
+        <button class="icon-btn" data-action="switcher" aria-label="Jump to…" title="Jump to a channel, place or person (Ctrl/⌘+K)" data-icon="command"></button>
+        <button class="icon-btn" data-action="search" aria-label="Search messages" title="Search messages (Ctrl/⌘+Shift+F)" data-icon="search"></button>
+        <button class="icon-btn" data-action="pins" aria-label="Pinned messages" title="Pinned messages" data-icon="pin"></button>
+        <button class="icon-btn" data-action="shelf" aria-label="Pictures and GIFs" title="Every picture and GIF in this channel" data-icon="images"></button>
+        <button class="icon-btn" data-action="ping" aria-label="Ping everyone" title="Ping everyone (chime + phone push)" data-icon="megaphone"></button>
+        <button class="icon-btn has-badge" data-action="people" aria-label="People" title="People"><span data-icon="users"></span><span class="count-badge" id="waiting-badge" hidden></span></button>
+      </header>
+      <div class="banner" id="banner" hidden></div>
+      <div class="update-bar" id="update-bar" hidden></div>
+      <div class="update-bar alert-bar" id="signin-bar" hidden></div>
+      <div class="update-bar" id="weak-bar" hidden></div>
+      <div class="update-bar hang-bar" id="hang-bar" hidden></div>
+      <div class="update-bar home-bar" id="home-bar" hidden>
+        <span>📱 Put Yap on your Home Screen: it opens full screen, like an app.</span><span class="spacer"></span>
+        <button class="btn small" type="button" data-action="add-to-home">Show me</button>
+        <button class="icon-btn tiny" type="button" data-action="dismiss-home" aria-label="Not now" title="Not now" data-icon="x"></button>
+      </div>
+      <div class="requests" id="requests" hidden></div>
+      <div class="messages" id="messages" role="region" aria-labelledby="channel-title">
+        <button class="jump-pill" id="jump-pill" type="button" data-action="jump-unread" hidden>↑ Jump to first unread</button>
+        <div class="message-list" id="message-list"></div>
+      </div>
+      <div class="board-view" id="board-view" hidden></div>
+      <div class="draw-view" id="draw-view" hidden></div>
+      <div class="space-view" id="space-view" hidden></div>
+      <div class="when-view" id="when-view" hidden></div>
+      <div class="watch-view" id="watch-view" hidden></div>
+      <div class="screen-view" id="screen-view" hidden></div>
+      <div class="composer-wrap">
+        <div class="gif-picker" id="gif-picker" hidden></div>
+        <div class="gif-picker emoji-picker" id="emoji-picker" hidden></div>
+        <div class="emoji-suggest" id="emoji-suggest" hidden></div>
+        <div class="staged" id="staged" hidden></div>
+        <div class="edit-bar" id="edit-bar" hidden><span>Editing your message</span><span class="spacer"></span><small class="muted key-hint">Esc to cancel</small><button type="button" class="link-btn" data-action="cancel-edit">Cancel</button></div>
+        <div class="edit-bar reply-bar" id="reply-bar" hidden></div>
+        <form class="composer" id="composer" autocomplete="off">
+          <textarea id="input" rows="1" enterkeyhint="send" aria-label="Message"></textarea>
+          <button class="gif-btn emoji-btn" type="button" data-action="toggle-emojis" aria-label="Emojis" title="Emojis" data-icon="smile"></button>
+          <button class="gif-btn attach-btn" type="button" data-action="attach-image" aria-label="Attach a picture" title="Attach a picture (or paste / drop one)" data-icon="image"></button>
+          <input type="file" id="image-file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+          <button class="gif-btn" type="button" data-action="toggle-gifs" aria-label="GIFs" title="GIFs">GIF</button>
+          <button class="send-btn" type="submit" aria-label="Send" data-icon="send"></button>
+        </form>
+        <div class="typing" id="typing" aria-live="polite"></div>
+      </div>
+    </main>
+
+  </div>
+
+  <div class="gate" id="gate" hidden>
+    <div class="gate-card">
+      <div class="title-bar"><img class="title-icon" src="icon.svg" alt=""><span class="title-text">Yap</span></div>
+      <h2 id="gate-title"></h2>
+      <p class="muted" id="gate-text"></p>
+      <div class="gate-wait" id="gate-wait" role="progressbar" aria-label="Waiting" hidden><span></span><span></span><span></span><span></span><span></span></div>
+      <p class="gate-actions" id="gate-actions" hidden><button class="link-btn" type="button" data-action="start-over">Not you? Start over</button></p>
+    </div>
+  </div>
+
+  <div id="audio-sink" hidden></div>
+  <div class="popover" id="popover" hidden></div>
+  <div class="gif-picker emoji-picker floating" id="react-picker" hidden></div>
+  <div class="doodle-pad floating-panel" id="doodle-pad" hidden></div>
+  <div class="soundboard floating-panel" id="soundboard" hidden></div>
+  <dialog id="switcher-dialog" class="sheet switcher-sheet" aria-label="Jump to"></dialog>
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <dialog id="welcome-dialog" class="sheet">
+    <form method="dialog" id="welcome-form">
+      <h2>Sign On</h2>
+      <div class="signon-logo"><img src="icon.svg" alt=""><div><b>Yap</b><small>Text and voice with friends</small></div></div>
+      <div class="segmented" role="radiogroup" aria-label="New or returning">
+        <label><input type="radio" name="mode" value="signup" checked><span>I'm new</span></label>
+        <label><input type="radio" name="mode" value="login"><span>I have an account</span></label>
+      </div>
+      <p class="muted" id="welcome-hint"></p>
+      <label class="field">
+        <span>Screen name</span>
+        <input name="name" maxlength="32" required autocomplete="username" placeholder="Your name">
+      </label>
+      <label class="field">
+        <span class="field-row"><span class="secret-label">PIN <small class="muted">— 6 digits</small></span><button class="link-btn" type="button" data-action="secret-mode" data-form="welcome-form">Use a password</button></span>
+        <input name="pin" type="password" inputmode="numeric" pattern="\d{6}" maxlength="6" required autocomplete="current-password" placeholder="••••••">
+      </label>
+      <div class="field" id="welcome-colors" data-signup-only><span>Color</span><div class="swatches"></div></div>
+      <div class="field welcome-paste" id="welcome-paste" hidden>
+        <button class="btn primary wide" type="button" data-action="paste-signin">📋 Paste the sign-in link from Safari</button>
+        <small class="muted">Opened Yap from your Home Screen? “Show me” in Safari copied a link that signs this icon in.</small>
+      </div>
+      <label class="field" id="welcome-key-field" hidden>
+        <span>Invite or sign-in link</span>
+        <input name="key" autocomplete="off" placeholder="Paste the link or key">
+      </label>
+      <p class="form-error" id="welcome-error" hidden></p>
+      <div class="actions"><button class="btn primary" type="submit">Sign On</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="pin-dialog" class="sheet" aria-labelledby="pin-title">
+    <form method="dialog" id="pin-form" novalidate>
+      <h2 id="pin-title">Change your PIN or password</h2>
+      <p class="muted" id="pin-hint"></p>
+      <label class="field" id="pin-current-field" hidden>
+        <span id="pin-current-label">Current PIN</span>
+        <input name="current" type="password" autocomplete="current-password">
+      </label>
+      <label class="field">
+        <span class="field-row"><span class="secret-label">New PIN <small class="muted">— 6 digits</small></span><button class="link-btn" type="button" data-action="secret-mode" data-form="pin-form">Use a password instead</button></span>
+        <input name="pin" type="password" inputmode="numeric" pattern="\d{6}" maxlength="6" required autocomplete="new-password">
+      </label>
+      <label class="field">
+        <span>Same again</span>
+        <input name="again" type="password" inputmode="numeric" pattern="\d{6}" maxlength="6" required autocomplete="new-password">
+      </label>
+      <p class="form-error" id="pin-error" hidden></p>
+      <div class="actions">
+        <button class="btn" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn primary" type="submit" id="pin-save">Save PIN</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="sheet confirm-sheet" aria-labelledby="confirm-title">
+    <form method="dialog" id="confirm-form">
+      <h2 id="confirm-title"></h2>
+      <div class="confirm-body">
+        <span class="confirm-icon" aria-hidden="true"></span>
+        <div class="confirm-words">
+          <p id="confirm-text"></p>
+          <label class="field" id="confirm-field" hidden><span id="confirm-label"></span><input id="confirm-input" autocomplete="off"></label>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn" value="cancel" id="confirm-cancel" formnovalidate>Cancel</button>
+        <button class="btn primary" value="ok" id="confirm-ok">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="info-dialog" class="sheet" aria-labelledby="info-title">
+    <form method="dialog">
+      <h2 id="info-title"></h2>
+      <p id="info-text"></p>
+      <div class="actions"><button class="btn primary" value="ok">OK</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="share-dialog" class="sheet" aria-labelledby="share-title">
+    <form method="dialog" id="share-form">
+      <h2 id="share-title">Share Screen</h2>
+      <div class="field">
+        <span>Share</span>
+        <div class="segmented" role="radiogroup" aria-label="What to share">
+          <label><input type="radio" name="surface" value="window" checked><span>A window</span></label>
+          <label><input type="radio" name="surface" value="monitor"><span>Whole screen</span></label>
+          <label><input type="radio" name="surface" value="browser"><span>A browser tab</span></label>
+        </div>
+      </div>
+      <div class="field share-quality">
+        <span>Quality</span>
+        <label class="radio-row"><input type="radio" name="quality" value="smooth" checked><span><b>Smooth</b> — 1080p, 60 fps. Games and video. ~8 Mbps upload per person watching.</span></label>
+        <label class="radio-row"><input type="radio" name="quality" value="sharp"><span><b>Sharp</b> — 1440p, 30 fps. Text, code, slides. ~6 Mbps each.</span></label>
+        <label class="radio-row"><input type="radio" name="quality" value="max"><span><b>Max</b> — up to 4K, 60 fps. ~25 Mbps each: fast upload, one or two people watching.</span></label>
+      </div>
+      <label class="toggle"><input type="checkbox" name="sound" checked><span>Share sound <small class="muted">— a tab’s sound, or your whole screen’s on Windows. You can switch it while sharing.</small></span></label>
+      <p class="muted share-hint">🎮 Games: borderless or windowed fullscreen shares best. If an exclusive-fullscreen game shows up black, share your whole screen instead.</p>
+      <div class="actions">
+        <button class="btn" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn primary" value="share">Share</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="search-dialog" class="sheet people-sheet wide-sheet" aria-labelledby="search-title">
+    <header class="sheet-header">
+      <h2 id="search-title">Search</h2>
+      <button class="icon-btn" type="button" data-action="close-search" aria-label="Close" data-icon="x"></button>
+    </header>
+    <div class="people-list">
+      <form id="search-form" class="search-form" autocomplete="off">
+        <input id="search-input" type="search" placeholder="Search messages" aria-label="Search messages">
+        <div class="segmented search-scope" role="radiogroup" aria-label="Where">
+          <label><input type="radio" name="scope" value="here" checked><span id="search-here">This channel</span></label>
+          <label><input type="radio" name="scope" value="all"><span>Everywhere</span></label>
+        </div>
+      </form>
+      <div class="buddy-well"><ul id="search-results" class="result-list"></ul></div>
+    </div>
+  </dialog>
+
+  <dialog id="pins-dialog" class="sheet people-sheet wide-sheet" aria-labelledby="pins-title">
+    <header class="sheet-header">
+      <h2 id="pins-title">Pinned</h2>
+      <button class="icon-btn" type="button" data-action="close-pins" aria-label="Close" data-icon="x"></button>
+    </header>
+    <div class="people-list">
+      <div class="buddy-well"><ul id="pins-list" class="result-list"></ul></div>
+    </div>
+  </dialog>
+
+  <dialog id="shelf-dialog" class="sheet people-sheet wide-sheet" aria-labelledby="shelf-title">
+    <header class="sheet-header">
+      <h2 id="shelf-title">Pictures &amp; GIFs</h2>
+      <button class="icon-btn" type="button" data-action="close-shelf" aria-label="Close" data-icon="x"></button>
+    </header>
+    <div class="people-list">
+      <div class="buddy-well shelf-well"><div class="shelf-grid" id="shelf-grid"></div></div>
+      <div class="actions"><button class="btn small" type="button" data-action="shelf-more" id="shelf-more" hidden>Older…</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="picture-dialog" class="sheet wide-sheet picture-sheet" aria-labelledby="picture-title">
+    <header class="sheet-header">
+      <h2 id="picture-title">Picture</h2>
+      <button class="icon-btn" type="button" data-action="close-picture" aria-label="Close" data-icon="x"></button>
+    </header>
+    <div class="picture-body"><img id="picture-img" alt=""></div>
+    <div class="picture-foot">
+      <small class="muted" id="picture-meta"></small><span class="spacer"></span>
+      <button class="btn small" type="button" data-action="picture-shelf" id="picture-shelf">All pictures here</button>
+      <a class="btn small" id="picture-full" target="_blank" rel="noopener">Open full size</a>
+    </div>
+  </dialog>
+
+  <dialog id="catchup-dialog" class="sheet people-sheet wide-sheet" aria-labelledby="catchup-title">
+    <header class="sheet-header">
+      <h2 id="catchup-title">Catch up</h2>
+      <button class="icon-btn" type="button" data-action="close-catchup" aria-label="Close" data-icon="x"></button>
+    </header>
+    <div class="people-list">
+      <p class="muted devices-hint">What's new since you last read each channel. Click one to start at the first unread message.</p>
+      <div class="buddy-well"><ul id="catchup-list" class="result-list"></ul></div>
+      <div class="actions"><button class="btn small" type="button" data-action="catchup-read-all" id="catchup-read-all" hidden>Mark all read</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="devices-dialog" class="sheet people-sheet" aria-labelledby="devices-title">
+    <header class="sheet-header">
+      <h2 id="devices-title">Your devices</h2>
+      <button class="icon-btn" type="button" data-action="close-devices" aria-label="Close" data-icon="x"></button>
+    </header>
+    <div class="people-list">
+      <p class="muted devices-hint">Everywhere you're signed in. Don't recognize one? Sign it out, then change your PIN.</p>
+      <div class="buddy-well"><ul id="devices-list"></ul></div>
+      <div class="actions devices-actions"><button class="btn danger" type="button" data-action="signout-others">Sign out everywhere else</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="people-dialog" class="sheet people-sheet" aria-labelledby="people-title">
+    <header class="sheet-header">
+      <h2 id="people-title">People</h2>
+      <button class="icon-btn" type="button" data-action="close-people" aria-label="Close" data-icon="x"></button>
+    </header>
+    <div class="people-list" id="members"></div>
+  </dialog>
+
+  <dialog id="vault-dialog" class="sheet" aria-labelledby="vault-title">
+    <form method="dialog" id="vault-form">
+      <h2 id="vault-title">Encrypt your Personal space</h2>
+      <p class="muted" id="vault-text"></p>
+      <input type="text" name="username" autocomplete="username" hidden>
+      <label class="field" id="vault-old-field"><span>Current passcode</span><input name="old" type="password" autocomplete="current-password"></label>
+      <label class="field" id="vault-pass-field"><span id="vault-pass-label">Passcode</span><input name="pass" type="password" autocomplete="new-password"></label>
+      <label class="field" id="vault-again-field"><span>Same again</span><input name="again" type="password" autocomplete="new-password"></label>
+      <p class="form-error" id="vault-error" hidden></p>
+      <div class="actions">
+        <button class="link-btn" type="button" data-action="vault-forgot" id="vault-forgot">Forgot it?</button>
+        <span class="spacer"></span>
+        <button class="btn" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn primary" type="submit" id="vault-ok">Encrypt</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="home-dialog" class="sheet" aria-labelledby="home-title">
+    <form method="dialog">
+      <h2 id="home-title">Add to Home Screen</h2>
+      <ol class="home-steps" id="home-steps"></ol>
+      <p class="muted" id="home-note"></p>
+      <div class="actions"><button class="btn primary" value="ok">OK</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="link-dialog" class="sheet" aria-labelledby="link-title">
+    <form method="dialog" id="link-form">
+      <h2 id="link-title">Add a place</h2>
+      <p class="muted">A link everyone sees under Places, like a wiki, a doc or a game site.</p>
+      <label class="field"><span>Name</span><input name="name" maxlength="32" required placeholder="Wiki"></label>
+      <label class="field"><span>Address</span><input name="url" type="url" required placeholder="https://"></label>
+      <div class="actions">
+        <button class="btn" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn primary" value="add">Add</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="channel-dialog" class="sheet" aria-labelledby="new-channel-title">
+    <form method="dialog" id="channel-form">
+      <h2 id="new-channel-title">New channel</h2>
+      <div class="segmented" role="radiogroup" aria-label="Kind">
+        <label><input type="radio" name="kind" value="text" checked><span>Text</span></label>
+        <label><input type="radio" name="kind" value="voice"><span>Voice</span></label>
+      </div>
+      <label class="field">
+        <span>Name</span>
+        <input name="name" maxlength="32" required placeholder="new-channel">
+      </label>
+      <div class="actions">
+        <button class="btn" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn primary" value="create">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog" class="sheet wide-sheet" aria-labelledby="settings-title">
+    <form method="dialog" id="settings-form">
+      <header class="sheet-header">
+        <h2 id="settings-title">Yap Properties</h2>
+        <button class="icon-btn" value="close" aria-label="Close" data-icon="x"></button>
+      </header>
+      <div class="tabs" role="tablist" id="settings-tabs"></div>
+      <div class="tab-panel" role="tabpanel">
+
+      <section>
+        <h3>Look</h3>
+        <div class="field">
+          <span>Theme</span>
+          <div class="segmented" role="radiogroup" aria-label="Theme">
+            <label><input type="radio" name="theme" value="dark"><span>Charcoal (dark)</span></label>
+            <label><input type="radio" name="theme" value="light"><span>Windows Standard (light)</span></label>
+            <label><input type="radio" name="theme" value="system"><span>Match system</span></label>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h3>Profile</h3>
+        <div class="field">
+          <span>Picture</span>
+          <div class="avatar-edit">
+            <span id="settings-avatar"></span>
+            <button class="btn small" type="button" data-action="upload-avatar">Upload…</button>
+            <button class="btn small" type="button" data-action="remove-avatar">Remove</button>
+            <input type="file" id="avatar-file" accept="image/png,image/jpeg,image/gif,image/webp" hidden>
+          </div>
+        </div>
+        <label class="field"><span>Name</span><input name="name" maxlength="32" required></label>
+        <div class="field"><span>Color</span><div class="swatches" id="settings-colors"></div></div>
+        <div class="field away-field">
+          <span>Away message <small class="muted">— like AIM: people who mention you get it as a quiet reply. It ends by itself.</small></span>
+          <p class="away-now" id="away-now"></p>
+          <div class="inline-form">
+            <input name="awayText" maxlength="80" placeholder="at work til 6 · dinner 🍝 · asleep" aria-label="Away message">
+            <span class="combo"><select name="awayUntil" aria-label="Until">
+              <option value="">until my next message</option>
+              <option value="60">for 1 hour</option>
+              <option value="180">for 3 hours</option>
+              <option value="tomorrow">until tomorrow morning</option>
+            </select></span>
+            <button class="btn" type="button" data-action="away-set">Set</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h3>Voice</h3>
+        <fieldset class="settings-group">
+          <legend>Mic &amp; output</legend>
+          <label class="field"><span>Microphone</span><span class="combo"><select name="inputId"></select></span></label>
+          <label class="field"><span>Output</span><span class="combo"><select name="outputId"></select></span></label>
+          <div class="field">
+            <span>Mic check <small class="muted">— hear yourself the way others do: noise removal, voice activity and the call's quality included</small></span>
+            <div class="inline-form">
+              <button class="btn small" type="button" data-action="hear-yourself">Hear yourself</button>
+              <small class="muted" id="hear-status" role="status"></small>
+            </div>
+          </div>
+        </fieldset>
+        <fieldset class="settings-group">
+          <legend>How you talk</legend>
+          <div class="field">
+            <span>Input mode</span>
+            <div class="segmented" role="radiogroup" aria-label="Input mode">
+              <label><input type="radio" name="mode" value="vad"><span>Voice activity</span></label>
+              <label><input type="radio" name="mode" value="ptt"><span>Push to talk</span></label>
+              <label><input type="radio" name="mode" value="open"><span>Always on</span></label>
+            </div>
+            <small class="muted" id="music-vad-note" hidden>Music mode keeps your mic open in voice activity mode, so quiet passages don't cut out.</small>
+          </div>
+          <div class="field" data-show-mode="vad">
+            <span>Sensitivity <small class="muted">— speak; the bar should cross the line</small></span>
+            <div class="meter-wrap">
+              <div class="meter"><div class="meter-fill" id="meter-fill"></div><div class="meter-mark" id="meter-mark"></div></div>
+              <input type="range" name="vadThreshold" min="-80" max="-10" step="1" aria-label="Sensitivity">
+            </div>
+            <button class="btn small" type="button" data-action="mic-test">Test mic</button>
+          </div>
+          <div class="field" data-show-mode="ptt">
+            <span>Push-to-talk key <small class="muted">— works while Yap is focused</small></span>
+            <button class="btn keycap" type="button" id="ptt-key" data-action="bind-ptt"></button>
+          </div>
+          <label class="toggle" data-hide-music><input type="checkbox" name="noiseSuppression"><span>Noise suppression</span></label>
+          <label class="toggle" data-hide-music><input type="checkbox" name="echoCancellation"><span>Echo cancellation</span></label>
+          <label class="toggle" data-hide-music><input type="checkbox" name="autoGain"><span>Automatic gain</span></label>
+          <p class="muted settings-note" data-show-music hidden>Music mode is on (under Advanced), so noise suppression, echo cancellation and automatic gain are off.</p>
+        </fieldset>
+        <fieldset class="settings-group">
+          <legend>Sounds</legend>
+          <label class="toggle"><input type="checkbox" name="sounds"><span>Join &amp; mute sounds</span></label>
+          <div class="field chime-field">
+            <span>Your join chime <small class="muted">— what everyone hears when you join their voice channel</small></span>
+            <div class="inline-form">
+              <span class="combo"><select name="chime" aria-label="Join chime"></select></span>
+              <button class="btn small" type="button" data-action="chime-preview">▶ Play</button>
+              <button class="btn small" type="button" data-action="chime-upload">Use my own clip…</button>
+              <input type="file" id="chime-file" accept="audio/*,.mp3,.m4a,.wav,.ogg,.webm" hidden>
+            </div>
+            <small class="muted">Your own clip: up to 2 seconds; loud ones are turned down.</small>
+          </div>
+          <label class="field"><span>Soundboard volume <small class="muted">— never louder than each clip's safe level</small></span><input type="range" name="soundboardVolume" min="0" max="100" step="5"></label>
+          <label class="toggle"><input type="checkbox" name="soundboardMuted"><span>Mute the soundboard</span></label>
+        </fieldset>
+        <details class="settings-advanced" id="voice-advanced">
+          <summary>Advanced</summary>
+          <div class="advanced-body">
+            <label class="field">
+              <span>Quality</span>
+              <span class="combo"><select name="bitrate">
+                <option value="64000">64 kbps — Discord's default</option>
+                <option value="96000">96 kbps — Discord's max (unboosted)</option>
+                <option value="128000">128 kbps — crisp (default)</option>
+                <option value="256000">256 kbps — overkill</option>
+                <option value="510000">510 kbps — Opus maximum</option>
+              </select></span>
+              <small class="muted">Voice goes straight between you and your friends, so better quality costs nothing. A call uses the lower of the two people's settings.</small>
+            </label>
+            <label class="toggle"><input type="checkbox" name="music"><span>Music mode <small class="muted">— stereo, all processing off. Use with headphones.</small></span></label>
+            <label class="toggle" data-hide-music><input type="checkbox" name="rnnoise"><span>Stronger noise removal <small class="muted">— RNNoise, the same AI filter the desktop app uses (keyboards, fans, dogs)</small></span></label>
+            <label class="toggle"><input type="checkbox" name="relayOnly"><span>Hide my IP address in calls <small class="muted" id="relay-note">— sends your voice through the server's voice relay instead of straight to friends</small></span></label>
+            <div class="field obs-field">
+              <span>Stream to OBS <small class="muted">— a private link for an OBS Browser Source that plays a voice channel. Everyone in the call sees 📺 while it's listening.</small></span>
+              <div class="inline-form obs-options">
+                <span class="combo"><select id="obs-channel" aria-label="Voice channel for OBS"></select></span>
+                <span class="combo"><select id="obs-only" aria-label="Whose voice"><option value="">Everyone in the call</option></select></span>
+              </div>
+              <label class="toggle"><input type="checkbox" id="obs-sound-only"><span>Sound only <small class="muted">— no names or pictures on screen</small></span></label>
+              <div class="inline-form"><button class="btn" type="button" data-action="create-obs">Make OBS link</button></div>
+              <div class="inline-form" id="obs-made" hidden><input id="obs-link" readonly aria-label="OBS link"><button class="btn primary" type="button" data-action="copy-obs">Copy</button></div>
+              <small class="muted">Keep the link private: anyone with it can listen.</small>
+              <button class="btn small" type="button" data-action="revoke-obs">Turn off all my OBS links</button>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <section>
+        <h3>Notifications</h3>
+        <fieldset class="settings-group">
+          <legend>On this device</legend>
+          <label class="field">
+            <span>Notifications <small class="muted">— while Yap is open in the background</small></span>
+            <span class="combo"><select name="desktopNotify">
+              <option value="all">Every message</option>
+              <option value="mentions">Only @mentions and pings</option>
+              <option value="off">Off</option>
+            </select></span>
+          </label>
+          <label class="toggle" id="browser-push-row"><input type="checkbox" id="browser-push"><span>Browser pushes <small class="muted">— pings and @mentions pop up even when Yap is closed (on iPhone: add Yap to your Home Screen first)</small></span></label>
+        </fieldset>
+        <fieldset class="settings-group">
+          <legend>On your phone (ntfy)</legend>
+          <label class="field">
+            <span>Phone pushes <small class="muted">— via the free ntfy app</small></span>
+            <span class="combo"><select name="notifyMode">
+              <option value="off">Off</option>
+              <option value="pings">Pings and @mentions</option>
+              <option value="all">Everything while I'm away</option>
+            </select></span>
+          </label>
+          <div class="ntfy-help" id="ntfy-help" hidden>
+            <ol>
+              <li>Install <b>ntfy</b> (iPhone, Android, or the desktop/web app).</li>
+              <li>Tap <b>+</b> / Subscribe and paste your private topic: <code id="ntfy-topic"></code> <button class="link-btn" type="button" data-action="copy-topic">Copy</button></li>
+              <li>That's it — pings and mentions now buzz that device. <a id="ntfy-open" target="_blank" rel="noopener">Open in ntfy</a></li>
+            </ol>
+            <small class="muted">Pushes travel through <span id="ntfy-host">ntfy.sh</span>. Your topic is a long random name — keep it to yourself, anyone with it can read your pushes.</small>
+          </div>
+        </fieldset>
+        <fieldset class="settings-group quiet-field">
+          <legend>Quiet hours</legend>
+          <p class="muted settings-note">No pushes or notification sounds at night (your time zone).</p>
+          <label class="toggle"><input type="checkbox" name="quietOn"><span>Every night</span></label>
+          <div class="inline-form" id="quiet-times" hidden>
+            <label>from <input type="time" name="quietFrom" value="23:00"></label>
+            <label>to <input type="time" name="quietTo" value="08:00"></label>
+          </div>
+          <label class="toggle"><input type="checkbox" name="quietMentions"><span>Still let @mentions and replies through</span></label>
+          <p id="quiet-snooze"></p>
+        </fieldset>
+      </section>
+
+      <section>
+        <h3>Account</h3>
+        <p class="muted">On another phone or computer, choose “I have an account” and sign in with your name and PIN.</p>
+        <div class="field" id="vault-settings">
+          <span>Personal space <small class="muted">— encrypted with a passcode only you know</small></span>
+          <div class="inline-form">
+            <button class="btn" type="button" data-action="vault-setup" id="vault-setup-btn"><span data-icon="lock"></span>Encrypt it</button>
+            <button class="btn" type="button" data-action="vault-change" id="vault-change-btn">Change passcode</button>
+            <button class="btn" type="button" data-action="vault-lock" id="vault-lock-btn">Lock on this device</button>
+          </div>
+        </div>
+        <div class="inline-form" id="home-row" hidden>
+          <button class="btn" type="button" data-action="add-to-home"><span data-icon="smartphone"></span>Add Yap to your Home Screen</button>
+        </div>
+        <div class="inline-form">
+          <button class="btn" type="button" data-action="devices"><span data-icon="devices"></span>Your devices</button>
+          <button class="btn" type="button" data-action="change-pin" id="change-pin-btn">Change PIN or password</button>
+          <button class="btn danger" type="button" data-action="sign-out">Sign out of this device</button>
+        </div>
+      </section>
+
+      <section>
+        <h3>Owner &amp; mods</h3>
+        <p class="muted">New people wait in a waiting room until someone here lets them in. The owner and mods can also ban people and delete any message.</p>
+        <p id="owner-status"></p>
+        <div class="field" id="owner-claim">
+          <span>Claim owner <small class="muted">— paste the admin key (the server's <code>ADMIN_KEY</code> secret)</small></span>
+          <div class="inline-form"><input id="owner-key" type="password" autocomplete="off" placeholder="Admin key"><button class="btn" type="button" data-action="claim-owner">Claim</button></div>
+        </div>
+        <div class="field" id="storage-field" hidden>
+          <span>Storage</span>
+          <div id="storage"></div>
+        </div>
+        <div class="field">
+          <span>Activity <small class="muted">— who let people in, banned, made invites… (never message text)</small></span>
+          <ol class="modlog" id="modlog"></ol>
+          <button class="link-btn show-all" type="button" data-action="show-all" data-list="modlog" hidden>Show all</button>
+        </div>
+      </section>
+
+      <section>
+        <h3>Invite</h3>
+        <p class="muted">Make a link for each person you invite. They still wait until someone here lets them in, and everyone sees whose link they used. You can turn a link off any time; people already in stay in.</p>
+        <div class="inline-form">
+          <input id="invite-label" maxlength="40" placeholder="Who's it for? (e.g. Sam)">
+          <button class="btn" type="button" data-action="create-invite">Make a link</button>
+        </div>
+        <div class="field invite-made" id="invite-made" hidden>
+          <span>Copy it now <small class="muted">— it's only shown once</small></span>
+          <div class="inline-form"><input id="invite-link" readonly><button class="btn primary" type="button" data-action="copy-made-invite">Copy</button></div>
+        </div>
+        <ul class="invite-list" id="invite-list"></ul>
+        <button class="link-btn show-all" type="button" data-action="show-all" data-list="invites" hidden>Show all</button>
+        <div id="main-invite" hidden>
+          <p class="muted">The main link never expires and doesn't say who invited whom. Only share it if you mean to.</p>
+          <button class="btn" type="button" data-action="copy-invite">Copy main invite link</button>
+        </div>
+      </section>
+      </div>
+      <div class="settings-actions"><button class="btn primary" value="close">OK</button></div>
+    </form>
+  </dialog>
+</body>
+</html>
