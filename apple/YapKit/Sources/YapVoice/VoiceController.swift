@@ -178,6 +178,15 @@ public final class VoiceController: VoiceCoordinator {
     @ObservationIgnored var now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
     let keeper: CallKeeper
+    /// The call report's notes (PROTOCOL.md › Voice › Call report).
+    public let notes: CallNotes
+    /// How the app names itself in a call report ("Yap for iPhone 1.0 (5)").
+    @ObservationIgnored public var appDescription = "Yap"
+    /// Why the call is about to end, when it isn't "You left." (the app's off-screen reasons).
+    @ObservationIgnored private var endingReason: String?
+    @ObservationIgnored private var networkWatch: NetworkWatch?
+    @ObservationIgnored private var network: String?
+    @ObservationIgnored private var noted = NotedState()
     @ObservationIgnored private unowned let client: YapClient
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let settingsKey: String
@@ -187,10 +196,13 @@ public final class VoiceController: VoiceCoordinator {
     #endif
 
     /// `requestsMicPermission: false` for tests on a synthetic audio device.
+    /// `callReports`: where the last three call reports are kept (the app
+    /// passes `CallReportStore.standard`; nil keeps them in memory only).
     public init(client: YapClient, engine: VoiceEngine = VoiceEngine(), defaults: UserDefaults = .standard,
-                settingsKey: String = "yap.voice", requestsMicPermission: Bool = true) {
+                settingsKey: String = "yap.voice", requestsMicPermission: Bool = true, callReports: CallReportStore? = nil) {
         self.client = client
         self.engine = engine
+        notes = CallNotes(store: callReports)
         self.defaults = defaults
         self.settingsKey = settingsKey
         self.requestsMicPermission = requestsMicPermission
@@ -208,13 +220,19 @@ public final class VoiceController: VoiceCoordinator {
             let servers = await ServerAPI(endpoint: endpoint).iceServers()
             return servers == IceServerConfig.fallback ? [] : servers // couldn't ask: keep what we have
         }
-        engine.onPeerState = { [weak self] sid, state in self?.keeper.peerStateChanged(sid, state) }
+        engine.onPeerState = { [weak self] sid, state in
+            self?.keeper.peerStateChanged(sid, state)
+            self?.notePeerState(sid, state)
+        }
+        engine.onPeerEvent = { [weak self] sid, event in self?.notePeerEvent(sid, event) }
+        engine.onStats = { [weak self] stats in self?.noteStats(stats) }
         engine.onScreenViewers = { [weak self] joined in self?.screenViewersChanged(joined: joined) }
         engine.onRekey = { [weak self] old, new in
             // The sharer I watch came back under a new session: follow it.
             if self?.watch?.sid == old { self?.watch?.sid = new }
         }
         keeper.onChime = { [weak self] event in self?.onEvent?(event) }
+        keeper.onGaveUp = { [weak self] in self?.notes.note("Not back on the server within 20 s: the call starts over") }
         keeper.channelId = { [weak self] in self?.channelId }
         applySettings(old: nil)
         client.voice = self
@@ -225,8 +243,15 @@ public final class VoiceController: VoiceCoordinator {
             watch.highQualityBluetooth = { [weak self] in self?.settings.highQualityBluetooth == true }
             watch.onEvent = { [weak self] event in
                 guard let self, self.isInVoice else { return }
+                let words = switch event {
+                case .interruptionBegan: "Sound interrupted (a phone call, an alarm, Siri or another app)"
+                case .interruptionEnded: "Interruption over"
+                case .failed: "The sound couldn't be started again"
+                }
+                self.notes.note(words)
                 self.onAudioSession?(event)
             }
+            watch.onNote = { [weak self] text in self?.notes.note(text) }
             RTCAudioSession.sharedInstance().add(watch)
             sessionWatch = watch
         }
@@ -314,6 +339,7 @@ public final class VoiceController: VoiceCoordinator {
         stopSharing(announce: false)
         stopWatching()
         if channelId != nil { onEvent?(.left) }
+        endNotes(endingReason ?? "You left.")
         joinedOnce = nil
         wantedChannelId = nil
         channelId = nil
@@ -327,8 +353,14 @@ public final class VoiceController: VoiceCoordinator {
     /// The app is quitting: say goodbye if we're in a call (others would
     /// otherwise keep our connection a while in case we're only reconnecting).
     public func goodbye() {
+        endNotes("Yap was quit.")
         guard channelId != nil else { return }
         client.send(.voiceLeave)
+    }
+
+    /// The next leave() ends the call for this reason (the call report says it).
+    public func noteEnding(_ reason: String) {
+        endingReason = reason
     }
 
     /// Everyone in `channelId` uses this quality (nil = each person's own).
@@ -560,9 +592,11 @@ public final class VoiceController: VoiceCoordinator {
         // Kept our call? Match who's back, keep waiting for who isn't.
         keeper.ready()
         guard let wanted = wantedChannelId else { return }
+        notes.note("Back on the server")
         if client.channelsById[wanted]?.kind == .voice {
             Task { await sendJoin(wanted) }
         } else {
+            endNotes("The channel is gone.")
             wantedChannelId = nil
             joinedOnce = nil
             keeper.leave()
@@ -573,12 +607,14 @@ public final class VoiceController: VoiceCoordinator {
 
     public func clientConnectionDropped() {
         let current = channelId
+        if current != nil { notes.note("Your connection to the server dropped; the call keeps going meanwhile") }
         channelId = nil
         // Audio is peer to peer: a call can outlive the socket.
         keeper.socketDropped(mySid: engine.mySid, key: client.resumeKey, channelId: current)
     }
 
     public func clientDidSignOut() {
+        endNotes("You signed out.")
         stopSharing(announce: false)
         stopWatching()
         joinedOnce = nil
@@ -594,6 +630,7 @@ public final class VoiceController: VoiceCoordinator {
         guard channel.id == wantedChannelId, channel.bitrate != channelBitrate else { return }
         let before = callBitrate
         channelBitrate = channel.bitrate
+        notes.note("The channel's quality: \(channel.bitrate.map { "\($0 / 1000) kbps for everyone" } ?? "each person's own")")
         engine.bitrate = callBitrate
         if callBitrate != before { engine.applySettings(renegotiate: true) }
     }
@@ -602,13 +639,16 @@ public final class VoiceController: VoiceCoordinator {
         let sid = change.sid
         guard sid == client.mySid else {
             // Someone else: joins, leaves, lost sockets, resumes (and their chimes).
+            let kept = change.prev.map { engine.peerSids.contains($0) } ?? false
             keeper.voiceChanged(change, mine: channelId)
+            noteVoiceChange(change, kept: kept)
             return
         }
         if let newChannel = change.channelId, newChannel != channelId {
             // Our join landed: offer to everyone already there — or, if the
             // server took our resume, carry on with the connections we kept.
             let rejoin = channelId == nil && change.previous == nil && wantedChannelId == newChannel && joinedOnce == newChannel
+            let newCall = joinedOnce != newChannel
             channelId = newChannel
             joinedOnce = newChannel
             wantedChannelId = newChannel
@@ -616,6 +656,11 @@ public final class VoiceController: VoiceCoordinator {
             let others = client.voiceSessions(in: newChannel).map(\.sid).filter { $0 != sid }
             let handedOver = keeper.joined(prev: change.prev, others: others)
             if !rejoin && !handedOver { onEvent?(.joined) }
+            if newCall {
+                beginNotes(channelId: newChannel, others: others)
+            } else {
+                notes.note(handedOver ? "Back in the call: it was kept, nothing to reconnect" : "Back in the call as a newcomer (connecting again)")
+            }
             // Still sharing after a join that didn't carry it over: say so again.
             if sharing != nil, client.sessions[sid]?.voice?.screen != true { sendState() }
         } else if change.channelId == nil, let current = channelId {
@@ -624,6 +669,7 @@ public final class VoiceController: VoiceCoordinator {
             channelId = nil
             // Not a switch we asked for (the channel was archived): we're out.
             if wantedChannelId == current {
+                endNotes("The channel was archived.")
                 stopSharing(announce: false)
                 stopWatching()
                 wantedChannelId = nil
@@ -648,6 +694,7 @@ public final class VoiceController: VoiceCoordinator {
     // MARK: Settings
 
     private func applySettings(old: VoiceSettings?) {
+        if let old { noteSettings(old: old) }
         engine.mode = settings.mode
         engine.vadThreshold = settings.vadThreshold
         engine.volumes = settings.volumes
@@ -695,6 +742,164 @@ public final class VoiceController: VoiceCoordinator {
     }
 }
 
+// MARK: The call report (PROTOCOL.md › Voice › Call report)
+
+/// What the notes last said, so a change is written once.
+struct NotedState {
+    /// uid → the connection state last noted.
+    var states: [String: VoiceEngine.PeerState] = [:]
+    var micSilent = false
+    var micMode: String?
+    var sensitivityAt: Date?
+}
+
+extension VoiceController {
+    /// A session's account and name ("Someone" if we never knew).
+    func who(_ sid: String) -> (uid: String, name: String)? {
+        guard let uid = client.sessions[sid]?.uid ?? engine.peerUid(sid) else { return nil }
+        return (uid, client.user(uid)?.name ?? "Someone")
+    }
+
+    /// Copy the report: the call we're in, else the last one kept.
+    public func callReportText() -> String? {
+        notes.text(live: isInVoice)
+    }
+
+    func beginNotes(channelId: String, others: [String]) {
+        let name = client.channelsById[channelId]?.name ?? channelId
+        let report = CallReport(started: Date(), app: appDescription, device: DeviceInfo.description, channel: name,
+                                settings: reportSettings(), audio: AudioRouteInfo.describe())
+        notes.begin(report)
+        noted = NotedState()
+        noted.micMode = MicModes.offered ? MicModes.reported : nil
+        let people = others.compactMap { client.sessions[$0] }.filter { !$0.isListener }
+        var names: [String] = []
+        for session in people {
+            let name = client.user(session.uid)?.name ?? "Someone"
+            notes.person(session.uid, name)
+            names.append(name)
+        }
+        notes.note("Joined \(name)" + (names.isEmpty ? "; nobody else here yet" : " with \(names.joined(separator: ", "))"))
+        network = nil
+        networkWatch?.cancel()
+        networkWatch = NetworkWatch { [weak self] kind in self?.networkChanged(kind) }
+    }
+
+    func endNotes(_ reason: String) {
+        endingReason = nil
+        networkWatch?.cancel()
+        networkWatch = nil
+        notes.end(reason)
+    }
+
+    private func networkChanged(_ kind: String) {
+        guard notes.isTaking, kind != network else { return }
+        notes.note(network.map { "Network: \($0) → \(kind)" } ?? "Network: \(kind)")
+        network = kind
+    }
+
+    /// Someone else's `voice` event in our channel: joins, leaves, resumes.
+    func noteVoiceChange(_ change: VoiceChange, kept: Bool) {
+        guard let mine = channelId, let session = client.sessions[change.sid], !session.isListener else { return }
+        let name = client.user(session.uid)?.name ?? "Someone"
+        if change.channelId == mine, change.previous != mine {
+            if kept { notes.reconnectKept(uid: session.uid, name: name) } else { notes.joined(uid: session.uid, name: name) }
+        } else if change.previous == mine, change.channelId != mine {
+            notes.left(uid: session.uid, name: name, lost: change.lost)
+        }
+    }
+
+    func notePeerState(_ sid: String, _ state: VoiceEngine.PeerState?) {
+        // Closing is said by the leave; a move to a new session isn't a change.
+        guard notes.isTaking, let state, state != .new, let person = who(sid), noted.states[person.uid] != state else { return }
+        noted.states[person.uid] = state
+        notes.connectionState(uid: person.uid, name: person.name, state)
+    }
+
+    func notePeerEvent(_ sid: String, _ event: VoiceEngine.PeerEvent) {
+        guard notes.isTaking, let (uid, name) = who(sid).map({ ($0.uid, $0.name) }) else { return }
+        switch event {
+        case .iceRestart(let n): notes.iceRestart(uid: uid, name: name, count: n)
+        case .rebuilt: notes.rebuilt(uid: uid, name: name, words: "connection rebuilt")
+        case .freshStart: notes.rebuilt(uid: uid, name: name, words: "they started a new connection, and we followed")
+        case .weak(let on): notes.weak(uid: uid, name: name, on)
+        }
+    }
+
+    func noteStats(_ stats: [PeerStats]) {
+        guard notes.isTaking else { return }
+        notes.stats(stats.compactMap { s in
+            who(s.sid).map { CallNotes.Reading(uid: $0.uid, name: $0.name, connected: engine.peerStates[s.sid] == .connected, stats: s) }
+        })
+        // Every 2 s: the mic warning and (iPhone) the mic mode.
+        if micSendsSilence != noted.micSilent {
+            noted.micSilent = micSendsSilence
+            notes.note(micSendsSilence ? "\"Your mic is sending silence\" shown" : "The mic is sending sound again")
+        }
+        if MicModes.offered {
+            let mode = MicModes.reported
+            if mode != noted.micMode {
+                notes.note("Mic mode: \(mode)")
+                noted.micMode = mode
+            }
+        }
+    }
+
+    /// Settings changed mid-call (the timeline says which).
+    func noteSettings(old: VoiceSettings) {
+        guard notes.isTaking else { return }
+        let new = settings
+        if old.muted != new.muted { notes.note(new.muted ? "You muted" : "You unmuted") }
+        if old.deafened != new.deafened { notes.note(new.deafened ? "You deafened" : "You undeafened") }
+        if old.mode != new.mode { notes.note("Settings: input \(Self.inputText(new))") }
+        if old.bitrate != new.bitrate { notes.note("Settings: your quality \(new.bitrate / 1000) kbps") }
+        if old.vadThreshold != new.vadThreshold {
+            // A slider drag: once per few seconds.
+            let now = Date()
+            if noted.sensitivityAt.map({ now.timeIntervalSince($0) > 3 }) ?? true {
+                notes.note("Settings: sensitivity \(Int(new.vadThreshold)) dB")
+                noted.sensitivityAt = now
+            }
+        }
+        if old.relayOnly != new.relayOnly { notes.note("Settings: hide my IP address \(new.relayOnly ? "on" : "off") (from the next join)") }
+        if old.highQualityBluetooth != new.highQualityBluetooth {
+            notes.note("Settings: high-quality headphone audio \(new.highQualityBluetooth ? "on" : "off") (from the next join)")
+        }
+    }
+
+    static func inputText(_ settings: VoiceSettings) -> String {
+        switch settings.mode {
+        case .voiceActivity: "voice activity, sensitivity \(Int(settings.vadThreshold)) dB"
+        case .pushToTalk: "push to talk"
+        case .openMic: "always on"
+        }
+    }
+
+    /// The header's settings lines.
+    func reportSettings() -> [String] {
+        var lines: [String] = []
+        let mine = "\(settings.bitrate / 1000) kbps"
+        lines.append(channelBitrate.map { "Quality: \($0 / 1000) kbps, the channel's for everyone (yours: \(mine))" } ?? "Quality: \(mine)")
+        lines.append("Input: \(Self.inputText(settings))")
+        #if os(iOS)
+        let processing = "on (Apple's voice processing)"
+        #else
+        let processing = "on (WebRTC's)"
+        #endif
+        lines.append("Noise suppression: \(processing)")
+        lines.append("Echo cancellation: \(processing)")
+        lines.append("Automatic gain: \(processing)")
+        lines.append("Music mode: not in this app")
+        lines.append("Hide my IP address: \(engine.relayOnly ? "on" : settings.relayOnly ? "on, but this server has no voice relay" : "off")")
+        lines.append("Redundancy (RED): \(engine.redundancy ? "on" : "off")")
+        #if os(iOS)
+        lines.append("High-quality headphone audio: \(settings.highQualityBluetooth ? "on" : "off")")
+        lines.append("Mic mode: \(MicModes.reported) (what iOS reports)")
+        #endif
+        return lines
+    }
+}
+
 #if os(iOS)
 /// `.playAndRecord` + `.voiceChat` (Apple's echo cancellation and AGC),
 /// Bluetooth headsets allowed, speaker by default when nothing's plugged in
@@ -736,6 +941,14 @@ final class AudioSessionWatch: NSObject, RTCAudioSessionDelegate, @unchecked Sen
     nonisolated(unsafe) var highQualityBluetooth: (@MainActor () -> Bool)?
     /// Interruptions and failures, on the main thread.
     nonisolated(unsafe) var onEvent: (@MainActor (AudioSessionEvent) -> Void)?
+    /// Route changes and resets, in words (the call report), on the main thread.
+    nonisolated(unsafe) var onNote: (@MainActor (String) -> Void)?
+
+    private func note(_ text: String) {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.onNote?(text) }
+        }
+    }
     private let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "yap", category: "voice")
 
     private func tell(_ event: AudioSessionEvent) {
@@ -768,10 +981,15 @@ final class AudioSessionWatch: NSObject, RTCAudioSessionDelegate, @unchecked Sen
         let outputs = session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: ",")
         let inputs = session.currentRoute.inputs.map(\.portType.rawValue).joined(separator: ",")
         log.info("audio route changed (\(reason.rawValue)): in \(inputs, privacy: .public) out \(outputs, privacy: .public)")
+        let why = AudioRouteInfo.reason(reason)
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.onNote?("Audio route (\(why)): \(AudioRouteInfo.describe() ?? "unknown")") }
+        }
     }
 
     func audioSessionMediaServerReset(_ session: RTCAudioSession) {
         log.error("the media server was reset")
+        note("iOS reset its audio (the media server); putting the call's sound back")
         DispatchQueue.main.async { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, self.isInCall?() == true else { return }

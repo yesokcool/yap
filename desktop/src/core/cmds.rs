@@ -586,6 +586,7 @@ impl Core {
                     m.config_dirty = true;
                     (m.config.muted, m.config.sounds)
                 };
+                self.call_note(if muted { "You muted" } else { "You unmuted" });
                 self.shared.apply_gate();
                 self.send_voice_state();
                 if sounds {
@@ -600,6 +601,7 @@ impl Core {
                     m.config_dirty = true;
                     (m.config.deafened, m.config.sounds)
                 };
+                self.call_note(if deaf { "You deafened" } else { "You undeafened" });
                 self.shared.apply_gate();
                 self.send_voice_state();
                 if sounds {

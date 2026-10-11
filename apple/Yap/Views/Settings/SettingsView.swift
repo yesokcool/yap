@@ -72,6 +72,7 @@ struct SettingsPageContent98: View {
             VoiceGroup()
             SoundsGroup98()
             SoundboardGroup98()
+            CallReportGroup98()
             VoiceAdvanced98()
         case .notifications: NotificationsGroup98()
         case .account:
@@ -90,11 +91,20 @@ struct SettingsPageView98: View {
     var page: SettingsPage
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                SettingsPageContent98(page: page)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    SettingsPageContent98(page: page)
+                    Color.clear.frame(height: 0).id("end")
+                }
+                .padding(10)
             }
-            .padding(10)
+            .task {
+                // Screenshots of a page's lower groups (YAP_SETTINGS_SCROLL=bottom).
+                guard DebugLaunch.current.settingsScroll == "bottom" else { return }
+                try? await Task.sleep(for: .milliseconds(600))
+                proxy.scrollTo("end", anchor: .bottom)
+            }
         }
         .background(Theme.face)
         .win98NavigationBar(page.title)
@@ -229,6 +239,71 @@ struct MicOutputGroup98: View {
                 .foregroundStyle(Theme.hint)
                 .fixedSize(horizontal: false, vertical: true)
             #endif
+            if MicModes.offered {
+                MicModeRow98()
+            }
+        }
+    }
+}
+
+/// Voice › Mic & output › Mic mode (iPhone, iPad): what iOS reports, and
+/// Change… opening Apple's own picker. Mic modes only apply while a call
+/// runs Apple's voice processing, so Change… waits for a call; outside one
+/// the row says what you chose last.
+struct MicModeRow98: View {
+    @Environment(AppModel.self) private var model
+    @State private var mode = MicModes.preferred
+
+    var body: some View {
+        let inCall = model.voice.isInVoice
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(MicModeWords.row(mode))
+                    .font(Theme.chrome)
+                    .foregroundStyle(Theme.text)
+                Spacer(minLength: 4)
+                Button(MicModeWords.change) { MicModes.showPicker() }
+                    .buttonStyle(.win98)
+                    .disabled(!inCall)
+            }
+            Text(MicModeWords.note)
+                .font(Theme.small)
+                .foregroundStyle(Theme.hint)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        // The picker is Apple's: look again every second while this shows.
+        .task(id: inCall) {
+            while !Task.isCancelled {
+                let now = inCall ? MicModes.reported : MicModes.preferred
+                if now != mode { mode = now }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+}
+
+/// Voice › Call report: copy what Yap noticed about the last call (or the
+/// one you're in) as text.
+struct CallReportGroup98: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let has = model.voice.notes.hasReport
+        GroupBox98(title: "Call report") {
+            HStack(spacing: 8) {
+                Button(CallReportWords.copyLast) { model.copyCallReport() }
+                    .buttonStyle(.win98)
+                    .disabled(!has)
+                if !has {
+                    Text(CallReportWords.none)
+                        .font(Theme.small)
+                        .foregroundStyle(Theme.hint)
+                }
+            }
+            Text(CallReportWords.note)
+                .font(Theme.small)
+                .foregroundStyle(Theme.hint)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

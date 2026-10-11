@@ -219,6 +219,34 @@ pub fn shared_quality(m: &Model) -> Option<(String, String)> {
     Some((format!("Sound: {}k for everyone", b / 1000), format!("Set for everyone in {} (⋯ changes it)", ch.name)))
 }
 
+/// The call report's words (PROTOCOL.md › Voice › Call report; the web's).
+const CALL_REPORT_TIP: &str = "What Yap noticed about this call: connections, lost audio, devices. No messages or IP addresses.";
+
+/// Copy call report (the call's ⋯) / Copy last call report (Settings › Voice):
+/// disabled, with "No call yet.", before the first call.
+pub fn copy_call_report(ui: &mut egui::Ui, shared: &core::Shared, label: &str, p: &Pal, acts: &mut Vec<Act>) {
+    let any = shared.calls.lock().any();
+    ui.horizontal_wrapped(|ui| {
+        if theme::tip(theme::button(ui, label, theme::Btn::Normal, any, p), CALL_REPORT_TIP).clicked()
+            && let Some(text) = shared.calls.lock().text()
+        {
+            acts.push(Act::Copy(text, "Call report copied."));
+        }
+        if !any {
+            super::dialogs::note(ui, "No call yet.", p);
+        }
+    });
+}
+
+/// Settings › Voice: the last call's report ("Copy call report" while in one).
+pub fn call_report_field(ui: &mut egui::Ui, shared: &core::Shared, p: &Pal, acts: &mut Vec<Act>) {
+    ui.add_space(2.0);
+    super::dialogs::field_label(ui, "Call report:", p);
+    let label = if shared.calls.lock().in_call() { "Copy call report" } else { "Copy last call report" };
+    copy_call_report(ui, shared, label, p, acts);
+    super::dialogs::note(ui, "What Yap noticed about your last call: connections, lost audio, devices. No messages or IP addresses. Send it along when a call sounded off.", p);
+}
+
 /// Open (or close) the voice panel's ⋯ popover under `anchor`.
 pub fn toggle_voice_more(app: &mut App, ctx: &egui::Context, anchor: Rect) {
     if app.voice_more.is_some() {
@@ -230,7 +258,7 @@ pub fn toggle_voice_more(app: &mut App, ctx: &egui::Context, anchor: Rect) {
 }
 
 /// The voice panel's ⋯: the sound quality for everyone in this channel (or
-/// each person's own), like the web's popover.
+/// each person's own), and the call report, like the web's popover.
 pub fn voice_more_popover(app: &mut App, ctx: &egui::Context, m: &Model, p: &Pal, acts: &mut Vec<Act>) {
     let Some(pos) = app.voice_more else { return };
     let Some(ch) = m.my_voice_channel() else {
@@ -253,6 +281,8 @@ pub fn voice_more_popover(app: &mut App, ctx: &egui::Context, m: &Model, p: &Pal
             });
             ui.add_space(2.0);
             ui.label(egui::RichText::new("Your own quality is in Settings › Voice › Advanced.").font(theme::font(theme::small())).color(theme::dim(p)));
+            ui.add_space(4.0);
+            copy_call_report(ui, &app.shared, "Copy call report", p, acts);
         });
     });
     let menu_open = egui::Popup::is_any_open(ctx);

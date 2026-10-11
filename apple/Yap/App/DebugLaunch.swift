@@ -44,6 +44,7 @@ import UIKit
 ///   YAP_SETTINGS_PAGE=look | profile | voice | voice-advanced | notifications | account | mods | invite | about
 ///                                                  the Settings page (with YAP_SCREEN=settings; iPhone: on top of the list;
 ///                                                  voice-advanced: Voice › Advanced, its page on iPhone, unfolded on the Mac)
+///   YAP_SETTINGS_SCROLL=bottom                     iPhone: that Settings page scrolled to its end (screenshots)
 ///   YAP_SHOW_SHELF=1 / YAP_NEW_POLL=1              the open channel's media shelf / New poll
 ///   YAP_UNREAD_LAST=N                              pretend the last N messages of the open channel are new
 ///                                                  ("New since" line, and the pill when it's off screen)
@@ -87,6 +88,7 @@ struct DebugLaunch {
     var jump: String?
     var switcherText: String?
     var settingsPage: String?
+    var settingsScroll: String?
     var showShelf = false
     var newPoll = false
     var unreadLast: Int?
@@ -137,6 +139,7 @@ struct DebugLaunch {
         launch.jump = env["YAP_JUMP"]
         launch.switcherText = env["YAP_SWITCHER"]
         launch.settingsPage = env["YAP_SETTINGS_PAGE"]
+        launch.settingsScroll = env["YAP_SETTINGS_SCROLL"]
         launch.showShelf = env["YAP_SHOW_SHELF"] == "1"
         launch.newPoll = env["YAP_NEW_POLL"] == "1"
         launch.unreadLast = env["YAP_UNREAD_LAST"].flatMap(Int.init)

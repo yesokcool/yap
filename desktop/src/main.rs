@@ -51,12 +51,15 @@ OPTIONS (headless test mode):
   --bitrate BPS        Opus bitrate (default 128000)
   --mode open|vad|ptt  Transmit mode (default open)
   --denoise            Enable RNNoise (default off in headless)
+  --echo-cancel        Enable echo cancellation (default off in headless; the stats
+                       line then shows aec=<delay estimate>)
   --expect TEXT        Report when a message containing TEXT arrives
   --mute-after SECS    Toggle mute after SECS (tests mute propagation)
   --drop-socket-at S   Drop the socket S seconds in (comma-separated for more);
                        the call is kept across it (RESUME / GHOST / CHIME lines)
   --hear-yourself WAV  Once in voice, run Settings › Voice › Hear yourself and save
                        what came out of the codec (HEAR lines)
+  --call-report FILE   At the end, write the call report there (CALLREPORT line)
   --approve-all        Let everyone in from the waiting room (test doorman)
   --pin PIN            Sign in with --name and this 6-digit PIN (prints TOKEN)
   --signup             With --pin: create the account (lands in the waiting room)
@@ -161,8 +164,10 @@ fn main() {
             "--mute-after" => h.mute_after = need(&mut args, "--mute-after").parse().ok(),
             "--drop-socket-at" => h.drop_socket_at = need(&mut args, "--drop-socket-at").split(',').filter_map(|s| s.trim().parse().ok()).collect(),
             "--hear-yourself" => h.hear_yourself = Some(need(&mut args, "--hear-yourself")),
+            "--call-report" => h.call_report = Some(need(&mut args, "--call-report")),
             "--expect" => h.expect = Some(need(&mut args, "--expect")),
             "--denoise" => h.denoise = true,
+            "--echo-cancel" => h.echo_cancel = true,
             "--approve-all" => h.approve_all = true,
             "--pin" => h.pin = Some(need(&mut args, "--pin")),
             "--signup" => h.signup = true,

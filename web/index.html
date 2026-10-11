@@ -36,6 +36,7 @@
   <link rel="modulepreload" href="js/app/search.js">
   <link rel="modulepreload" href="js/app/extras.js">
   <link rel="modulepreload" href="js/app/settings-ui.js">
+  <link rel="modulepreload" href="js/app/call-report-ui.js">
 </head>
 <body>
   <div class="app" id="app">
@@ -462,6 +463,14 @@
               <button class="btn small" type="button" data-action="hear-yourself">Hear yourself</button>
               <small class="muted" id="hear-status" role="status"></small>
             </div>
+          </div>
+          <div class="field" id="call-report-field">
+            <span>Call report</span>
+            <div class="inline-form">
+              <button class="btn small" type="button" data-action="copy-call-report" id="call-report-copy">Copy last call report</button>
+              <small class="muted" id="call-report-none" hidden>No call yet.</small>
+            </div>
+            <small class="muted">What Yap noticed about your last call: connections, lost audio, devices. No messages or IP addresses. Send it along when a call sounded off.</small>
           </div>
         </fieldset>
         <fieldset class="settings-group">

@@ -18,6 +18,7 @@ import { renderChannels, renderHeader, renderUserPanel } from './sidebar.js';
 import { renderMembers } from './people.js';
 import { soundboard } from './extras.js';
 import { renderMeter } from './settings-ui.js';
+import { callEnded, callJoined, callMuteChanged, callPerson, callStats } from './call-report-ui.js';
 
 let statsTimer = null;
 
@@ -65,7 +66,8 @@ export function onVoice(msg) {
       const others = [...state.sessions.values()]
         .filter((s) => s.sid !== state.sid && s.sid !== state.staleSid && s.sid !== state.resume?.sid && s.voice?.channelId === msg.channelId && !state.ghosts.has(s.sid))
         .map((s) => s.sid);
-      if (state.resume && msg.prev === state.resume.sid) {
+      const handover = Boolean(state.resume && msg.prev === state.resume.sid);
+      if (handover) {
         voice.handover(others); // the same call, under our new session
       } else {
         // A fresh join (or the server didn't take our resume): start over.
@@ -76,6 +78,7 @@ export function onVoice(msg) {
       if (!state.rejoining) sounds.join();
       state.rejoining = false;
       endResume();
+      callJoined(msg.channelId, others, { handover });
       startStats();
     } else if (!msg.channelId && state.voiceChannel) {
       voice.hangupAll();
@@ -83,6 +86,7 @@ export function onVoice(msg) {
       // Not a switch we asked for (e.g. the channel was archived): we're out.
       if (state.voiceWanted === prev) {
         state.voiceWanted = null;
+        callEnded('Yap took you out of the channel (it may have been archived)');
         voice.stop();
         sounds.leave();
         stopStats();
@@ -108,6 +112,7 @@ export function onVoice(msg) {
         state.leaveChimes.delete(uid);
         quiet = true;
       }
+      callPerson(msg.sid, resumed ? 'back' : 'joined');
       if (!quiet) {
         // Their own join chime (they offer to us once their join lands).
         const chime = state.users.get(uid)?.chime;
@@ -118,7 +123,9 @@ export function onVoice(msg) {
         // Their socket dropped but the call may well continue: keep it, quietly.
         if (session) session.voice = { channelId: prev, muted: msg.muted, deafened: msg.deafened, resume: true, ...(wasSharing ? { screen: true } : {}) };
         holdGhost(msg.sid);
+        callPerson(msg.sid, 'away');
       } else {
+        callPerson(msg.sid, 'left', msg.lost ? 'lost their connection' : '');
         voice.drop(msg.sid);
         if (msg.lost) deferLeaveChime(session?.uid);
         else sounds.peerLeave();
@@ -194,6 +201,7 @@ function clearGhost(sid) {
 export function dropGhost(sid, { quiet = false } = {}) {
   if (!state.ghosts.has(sid)) return;
   const uid = state.sessions.get(sid)?.uid;
+  callPerson(sid, 'left', quiet ? 'their old connection, closed' : "they didn't come back");
   if (state.screenSid === sid) sharerStopped(); // they never came back
   clearGhost(sid);
   state.sessions.delete(sid);
@@ -281,6 +289,7 @@ export function leaveVoice() {
   endResume();
   for (const sid of [...state.ghosts.keys()]) dropGhost(sid, { quiet: true });
   conn?.send({ t: 'voice.leave' });
+  callEnded('you left');
   stopClips();
   soundboard?.render();
   voice.stopScreen();
@@ -309,6 +318,7 @@ export function toggleDeafen() {
 }
 
 function applyVoiceToggles() {
+  callMuteChanged();
   voice.setMuted(settings.muted);
   voice.setDeafened(settings.deafened);
   screenView?.applyAudio(); // deafened: the screen's sound goes quiet too
@@ -326,6 +336,7 @@ function startStats() {
   stopStats();
   statsTimer = setInterval(async () => {
     state.voiceStats = await voice.stats();
+    callStats(state.voiceStats);
     renderVoicePanel();
   }, 2000);
 }
@@ -416,7 +427,7 @@ export function renderVoicePanel() {
   panel.innerHTML = `
     <div class="vp-text">
       <div class="vp-status ${connected ? 'ok' : 'pending'}">${icon('signal')}<span>${connected ? 'Voice connected' : resuming ? 'Reconnecting…' : 'Connecting…'}</span></div>
-      <div class="vp-sub"><span>${details}${settings.music ? ' · stereo' : ''}</span><button type="button" class="icon-btn tiny vp-more" data-action="voice-more" title="Call settings: sound quality for everyone here" aria-label="Call settings">${icon('more')}</button></div>
+      <div class="vp-sub"><span>${details}${settings.music ? ' · stereo' : ''}</span><button type="button" class="icon-btn tiny vp-more" data-action="voice-more" title="Call settings: sound quality for everyone here, and the call report" aria-label="Call settings">${icon('more')}</button></div>
       ${shared ? `<div class="vp-shared" title="Set for everyone in ${esc(channel?.name ?? 'this channel')} (⋯ changes it)">Sound: ${shared / 1000}k for everyone</div>` : ''}
       ${voice.micOk || state.voiceChannel !== state.voiceWanted ? '' : '<div class="vp-warn">Listening only — no mic</div>'}
       ${voice.micOk && voice.silent && !settings.muted && !settings.deafened ? '<div class="vp-warn" title="Nothing at all is coming from your microphone. Check its mute switch, or pick another one in Settings › Voice.">Your mic is sending silence</div>' : ''}
@@ -578,7 +589,7 @@ export function stopWatchingScreen() {
   if (state.view === 'screen') setView('chat');
 }
 
-/** Voice panel › ⋯: the sound quality for everyone in this channel (or each person's own). */
+/** Voice panel › ⋯: the sound quality for everyone in this channel (or each person's own), and the call report. */
 export function openVoiceMore(el) {
   const channel = state.channels.get(state.voiceWanted);
   if (!channel) return;
@@ -592,7 +603,8 @@ export function openVoiceMore(el) {
         ${[64000, 96000, 128000, 256000, 510000].map((b) => `<option value="${b}" ${shared === b ? 'selected' : ''}>${b / 1000}k for everyone</option>`).join('')}
       </select></span>
     </label>
-    <small class="muted">Your own quality is in Settings › Voice › Advanced.</small>`;
+    <small class="muted">Your own quality is in Settings › Voice › Advanced.</small>
+    <div class="pop-actions"><button type="button" class="btn small" data-action="copy-call-report" title="What Yap noticed about this call: connections, lost audio, devices. No messages or IP addresses.">Copy call report</button></div>`;
   pop.hidden = false;
   placeNear(pop, el);
   popoverOpened(el);

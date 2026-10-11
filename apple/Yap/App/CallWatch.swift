@@ -129,6 +129,7 @@ final class CallWatch {
         let name = id.flatMap { model.client.channelsById[$0]?.name } ?? "the call"
         if notify, let content = noteContent(reason) { model.notifier.postCallEnded(content) }
         pendingNotice = "You left \(name): \(reason.text)"
+        model.voice.noteEnding(reason.text)
         if model.voice.isInVoice { model.voice.leave() }
         // (leave() comes back through callChanged: nothing scheduled any more.)
         apply(rules.call(false, at: now))

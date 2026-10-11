@@ -13,6 +13,7 @@ mod health;
 mod model;
 mod msg;
 mod outbox;
+pub mod report;
 mod resume;
 mod screen;
 mod search;
@@ -59,6 +60,8 @@ pub struct Shared {
     pub voice_peers: Mutex<Vec<Arc<crate::voice::PeerInfo>>>,
     /// Screen sharing: our share's encoder and the picture we're watching.
     pub screen: Arc<crate::screen::Screen>,
+    /// The call report: the call we're in (or the last one), and the last three kept.
+    pub calls: Mutex<report::Calls>,
 }
 
 impl Shared {
@@ -77,11 +80,12 @@ impl Shared {
             audio,
             ptt,
             repaint,
-            config_path,
             audio_override: Mutex::new(None),
             speakers_override: Mutex::new(false),
             voice_peers: Mutex::new(Vec::new()),
             screen,
+            calls: Mutex::new(report::Calls::load(Some(report::reports_path(&config_path)))),
+            config_path,
         });
         shared.apply_gate();
         shared
@@ -96,6 +100,7 @@ impl Shared {
         g.vad_threshold.set(m.config.vad_threshold);
         g.noise_suppression.store(m.config.noise_suppression, Ordering::Relaxed);
         g.auto_gain.store(m.config.auto_gain, Ordering::Relaxed);
+        g.echo_cancellation.store(m.config.echo_cancellation, Ordering::Relaxed);
         // Hear yourself with nobody listening: push-to-talk acts like always-on meanwhile.
         g.test.store(matches!(m.hear, HearState::Recording { hold_key: false }), Ordering::Relaxed);
         self.ptt.set_key(&m.config.ptt_key);
@@ -179,6 +184,7 @@ pub fn start_with_done(
         last_devices: None,
         devices_busy: Arc::new(AtomicBool::new(false)),
         hear: None,
+        last_report: None,
         debug_fail: std::env::var("YAP_DEBUG_AUDIO_FAIL").ok().filter(|_| cfg!(debug_assertions)),
         seal_wait: None,
         outbox: outbox::Outbox::default(),
@@ -236,6 +242,8 @@ struct Core {
     devices_busy: Arc<AtomicBool>,
     /// Settings › Voice › Hear yourself, while it records.
     hear: Option<HearRun>,
+    /// The call report's last reading of the connections.
+    last_report: Option<Instant>,
     /// Debug builds: `YAP_DEBUG_AUDIO_FAIL=mic|speakers[@secs]` fakes a stream error once.
     debug_fail: Option<String>,
     /// Earlier notes sealed and handed back, until the server confirms them.
@@ -349,6 +357,7 @@ impl Core {
         }
         // Shutting down: leave voice politely (or others keep our call for a
         // while, thinking we're only reconnecting), save settings.
+        self.call_ended("you quit Yap");
         self.say_goodbye_in_voice().await;
         self.shared.screen.share.stop();
         self.voice.hangup_all();
@@ -362,6 +371,7 @@ impl Core {
     /// Leaving for real (quitting, another server, signing in again): say so,
     /// so nobody keeps our call waiting for us to come back.
     async fn say_goodbye_in_voice(&mut self) {
+        self.call_ended("you left");
         if self.shared.model.lock().voice_wanted.is_some() && self.send(out::voice_leave()) {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -506,6 +516,9 @@ impl Core {
         // In a call? Keep it: audio is peer to peer and doesn't need the socket.
         // (Servers that predate this send no resume key: hang up as before.)
         let kept = self.keep_call();
+        if !kept && self.shared.model.lock().voice_channel.is_some() {
+            self.call_note("Your connection to Yap dropped (this server can't keep calls across that): hanging up until it's back");
+        }
         {
             let mut m = self.shared.model.lock();
             self.rejoining |= m.voice_wanted.is_some();
@@ -535,6 +548,7 @@ impl Core {
         self.tick_resume();
         self.check_sealed();
         self.tick_health();
+        self.tick_report();
         // Debug builds: YAP_DEBUG_AUDIO_FAIL=mic|speakers[@secs] fakes a stream error once (the recovery path, no real devices).
         if let Some(what) = self.debug_fail.clone() {
             let (dev, at) = what.split_once('@').map(|(d, s)| (d.to_string(), s.parse().unwrap_or(5.0))).unwrap_or((what.clone(), 5.0));

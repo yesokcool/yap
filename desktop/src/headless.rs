@@ -26,12 +26,16 @@ pub struct Args {
     pub bitrate: Option<u32>,
     pub mode: Option<InputMode>,
     pub denoise: bool,
+    /// Echo cancellation on the WAV mic, against what we hear (off by default here).
+    pub echo_cancel: bool,
     pub expect: Option<String>,
     pub mute_after: Option<f64>,
     /// Drop the socket at these times (s) — the call should survive each.
     pub drop_socket_at: Vec<f64>,
     /// Once in voice: Hear yourself, saving the codec's output here.
     pub hear_yourself: Option<String>,
+    /// Write the call report here at the end (the call is over by then: "you quit Yap").
+    pub call_report: Option<String>,
     pub approve_all: bool,
     /// Sign in with name + PIN (with `signup`: create the account).
     pub pin: Option<String>,
@@ -155,6 +159,7 @@ async fn run_async(args: Args) -> i32 {
         key: args.key.clone().or(invite_key).unwrap_or_default(),
         name: if args.name.is_empty() { "Bot".into() } else { args.name.clone() },
         noise_suppression: args.denoise,
+        echo_cancellation: args.echo_cancel,
         sounds: false,
         mode: args.mode.unwrap_or(InputMode::Open),
         ..Config::default()
@@ -656,9 +661,10 @@ async fn run_async(args: Args) -> i32 {
                         if st == "connected" { max_level = max_level.max(level); }
                         let db = if level > 0.0 { 20.0 * level.log10() } else { -100.0 };
                         line.push_str(&format!(
-                            " peer {} {st} sent {}B/{}pk @{}k loss{}% | recv {}B/{}pk level {:5.1} dBFS plc={} fec={} late={} under={} pad={} ins={} drop={} jb={:.0}/{:.0}ms rtt={}{}",
+                            " peer {} {st} sent {}B/{}pk @{}k{} loss{}% | recv {}B/{}pk{} level {:5.1} dBFS plc={} fec={} red={} late={} under={} pad={} ins={} drop={} jb={:.0}/{:.0}ms rtt={}{}",
                             &p.sid()[..p.sid().len().min(8)], p.bytes_sent.load(Ordering::Relaxed), p.packets_sent.load(Ordering::Relaxed),
-                            p.send_bitrate.load(Ordering::Relaxed) / 1000, p.loss_hint.load(Ordering::Relaxed), bytes, packets, db, jb.concealed, jb.fec, jb.late, jb.underruns, jb.padding,
+                            p.send_bitrate.load(Ordering::Relaxed) / 1000, if p.send_red.load(Ordering::Relaxed) { " red+opus" } else { "" }, p.loss_hint.load(Ordering::Relaxed),
+                            bytes, packets, if jb.red_packets > 0 { " red+opus" } else { "" }, db, jb.concealed, jb.fec, jb.red, jb.late, jb.underruns, jb.padding,
                             jb.inserted, jb.dropped, jb.delay_ms, jb.target_ms, p.rtt_ms.load(Ordering::Relaxed),
                             if stream.is_some_and(|s| s.speaking()) { " SPEAKING" } else { "" },
                         ));
@@ -668,6 +674,8 @@ async fn run_async(args: Args) -> i32 {
                             "bytesSent": p.bytes_sent.load(Ordering::Relaxed), "packetsSent": p.packets_sent.load(Ordering::Relaxed),
                             "sendBitrate": p.send_bitrate.load(Ordering::Relaxed),
                             "bytesReceived": bytes, "packetsReceived": packets, "level": level,
+                            "opusBytesSent": p.opus_bytes_sent.load(Ordering::Relaxed), "sendRed": p.send_red.load(Ordering::Relaxed),
+                            "redPackets": stats.map(|s| s.red_packets), "red": stats.map(|s| s.red), "expected": stats.map(|s| s.expected),
                             "concealed": stats.map(|s| s.concealed), "fec": stats.map(|s| s.fec), "underruns": stats.map(|s| s.underruns), "late": stats.map(|s| s.late), "padding": stats.map(|s| s.padding),
                             "frames": stats.map(|s| s.frames), "inserted": stats.map(|s| s.inserted), "dropped": stats.map(|s| s.dropped), "targetMs": stats.map(|s| s.target_ms), "delayMs": stats.map(|s| s.delay_ms),
                             "lossHint": p.loss_hint.load(Ordering::Relaxed), "rttMs": p.rtt_ms.load(Ordering::Relaxed), "localTransportCc": p.local_twcc.load(Ordering::Relaxed),
@@ -675,6 +683,13 @@ async fn run_async(args: Args) -> i32 {
                         }));
                     }
                     if peers.is_empty() { line.push_str(" no peers"); }
+                    // Echo cancellation (--echo-cancel): AEC3's delay estimate and how much echo it takes out.
+                    let echo = *gate.echo.lock();
+                    if echo.on {
+                        let ms = echo.delay_ms.map_or("?".into(), |d| d.to_string());
+                        let erle = echo.erle_db.map_or("?".into(), |e| format!("{e:.0}"));
+                        line.push_str(&format!(" | aec={ms}ms erle={erle}dB realigned={} owed={}", echo.realigned, echo.underruns));
+                    }
                     println!("{line}");
                     // Only measure while connected, so the summary describes the live call.
                     if peers.iter().any(|p| *p.state.lock() == "connected") {
@@ -723,6 +738,15 @@ async fn run_async(args: Args) -> i32 {
     println!("SUMMARY {summary}");
     let _ = cmd.send(Cmd::Quit);
     tokio::time::sleep(Duration::from_millis(300)).await;
+    if let Some(path) = &args.call_report {
+        match shared.calls.lock().text() {
+            Some(text) => match std::fs::write(path, &text) {
+                Ok(()) => println!("CALLREPORT {} lines in {path}", text.lines().count()),
+                Err(e) => println!("CALLREPORT couldn't write {path}: {e}"),
+            },
+            None => println!("CALLREPORT none (no call)"),
+        }
+    }
     0
 }
 

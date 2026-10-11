@@ -152,7 +152,7 @@ fn voice_panel(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
                     ui.spacing_mut().item_spacing.x = 2.0;
                     ui.label(egui::RichText::new(details).font(theme::font(theme::small())).color(p.gray));
                     // ⋯: the channel's sound quality (the web moved it out of the panel).
-                    let r = icons::tool(ui, "more", vec2(18.0, 14.0), p.text, "Call settings: sound quality for everyone here", app.voice_more.is_some());
+                    let r = icons::tool(ui, "more", vec2(18.0, 14.0), p.text, "Call settings: sound quality for everyone here, and the call report", app.voice_more.is_some());
                     if r.clicked() {
                         super::toggle_voice_more(app, ui.ctx(), r.rect);
                     }

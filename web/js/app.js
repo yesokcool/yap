@@ -28,6 +28,7 @@ import { addToHomeScreen, bindPinDialog, bindWelcome, onHelloError, renderAccoun
 import { askUnlock, bindVaultDialog, showVaultDialog, syncVault } from './app/personal.js';
 import { bindSearch, onSearchResults, openSearch, openSwitcher, renderResultList, runSearch } from './app/search.js';
 import { doodlePad, markAllRead, onUnreadCounts, openCatchup, openDoodle, openPicture, openShelf, openSoundboard, renderHangs, renderShelf, requestUnreadCounts, sendQuiet, setAway, soundboard, viewDoodle } from './app/extras.js';
+import { bindCallReport, callNote, callSettingsChanged, copyCallReport } from './app/call-report-ui.js';
 import { bindPttKey, bindSettings, bindingPtt, copyInvite, hearYourself, openSettings, renderAvatarSettings, renderAwaySettings, renderChimeSettings, renderInvites, renderModLog, renderNotifySettings, renderObsLink, renderStorage, showingAll, startMicTest } from './app/settings-ui.js';
 
 // Console/debug handle (also used by test/e2e.test.mjs and the voice interop tests).
@@ -411,6 +412,7 @@ function handle(msg) {
       state.channels.set(msg.channel.id, msg.channel);
       if (msg.channel.id === state.voiceWanted) {
         voice.setChannelBitrate(msg.channel.bitrate ?? null);
+        callSettingsChanged(); // (the call report notes the channel's quality)
         renderVoicePanel();
       }
       const wanted = state.awaitingChannel;
@@ -480,6 +482,7 @@ function onReady(msg) {
   if (msg.uid && msg.uid !== settings.uid) save({ uid: msg.uid });
   const me = msg.users.find((u) => u.id === settings.uid);
   if (me && (me.name !== settings.name || me.color !== settings.color)) save({ name: me.name, color: me.color });
+  if (state.status === 'offline') callNote('Connected to Yap again');
   state.sid = msg.sid;
   voice.mySid = msg.sid;
   state.resumeKey = msg.resumeKey ?? null;
@@ -578,14 +581,17 @@ function onDisconnect() {
   // (Servers that predate this send no resumeKey: hang up as before.)
   if (state.voiceChannel && state.resumeKey && !state.resume) {
     state.resume = { sid: state.sid, key: state.resumeKey, at: Date.now(), channelId: state.voiceChannel };
+    callNote('Your connection to Yap dropped; keeping the call (audio goes straight between you)');
     voice.suspend();
     clearTimeout(resumeTimer);
     resumeTimer = setTimeout(() => {
+      callNote(`Gave up keeping the call: no connection to Yap for ${RESUME_MS / 1000} s`);
       endResume();
       voice.hangupAll();
       renderAll();
     }, RESUME_MS);
   } else if (!state.resume) {
+    if (state.voiceChannel) callNote("Your connection to Yap dropped (this server can't keep calls across that): hanging up until it's back");
     voice.hangupAll();
     state.peerStates.clear();
   }
@@ -723,6 +729,7 @@ function bindUi() {
   bindSearch();
   bindShareDialog();
   bindSettings();
+  bindCallReport();
 }
 
 function onClick(e) {
@@ -808,6 +815,9 @@ function onClick(e) {
       return joinVoice(id);
     case 'leave-voice': return leaveVoice();
     case 'voice-more': return openVoiceMore(el);
+    case 'copy-call-report':
+      closePopover();
+      return copyCallReport();
     case 'toggle-mute': return toggleMute();
     case 'toggle-deafen': return toggleDeafen();
     case 'open-settings': return openSettings(el.dataset.tab);

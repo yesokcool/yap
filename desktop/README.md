@@ -17,7 +17,7 @@ leaves out (GIFs, a board, a Minecraft status) doesn't show.
 # Rust (once): curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
 cd desktop
 cargo build --release          # → target/release/yap (yap.exe on Windows)
-cargo test                     # unit tests (SDP tuning, markup, parsing, resampler…)
+cargo test                     # unit tests (SDP tuning, markup, parsing, resampler, echo cancellation…)
 ```
 
 A plain build has no update key, so it doesn't update itself. See
@@ -44,6 +44,15 @@ cargo install --locked cargo-zigbuild cargo-xwin
 
 The script prints which update key the builds carry, if any (Self-update
 below).
+
+Sizes (0.12.0 as published, 2026-10-11): Linux 25,374,480 bytes,
+Windows 19,828,736, macOS 16,388,400. The download page serves each file as a
+static asset of at most 25 MiB (26,214,400 bytes; `tools/publish-desktop.mjs`
+refuses bigger), and Linux is the closest. To make room, add code that's rarely
+hot to the `[profile.release.package.*] opt-level = "s"` list in `Cargo.toml`
+(file decoding, fonts, TLS, the OS glue, WebRTC's once-per-call setup, sonora's
+unused parts); voice, video and the UI keep opt-level 3. That list's WebRTC and
+sonora lines took 156 KB off Linux with no change to the echo canceller's CPU.
 
 The script fetches Debian's `libasound2`/`-dev` into `target/linux-sysroot`
 for linking (nothing is installed system-wide). The Linux binary needs only
@@ -107,7 +116,8 @@ screen-recording permission and works with the screen locked).
 
 Settings live in `~/.config/yap/config.json` (Linux),
 `%APPDATA%\Yap\config.json` (Windows), `~/Library/Application Support/Yap/config.json`
-(macOS); device tokens in `tokens.json` next to it. Custom emoji images are
+(macOS); device tokens in `tokens.json` next to it, the last three call
+reports in `calls.json`. Custom emoji images are
 cached in the OS cache dir (they're immutable); KLIPY GIFs are never cached on
 disk (their terms).
 
@@ -142,8 +152,8 @@ has no install button. People using it get new versions from the server's
    cargo build reads only the variable:
    `YAP_UPDATE_PUBKEY=$(cat update-pubkey.txt) cargo build --release`.
 3. **Sign and publish** with `tools/publish-desktop.mjs`. It takes the builds
-   from `desktop/target/dist/` (where `build-cross.sh` leaves them), else the
-   repo's `dist/`, or `--from <dir>`. It reads the private key
+   from `desktop/target/dist/` (where `build-cross.sh` leaves them), or
+   `--from <dir>`. It reads the private key
    from `YAP_UPDATE_SIGNING_KEY` (base64 PKCS#8 DER, or PEM). On a Mac it can
    use the Keychain instead: a generic password with the service name
    `yap-update-signing-key`
@@ -316,10 +326,10 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   each time Settings opens). Settings' tabs follow the web's order: Look,
   Profile, Voice, Notifications, Account, Owner & mods, Invite, then About.
 - **Settings › Voice and Notifications in the web's groups:** Voice is
-  *Mic & output* (microphone, output, Hear yourself), *How you talk*
+  *Mic & output* (microphone, output, Hear yourself, Call report), *How you talk*
   (input mode; the sensitivity meter, slider and Test mic in voice
   activity only; the push-to-talk key in push-to-talk only; noise
-  suppression, automatic gain), *Sounds* (join & mute blips — and the
+  suppression, echo cancellation, automatic gain), *Sounds* (join & mute blips — and the
   @mention / ping chimes —, your join chime, soundboard volume and mute),
   then *Advanced*, folded each time Settings opens (quality, Hide my IP
   address). Notifications is *On this device*, then *Quiet hours*. Groups
@@ -476,7 +486,8 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   sends — noise removal, gain, voice activity, Opus at the call's quality —
   played back; in a push-to-talk call, hold the key), quality
   64/96/128/256/510 kbps (default 128), RNNoise noise suppression (default on),
-  **Automatic gain** (default on), calls that survive reconnects and server
+  **Echo cancellation** (default on; it applies at once, in a call too, and
+  Hear yourself includes it), **Automatic gain** (default on), calls that survive reconnects and server
   restarts (no gap, no chimes), a quiet word next to someone when their
   connection is off (*weak connection*, *needs the voice relay* /
   *can't connect*, *reconnecting…*), "Your mic is sending silence" in the
@@ -494,6 +505,39 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   "📺 Name's OBS", dimmed. The voice track goes out in no stream
   (`a=msid:- <track>`, like a browser's `addTransceiver(track)`), so it's
   never taken for a screen share.
+- **Audio redundancy (RED, RFC 2198)** (PROTOCOL.md › Voice › Redundancy;
+  `voice/red.rs`): every voice packet also carries the 20 ms frame before
+  it, so a lost packet is rebuilt word for word from the next one instead
+  of roughed in by Opus FEC or patched over. Offered and answered first on
+  the voice, both ways, with every client that offers it (browsers send it
+  because it leads *our* description); plain Opus with apps that don't.
+  Opus stays at your quality; the copy rides on top (a 128 kbps voice is
+  ~260 kbps on the wire per person). At 256 and 510 kbps the copy doesn't
+  fit in a packet (1200 bytes), so those go as RED with their own frame
+  only. `YAP_RED=0` leaves it out (a test switch: plain Opus both ways,
+  like an older app). Measured against Chrome through the interop's proxy
+  (60 s calls at 128 kbps, the same drops with RED off and on): audio
+  Chrome patched over from us, 2.45 → 0.21 % Wi‑Fi-like, 4.08 → 0.53 %
+  cell-like, 5.30 → 0.27 % at 5 % loss, 2.36 → 0.10 % at 2 %; what we had
+  to rough in or patch over from Chrome (FEC + PLC), 2.02 → 0 %, 4.74 →
+  0.23 %, 4.35 → 0.16 %, 2.01 → 0.06 %.
+- **Call report** (PROTOCOL.md › Voice › Call report; `core/report.rs`, in
+  the web's words): **Copy call report** in the voice panel's ⋯, and
+  Settings › Voice › Mic & output › **Copy last call report** (Copy call
+  report while in one; disabled with "No call yet." before the first) put
+  what the app noticed about the call on the clipboard ("Call report
+  copied."): the app, computer, channel, start and length, your settings
+  and devices; per person the connection (direct or relay, candidate
+  *types* only), codec each way, the Opus fmtp, kbps, round trip, lost
+  packets, audio patched over, frames RED rebuilt, the jitter buffer,
+  ICE restarts / rebuilds / reconnects kept, how long *weak connection*
+  showed; then a timeline (`+mm:ss`, ≤ 2,000 lines: joins and leaves,
+  connection states, socket drops and the call kept, mute, settings and
+  device changes, weak connection, a line per person every 10 s for the
+  first minute then every minute, why it ended). Never an IP address
+  (types only, and the text is scrubbed of anything that looks like one),
+  message text or a key. The last three stay in `calls.json` next to
+  `config.json`; nothing leaves the computer unless you paste it.
 - **Screen sharing** (PROTOCOL.md › Screen sharing; `src/screen/`, the UI in
   `ui/screen.rs`, `ui/dialogs/share.rs` and the voice panel):
   - *Watching:* the red LIVE badge by someone in the voice list (or
@@ -759,7 +803,9 @@ ch m while away`) (they log `POLL`, `ROLL`, `SOUND`, `AWAY`, `HANG`,
 `SHELF`, `UNREAD`, `MENTIONS`, `JOINED`, `QUIET` lines; join requests say
 "link also used by …"),
 `--mute-after S`, `--expect TEXT`, `--record-wav out.wav`, `--bitrate`,
-`--mode open|vad|ptt`, `--denoise`, `--speakers` (real output device),
+`--mode open|vad|ptt`, `--denoise`, `--echo-cancel` (echo cancellation on
+the WAV mic against what the bot hears; the stats line then adds `aec=` AEC3's
+delay estimate, `erle=`, `realigned=`, `owed=`), `--speakers` (real output device),
 `--drop-socket-at S[,S…]` (drop the socket then: the call is kept across it),
 `--hear-yourself out.wav` (once in voice, run Hear yourself and save what came
 out of the codec), `--share-screen [smooth|sharp|max]` (once in voice, share a
@@ -772,13 +818,25 @@ its sound), `--watch-screen` (watch the first person sharing in our channel;
 `GHOST` (calls kept across reconnects), `HINT` (connection hints), `MIC`
 (sending silence), `AUDIO` (a stream reopened), `ICE`, `HEAR`; the stats line
 each second has the jitter buffer (`jb=held/target ms`, `ins`/`drop`), the
-encoder's loss hint and the round trip. `yap --help` lists everything.
+frames RED rebuilt (`red=`), `red+opus` where a direction uses RED, the
+encoder's loss hint and the round trip; the SUMMARY's peers add `sendRed`,
+`opusBytesSent` (of `bytesSent`: the rest is RED's copies), `redPackets`,
+`red` and `expected` (packets the sequence numbers say were sent).
+`--call-report FILE` writes the call report there at the end (`CALLREPORT`
+line). `yap --help` lists everything.
 
 ## Interop test (web ↔ native)
 
-`YAP_IMPAIR=wifi|cell|loss5|loss2` runs the voice calls behind a UDP
-impairment proxy (RTP only, the voice audit's profiles) and adds the native
-side's jitter-buffer numbers to the evidence.
+`YAP_IMPAIR=wifi|cell|loss5|loss2|none` runs the voice calls behind a UDP
+impairment proxy (the voice audit's profiles, on every RTP packet of any
+payload type, RED's 63 included; RTCP, STUN and DTLS go straight through)
+and adds the native side's jitter-buffer numbers, and what crossed the
+proxy each way (payload types, kbps), to the evidence. The proxy answers
+each STUN check to the socket that sent it and sends media to the socket
+media came from, so the web's checks on other pairs can't steal it.
+`YAP_IMPAIR_SEED=<n>` makes its drops repeatable. `YAP_RED=0` turns RED
+off in the native app (plain Opus both ways); `YAP_VOICE_SECS` makes the
+voice calls longer (default 24).
 
 `tests/interop.mjs` drives the web client in headless Chromium (fake mic) and
 `yap --headless`: text both ways; sends the server turns away (native says 12
@@ -820,7 +878,13 @@ newcomer with the same link: the join request says the link was also used
 by the first); account sign-in +
 token reconnect; voice in `lounge` in both join orders, checking audio both
 ways, the negotiated Opus fmtp, bitrate, the speaking ring the browser shows for
-us (RTP audio-level extension) and mute propagation; and screen sharing +
+us (RTP audio-level extension) and mute propagation, RED both ways (native's
+description lists it first; native unpacks RED from the web and the web
+receives about twice the Opus rate; through the proxy, payload type 63 on
+every packet each way: Chrome's stats name Opus as the codec even then), and
+native's call report (`--call-report`: the header, the web user's block with
+the connection type and `red+opus` each way, the timeline, no IP address);
+and screen sharing +
 Watch together (native asks `watch.get` at connect; the web's `screen: true`
 in voice and its `watch.join` / `watch.leave` reach native, on and off);
 screen sharing both ways with synthetic pictures (a web page of its own: its
@@ -829,7 +893,8 @@ watches the web's share (it arrives as H.264 although the web's Sharp preset
 prefers VP9, decodes at 1280 × 720, its sound on its own track; the web
 stopping ends it on native) and the web watches native's test pattern from
 the LIVE badge (H.264 at 1280 × 720 in the web's player, the share's sound
-on its own track; Stop watching stops native's encoder); and
+on its own track; Stop watching stops native's encoder); in both, RED
+leads only native's voice section, the share's sound stays Opus-first; and
 the extras: polls and dice both ways (native polls, the web votes and native
 sees the votes; the web polls, native votes; native's `/flip` and the web's
 `/roll 2d6` arrive rolled), away messages both ways (native @mentions the
@@ -864,6 +929,17 @@ picture tiles for screenshots. Measured
 0 packets lost/concealed, fmtp
 `maxaveragebitrate=128000;maxplaybackrate=48000;minptime=10;sprop-maxcapturerate=48000;sprop-stereo=0;stereo=1;usedtx=0;useinbandfec=1`.
 
+`tests/echo-loop.mjs` checks echo cancellation end to end, through the whole
+call path: two headless bots in `lounge`, one talking and recording what it
+hears, the other silent but with its speakers fed back into its mic 60 ms
+later at −6 dB (`YAP_DEBUG_ECHO_LOOP=<ms>[,<dB>]`, a headless test aid: the
+null output's audio comes back into the WAV mic). Without `--echo-cancel` the
+talker hears himself at about −21 dBFS; with it, about −80 dBFS (59 dB less;
+AEC3 settles on a ~40 ms delay, the rest being its own backlog). Same
+server and variables as the interop test:
+`YAP_URL=http://localhost:8788 YAP_KEY=testkey YAP_ADMIN_KEY=testadmin
+YAP_BIN=desktop/target/release/yap node desktop/tests/echo-loop.mjs`.
+
 `tests/vault-crosscheck.mjs` checks the encryption against the web's own code
 both ways, at the real 600,000 rounds: Node makes a vault and a note (plus a
 sealed picture) with `web/js/vault.js`, the Rust tests open them; Rust writes
@@ -879,6 +955,7 @@ its own, `vault.js` opens those (`node desktop/tests/vault-crosscheck.mjs`).
 | WebRTC | `webrtc` 0.21 (webrtc-rs, sans-IO core) | Full ICE/STUN/TURN, DTLS-SRTP, pure Rust. |
 | Opus | `ropus` (pure-Rust port of libopus, bit-exact with the reference) | No C toolchain for any target. |
 | Noise suppression | `nnnoiseless` (RNNoise) | Pure Rust. |
+| Echo cancellation | `sonora` (WebRTC's AEC3, the canceller browsers use) | A pure-Rust port, BSD-3-Clause, checked against WebRTC's own C++ tests; builds for all three targets like everything else. The C++ original (`webrtc-audio-processing`) needs meson, ninja and abseil at build time, which `build-cross.sh` can't give cargo-xwin or zig; SpeexDSP's canceller is weaker, and the OS's (macOS voice processing) would cover one platform. |
 | Audio I/O | `cpal` (WASAPI / ALSA / CoreAudio) + own sinc resampler | Prefers 48 kHz; resamples when a device can't. |
 | Push-to-talk | own poller: `GetAsyncKeyState`, evdev `EVIOCGKEY`, X11 `XQueryKeymap` (dlopen), `CGEventSourceKeyState` | Sees key down *and* up globally without grabbing the key from games. |
 | Screen video | H.264 constrained baseline: VideoToolbox's hardware encoder on a Mac (`objc2-video-toolbox`), else `openh264` (OpenH264 from its bundled source), which also decodes | Every client takes H.264; OpenH264 builds from C++ source for all three targets. |
@@ -889,8 +966,9 @@ Source map: `core/` (the protocol state machine, a port of `web/js/app.js`:
 commands and events, `msg.rs` / `cmds.rs` server messages and commands by
 part of the app, `vault.rs`, `search.rs`, `voice.rs`, `text.rs`), `net.rs`
 (socket, heartbeat, backoff), `voice/` (peer connections, perfect
-negotiation, Opus SDP tuning), `audio/` (capture → RNNoise → VAD/gate →
-20 ms frames; jitter buffers → mixer → device), `ptt.rs`, `ui/` (egui:
+negotiation, Opus SDP tuning), `audio/` (capture → echo cancellation →
+RNNoise → VAD/gate → 20 ms frames; jitter buffers → mixer → device and the
+echo canceller), `ptt.rs`, `ui/` (egui:
 `mod.rs` the app and frame; `sidebar.rs`, `chat.rs`, `statusbar.rs`;
 `sections.rs` the pieces they share; `dialogs/`, `extras/`, `space/`,
 `draw.rs`, `side.rs`, `screen.rs` (watching); `theme.rs` the widgets;
@@ -922,7 +1000,27 @@ test pattern), `headless.rs`.
   levels 0/1/5/10/20 % with hysteresis): 0 on a clean network keeps Opus in
   CELT (a third of Hybrid's CPU, better fidelity), anything else carries
   in-band FEC (Hybrid).
-- The mic: an 80 Hz high-pass, RNNoise (optional), automatic gain (speech
+- **RED** (`voice/red.rs`; webrtc-rs only carries the packets): `red/48000/2`
+  (fmtp `111/111`, payload type 63 like the browsers) is registered next to
+  Opus and put first on the voice transceiver with `set_codec_preferences`
+  before every offer and answer (the first offer lists both; later ones
+  reorder what was negotiated, so an app without RED never finds it in an
+  answer). A screen share's sound sections go the other way, Opus first
+  (answering a browser's offer, webrtc-rs puts the codecs whose fmtp
+  matches ours exactly first, and for a share's sound that's RED), and our
+  share's sound always goes as plain Opus. The voice transceiver is the one
+  with id 0, never "the first in `get_transceivers()`": that list comes out
+  of a HashMap, so with a screen share's transceivers it's any of them.
+  When RED was negotiated, each packet is the frame plus the one before
+  (distance 1, timestamp offset 960); the copy is left out over 1023 bytes
+  (only near 510 kbps) or past a 1200-byte payload (above ~239 kbps: so
+  never at 256 or 510), and such a packet carries the primary block alone.
+  Nothing counts the copy against a cap: the encoder still runs at the
+  call's quality. Chrome's stats call the codec `audio/opus` even for RED
+  packets (it names the one that decodes), so the tests look at the wire
+  instead.
+- The mic: an 80 Hz high-pass, echo cancellation (optional, below), RNNoise
+  (optional), automatic gain (speech
   towards −23 dBFS while you talk, at most +20 dB, cuts fast, recovers
   ~3 dB/s, never clips; optional), then the transmit gate — a port of the
   web's `gate-worklet.js` (PROTOCOL.md › Voice › Transmit gate): hysteresis,
@@ -931,8 +1029,43 @@ test pattern), `headless.rs`.
   are a hard switch after it; a muted mic sends silence rather than
   stopping packets, like a disabled browser track. If processing falls
   behind, noise removal is skipped until it catches up (fail open).
+- **Echo cancellation** (`audio/echo.rs`): WebRTC's AEC3 through `sonora`,
+  in libwebrtc's order (high-pass → AEC3 → noise suppression → gain; the web
+  has the browser's AEC3 first and RNNoise after its gain) and at its
+  default 32 kHz inside, like the browser: while it's on, the mic keeps
+  everything up to 16 kHz. The far end is exactly what the call's output
+  plays (voices, a screen share's sound, the soundboard, chimes, after the
+  mixer's soft clip), tapped as each 10 ms block leaves the mixer. The two
+  devices run on their own clocks and callback sizes, so the canceller takes
+  one far-end block per mic block from a small backlog it keeps at 1–20 ms
+  (judged once a second by its lowest point): silence for what hasn't been
+  played yet (skipped when it arrives, so the two stay lined up), a fresh
+  start when the output stream changes or stalls, and a correction when the
+  clocks drift apart (one sample per block up to 2 ms, at once beyond, with a
+  fresh AEC3, which settles faster than one hunting for a moved delay). AEC3
+  estimates the rest of the delay itself (up to ~600 ms). Off, it's skipped
+  entirely (bit-exact). Measured offline with synthetic speech, a room, and
+  two simulated devices (`audio/echo_sim.rs`; `cargo test --release
+  echo_report -- --ignored --nocapture` prints the table): echo 6 or 12 dB
+  below what's played, 20/80/200 ms away, is down 20 dB within 0.25 s (1 s
+  with Linux-sized 85 ms output periods) and 49–56 dB once settled, also with
+  the clocks 50 ppm apart (five minutes of it: one 250 ms moment of 877
+  under 20 dB, at a correction); new speakers mid-call with 70 ms more delay
+  are back under 20 dB within a second. While both talk, AEC3 turns your
+  voice down 4–6 dB (about half the half-seconds by more than 6 dB); with
+  headphones (nothing comes back) 2–4 dB once it has heard a while that
+  nothing does, more in a call's first seconds. Alone, your voice passes
+  unchanged (0.1 dB). About 50 µs of CPU per 10 ms on an M4 Max (0.5 % of
+  one core). Music mode, when the desktop gets it, must turn it off like the
+  web's does.
 - Receive: an adaptive jitter buffer per peer (`audio/jitter.rs`), keyed by
   RTP timestamp so padding-only probes are neither loss nor in FEC's way.
+  RED packets (by payload type, ours or theirs) are unpacked: the primary
+  goes in as usual, and a copy only for a frame whose own packet hasn't
+  come and whose turn hasn't passed, never twice (its own packet arriving
+  later replaces it); a frame played from a copy still counts as a gap, so
+  the lossy 60 ms floor below holds. Plain Opus, RED with only a primary,
+  and malformed RED (dropped whole) all work.
   Its target is the lateness 99 % of the last ~10 s of packets beat, +10 ms,
   40–200 ms (late packets raise it; at least 60 ms while packets are being
   lost, so FEC can repair them); clock drift and target changes are
@@ -976,7 +1109,7 @@ test pattern), `headless.rs`.
   the CPU there; Media Foundation / VA-API would do it), sharing on Wayland (needs xdg-desktop-portal + PipeWire),
   the share's sound on Linux, and a picker with thumbnails on Windows, Linux
   and macOS 12.3–13 (macOS 14+ uses Apple's).
-- Echo cancellation (use headphones), stereo/music mode (so the gate never
+- Stereo/music mode (so the gate never
   turns into always-on for music), phone-push (ntfy)
   settings, uploading your own avatar picture (shown, not uploaded).
 - Colour emoji (unicode emoji draw in egui's monochrome emoji font; a few newer
@@ -992,8 +1125,11 @@ test pattern), `headless.rs`.
   off), the push-to-talk tail, **Hear yourself** on real speakers and in a
   push-to-talk call, unplugging the mic / headphones mid-call and plugging
   them back, switching the system default (AirPods connecting), Bluetooth
-  headsets (HFP vs A2DP), echo on laptop speakers (still no echo
-  cancellation), a Wi-Fi ↔ cellular handover mid-call (ICE restart), a laptop
+  headsets (HFP vs A2DP), **echo cancellation** on real speakers (laptop
+  speakers and a separate USB mic or speakers, on macOS, Windows and Linux,
+  with a friend on the web and both talking at once: they shouldn't hear
+  themselves, and you shouldn't cut out much; switching the output device
+  mid-call; turning it off and on mid-call), a Wi-Fi ↔ cellular handover mid-call (ICE restart), a laptop
   sleeping in a call, calls with friends on CGNAT/cellular with and without
   the relay, someone at 200 % (the limiter), and a deploy mid-call with web,
   iPhone and desktop people in it.
@@ -1075,6 +1211,18 @@ test pattern), `headless.rs`.
   install starting with everything read, someone being let in (the
   "joined" line; you being let in: "You're in"), and a reused personal
   link's warning.
+- **RED on real networks** (the tests impair a local proxy): a call on
+  choppy Wi‑Fi or cellular with web, iPhone/Mac and desktop people should
+  have far fewer robotic blips; the call report says `red+opus` each way
+  and counts what RED rebuilt. With a desktop app from before RED the call
+  is plain Opus both ways (the tests stand in for one with `YAP_RED=0`).
+  At 256/510 kbps the copy doesn't fit (each packet goes with its own
+  frame only), so those calls get no help from RED.
+- **Copy call report / Copy last call report** on each OS (the clipboard
+  on macOS, Windows, Linux X11 and Wayland): paste it somewhere and read it
+  (no addresses; names, devices and settings right; "No call yet." on a
+  fresh install), and a call where your Wi‑Fi drops or a friend's app
+  restarts (the timeline shows it).
 - **Settings › Voice** with real fonts: the groups, Advanced
   folding and unfolding (and folded again next time), the push-to-talk key
   and the sensitivity meter only in their modes; the voice panel's ⋯.

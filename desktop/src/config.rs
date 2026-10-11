@@ -60,6 +60,9 @@ pub struct Config {
     pub noise_suppression: bool,
     /// Settings › Voice › Automatic gain: speech towards −23 dBFS, at most +20 dB.
     pub auto_gain: bool,
+    /// Settings › Voice › Echo cancellation: what the speakers play is taken
+    /// back out of the mic (AEC3), so friends don't hear themselves.
+    pub echo_cancellation: bool,
     pub sounds: bool,
     /// Desktop notifications for @mentions, pings and join requests.
     pub notifications: bool,
@@ -117,6 +120,7 @@ impl Default for Config {
             bitrate: 128_000,
             noise_suppression: true,
             auto_gain: true,
+            echo_cancellation: true,
             sounds: true,
             notifications: true,
             notify_all: false,

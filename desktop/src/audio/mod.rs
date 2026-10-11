@@ -1,4 +1,5 @@
-//! Audio: capture -> 80 Hz high-pass -> RNNoise -> automatic gain -> the
+//! Audio: capture -> 80 Hz high-pass -> echo cancellation (`echo.rs`, fed
+//! with what the speakers play) -> RNNoise -> automatic gain -> the
 //! transmit gate (`gate.rs`: voice activity / push-to-talk with fades, a
 //! release tail and a pre-roll) -> mute -> 20 ms frames (fanned out to every
 //! peer's Opus encoder), and the playout mixer that pulls every peer's jitter
@@ -10,6 +11,9 @@
 pub mod clips;
 pub mod decode;
 pub mod dsp;
+pub mod echo;
+#[cfg(test)]
+mod echo_sim;
 pub mod gate;
 pub mod jitter;
 pub mod resample;
@@ -66,6 +70,11 @@ pub struct Gate {
     pub noise_suppression: AtomicBool,
     /// Automatic gain (V12): speech towards −23 dBFS, at most +20 dB.
     pub auto_gain: AtomicBool,
+    /// Echo cancellation (AEC3 on the mic, against what the speakers play).
+    pub echo_cancellation: AtomicBool,
+    /// What the echo canceller is doing (running, its delay estimate), for
+    /// the logs and the call report; updated every 100 ms.
+    pub echo: Mutex<echo::EchoStats>,
     /// A mic test with nobody listening: push-to-talk acts like always-on.
     pub test: AtomicBool,
     pub mic_ok: AtomicBool,
@@ -94,6 +103,8 @@ impl Gate {
             vad_threshold: AtomicF32::new(-50.0),
             noise_suppression: AtomicBool::new(true),
             auto_gain: AtomicBool::new(true),
+            echo_cancellation: AtomicBool::new(true),
+            echo: Mutex::new(echo::EchoStats::default()),
             test: AtomicBool::new(false),
             mic_ok: AtomicBool::new(false),
             level_db: AtomicF32::new(-100.0),
@@ -161,6 +172,11 @@ impl PeerStream {
     pub fn push_rtp(&self, seq: u16, ts: u32, payload: &[u8]) {
         let at = self.epoch.elapsed().as_secs_f64() * 1000.0;
         self.jb.lock().push(seq, ts, payload, at);
+    }
+    /// A RED packet (the frame before rides along): see `JitterBuffer::push_red`.
+    pub fn push_red(&self, seq: u16, ts: u32, payload: &[u8]) {
+        let at = self.epoch.elapsed().as_secs_f64() * 1000.0;
+        self.jb.lock().push_red(seq, ts, payload, at);
     }
     pub fn stats(&self) -> jitter::JitterStats {
         self.jb.lock().stats
@@ -353,7 +369,7 @@ impl AudioEngine {
                 let (ready_tx, ready_rx) = std_mpsc::channel::<Result<Option<String>, String>>();
                 let m = mixer.clone();
                 let dev = device.clone();
-                let thread = std::thread::Builder::new().name("yap-sfx-out".into()).spawn(move || run_device_output(&dev, m, stop_rx, ready_tx, None, None));
+                let thread = std::thread::Builder::new().name("yap-sfx-out".into()).spawn(move || run_device_output(&dev, m, None, stop_rx, ready_tx, None, None));
                 let ok = thread.is_ok() && matches!(ready_rx.recv_timeout(Duration::from_secs(5)), Ok(Ok(_)));
                 if !ok {
                     log::debug!("sound effects: no output device");
@@ -482,6 +498,8 @@ pub struct AudioEngine {
     output_error: Arc<AtomicBool>,
     /// The devices actually opened (None: a WAV, silence, the null sink, or nothing).
     opened: Mutex<(Option<String>, Option<String>)>,
+    /// What the call's output plays, for the echo canceller on the mic.
+    echo_ref: Arc<echo::EchoRef>,
 }
 
 /// How the mic and speakers are doing (checked every ~2 s in a call).
@@ -528,6 +546,7 @@ impl AudioEngine {
             input_error: Arc::new(AtomicBool::new(false)),
             output_error: Arc::new(AtomicBool::new(false)),
             opened: Mutex::new((None, None)),
+            echo_ref: Arc::new(echo::EchoRef::default()),
         })
     }
 
@@ -667,6 +686,7 @@ impl AudioEngine {
             notify: self.notify.clone(),
             recorder: self.recorder.clone(),
             last_chunk: self.last_chunk.clone(),
+            echo: self.echo_ref.clone(),
         };
         *self.last_chunk.lock() = Some(Instant::now());
         let _ = std::thread::Builder::new().name("yap-capture".into()).spawn(move || process_capture(chunk_rx, capture));
@@ -697,16 +717,19 @@ impl AudioEngine {
         let mixer = self.mixer.clone();
         self.output_error.store(false, Ordering::Relaxed);
         let alive = Some(self.last_render.clone());
+        // A new stream: the echo canceller lines up with it from scratch.
+        self.echo_ref.start();
+        let echo = Some(self.echo_ref.clone());
         let thread = match sink {
             OutputSink::Device(name) => {
                 let failed = Some(self.output_error.clone());
                 std::thread::Builder::new()
                     .name("yap-audio-out".into())
-                    .spawn(move || run_device_output(&name, mixer, stop_rx, ready_tx, failed, alive))
+                    .spawn(move || run_device_output(&name, mixer, echo, stop_rx, ready_tx, failed, alive))
             }
             OutputSink::Null(record) => std::thread::Builder::new()
                 .name("yap-null-out".into())
-                .spawn(move || run_null_output(record, mixer, stop_rx, ready_tx, alive)),
+                .spawn(move || run_null_output(record, mixer, echo, stop_rx, ready_tx, alive)),
         }
         .map_err(|e| e.to_string())?;
         let result = ready_rx.recv_timeout(Duration::from_secs(10)).unwrap_or_else(|_| Err("audio output timed out".into()));
@@ -715,6 +738,7 @@ impl AudioEngine {
             Ok(name) => self.opened.lock().1 = name,
             Err(e) => {
                 running.stop();
+                self.echo_ref.stop();
                 self.opened.lock().1 = None;
                 return Err(e);
             }
@@ -728,6 +752,7 @@ impl AudioEngine {
         if let Some(r) = self.output.lock().take() {
             r.stop();
         }
+        self.echo_ref.stop();
         *self.last_render.lock() = None;
         self.opened.lock().1 = None;
     }
@@ -867,6 +892,46 @@ fn pick_config(device: &cpal::Device, input: bool) -> Result<cpal::SupportedStre
     Ok(default)
 }
 
+/// Test aid (headless): `YAP_DEBUG_ECHO_LOOP=<ms>[,<dB>]` (default −6 dB)
+/// plays what the null output renders back into the WAV mic, that much later
+/// and quieter: speakers into a mic, to test echo cancellation end to end
+/// without either. Its two 10 ms pacers run on their own, so the delay jitters
+/// by up to 10 ms like a real device pair.
+struct EchoLoop {
+    air: Mutex<VecDeque<f32>>,
+    gain: f32,
+}
+
+impl EchoLoop {
+    fn play(&self, stereo: &[f32]) {
+        let mut air = self.air.lock();
+        air.extend(stereo.as_chunks::<2>().0.iter().map(|[l, r]| (l + r) * 0.5 * self.gain));
+        let over = air.len().saturating_sub(RATE as usize);
+        air.drain(..over);
+    }
+
+    fn hear(&self, mono: &mut [f32]) {
+        let mut air = self.air.lock();
+        for s in mono.iter_mut() {
+            *s += air.pop_front().unwrap_or(0.0);
+        }
+    }
+}
+
+fn echo_loop() -> Option<&'static EchoLoop> {
+    static LOOP: std::sync::OnceLock<Option<EchoLoop>> = std::sync::OnceLock::new();
+    LOOP.get_or_init(|| {
+        let spec = std::env::var("YAP_DEBUG_ECHO_LOOP").ok()?;
+        let mut parts = spec.split(',');
+        let ms: f32 = parts.next()?.trim().parse().ok()?;
+        let db: f32 = parts.next().and_then(|d| d.trim().parse().ok()).unwrap_or(-6.0);
+        let delay = (ms.max(0.0) / 1000.0 * RATE as f32) as usize;
+        log::info!("echo loop: what's heard comes back into the mic {ms} ms later at {db} dB");
+        Some(EchoLoop { air: Mutex::new(std::iter::repeat_n(0.0, delay).collect()), gain: 10f32.powf(db / 20.0) })
+    })
+    .as_ref()
+}
+
 fn run_wav_input(path: &str, tx: std_mpsc::SyncSender<Chunk>, stop: std_mpsc::Receiver<()>, ready: std_mpsc::Sender<Result<Option<String>, String>>) {
     let wav = match wav::read_mono(path) {
         Ok(w) if !w.samples.is_empty() => w,
@@ -893,6 +958,9 @@ fn run_wav_input(path: &str, tx: std_mpsc::SyncSender<Chunk>, stop: std_mpsc::Re
             mono.push(wav.samples[pos]);
             pos = (pos + 1) % wav.samples.len();
         }
+        if let Some(room) = echo_loop().filter(|_| wav.rate == RATE) {
+            room.hear(&mut mono);
+        }
         if tx.try_send(Chunk { rate: wav.rate, mono, at: Instant::now() }).is_err() {
             log::debug!("capture processing is behind; dropped 10 ms");
         }
@@ -900,7 +968,9 @@ fn run_wav_input(path: &str, tx: std_mpsc::SyncSender<Chunk>, stop: std_mpsc::Re
 }
 
 fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
-    let Capture { gate, frames, notify, recorder, last_chunk } = shared;
+    let Capture { gate, frames, notify, recorder, last_chunk, echo } = shared;
+    let mut canceller = echo::Canceller::new(echo);
+    let mut blocks = 0u32;
     let mut resampler: Option<(u32, Resampler)> = None;
     let mut acc: Vec<f32> = Vec::with_capacity(BLOCK * 4);
     let mut resampled = Vec::with_capacity(BLOCK * 4);
@@ -944,6 +1014,12 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
             work.copy_from_slice(&acc[offset..offset + BLOCK]);
             offset += BLOCK;
             highpass.process(&mut work);
+            // Echo cancellation: every block, on or off, so it stays lined up with the speakers.
+            canceller.process(gate.echo_cancellation.load(Ordering::Relaxed), &mut work);
+            blocks += 1;
+            if blocks.is_multiple_of(10) {
+                *gate.echo.lock() = canceller.stats();
+            }
             let mut voice = None;
             if gate.noise_suppression.load(Ordering::Relaxed) && !behind {
                 for (d, s) in ns_in.iter_mut().zip(&work) {
@@ -1000,6 +1076,7 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
         acc.drain(..offset);
     }
     gate.transmitting.store(false, Ordering::Relaxed);
+    *gate.echo.lock() = echo::EchoStats::default();
 }
 
 /// What the capture thread shares with the rest of the engine.
@@ -1011,10 +1088,14 @@ struct Capture {
     recorder: Arc<Mutex<Option<Vec<f32>>>>,
     /// When the last chunk came from the device.
     last_chunk: Arc<Mutex<Option<Instant>>>,
+    /// What the speakers play (the echo canceller's far end).
+    echo: Arc<echo::EchoRef>,
 }
 
 struct OutputState {
     mixer: Arc<Mixer>,
+    /// The call's output: what it plays goes to the echo canceller too.
+    echo: Option<Arc<echo::EchoRef>>,
     resampler: Option<Resampler>,
     fifo: VecDeque<f32>,
     block: Vec<f32>,
@@ -1023,9 +1104,10 @@ struct OutputState {
 }
 
 impl OutputState {
-    fn new(mixer: Arc<Mixer>, device_rate: u32) -> Self {
+    fn new(mixer: Arc<Mixer>, echo: Option<Arc<echo::EchoRef>>, device_rate: u32) -> Self {
         Self {
             mixer,
+            echo,
             resampler: (device_rate != RATE).then(|| Resampler::new(RATE, device_rate, 2)),
             fifo: VecDeque::with_capacity(8192),
             block: vec![0.0; BLOCK * 2],
@@ -1038,6 +1120,9 @@ impl OutputState {
     fn fill(&mut self, frames: usize) {
         while self.fifo.len() < frames * 2 {
             self.mixer.render(&mut self.block, &mut self.scratch);
+            if let Some(echo) = &self.echo {
+                echo.push(&self.block);
+            }
             match &mut self.resampler {
                 Some(r) => {
                     self.out.clear();
@@ -1053,6 +1138,7 @@ impl OutputState {
 fn run_device_output(
     name: &str,
     mixer: Arc<Mixer>,
+    echo: Option<Arc<echo::EchoRef>>,
     stop: std_mpsc::Receiver<()>,
     ready: std_mpsc::Sender<Result<Option<String>, String>>,
     failed: Option<Arc<AtomicBool>>,
@@ -1083,7 +1169,7 @@ fn run_device_output(
     };
     macro_rules! build {
         ($t:ty) => {{
-            let mut st = OutputState::new(mixer.clone(), rate);
+            let mut st = OutputState::new(mixer.clone(), echo.clone(), rate);
             let alive = alive.clone();
             device.build_output_stream(
                 config.clone(),
@@ -1139,6 +1225,7 @@ fn run_device_output(
 fn run_null_output(
     record: Option<String>,
     mixer: Arc<Mixer>,
+    echo: Option<Arc<echo::EchoRef>>,
     stop: std_mpsc::Receiver<()>,
     ready: std_mpsc::Sender<Result<Option<String>, String>>,
     alive: Option<Arc<Mutex<Option<Instant>>>>,
@@ -1161,6 +1248,12 @@ fn run_null_output(
             break;
         }
         mixer.render(&mut block, &mut scratch);
+        if let Some(e) = &echo {
+            e.push(&block);
+        }
+        if let Some(room) = echo_loop() {
+            room.play(&block);
+        }
         if let Some(a) = &alive {
             *a.lock() = Some(Instant::now());
         }

@@ -64,6 +64,25 @@ enum VoiceOptions {
     }
 }
 
+/// The call report (PROTOCOL.md › Voice › Call report), the web's words.
+enum CallReportWords {
+    /// The call's ⋯ menu.
+    static let copy = "Copy call report"
+    /// Settings › Voice.
+    static let copyLast = "Copy last call report"
+    static let note = "What Yap noticed about your last call: connections, lost audio, devices. No messages or IP addresses. Send it along when a call sounded off."
+    static let copied = "Call report copied."
+    static let none = "No call yet."
+}
+
+/// Settings › Voice › Mic mode (iPhone and iPad; Apple's picker).
+enum MicModeWords {
+    /// "Mic mode: Standard" (or Voice Isolation / Wide Spectrum: what iOS reports).
+    static func row(_ mode: String) -> String { "Mic mode: \(mode)" }
+    static let change = "Change…"
+    static let note = "Voice Isolation cuts the noise around you; Wide Spectrum keeps all of it. Apple's setting, available while you're in a call."
+}
+
 /// The call's sound quality, the web's way (its voice panel): the panel
 /// says "Sound: 256k for everyone" only when someone set one quality for
 /// the whole channel; the picker is under the call's ⋯.

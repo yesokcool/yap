@@ -186,6 +186,7 @@ impl Core {
                 }
                 self.sync_resumable();
                 *self.shared.voice_peers.lock() = self.voice.peers();
+                self.call_joined(&ch, &others, handed_over);
                 if !self.rejoining {
                     self.emit(CoreEvent::Extra("CHIME", "self-join".into()));
                     if sounds {
@@ -214,6 +215,7 @@ impl Core {
                 drop(m);
                 self.voice.hangup_all();
                 if out_entirely {
+                    self.call_ended("Yap took you out of the channel (it may have been archived)");
                     self.share_stop();
                     self.stop_watching();
                     self.stop_audio_soon(sounds);
@@ -244,6 +246,7 @@ impl Core {
                     // Back within 5 s of losing their connection: neither chime.
                     quiet = true;
                 }
+                self.call_person(&sid, if resumed { "back" } else { "joined" }, "");
                 if !quiet {
                     // Their own join chime (they offer to us once their join lands).
                     self.play_join_chime(&uid);
@@ -256,8 +259,12 @@ impl Core {
                         s.voice = Some(crate::protocol::VoiceState { channel_id: mine.clone(), muted, deafened, screen: was_sharing, resume: true, prev: None });
                     }
                     drop(m);
+                    self.call_person(&sid, "away", "");
                     self.hold_ghost(&sid);
                 } else {
+                    drop(m);
+                    self.call_person(&sid, "left", if lost { "lost their connection" } else { "" });
+                    let mut m = self.shared.model.lock();
                     let uid = m.sessions.get(&sid).map(|s| s.uid.clone()).unwrap_or_default();
                     m.peer_states.remove(&sid);
                     m.speaking.remove(&sid);
@@ -289,6 +296,7 @@ impl Core {
                     }
                 }
                 self.ghost_health(&sid, (state != "closed").then_some(state.as_str()));
+                self.call_peer(&sid, Some(&state), None);
                 if state == "connected" {
                     self.screen_peer_connected(&sid);
                 }
@@ -297,11 +305,14 @@ impl Core {
                 self.repaint();
             }
             VoiceEvent::Rebuild { sid } => {
+                self.call_peer(&sid, None, Some((report::Count::Rebuilds, "connection rebuilt (we started over after 3 ICE restarts)".into())));
                 let v = self.shared.model.lock().session_volume(&sid);
                 self.voice.restart(&sid, v);
                 *self.shared.voice_peers.lock() = self.voice.peers();
                 self.emit(CoreEvent::Extra("ICE", format!("{sid} rebuilt after 3 restarts")));
             }
+            VoiceEvent::IceRestart { sid, attempt } => self.call_peer(&sid, None, Some((report::Count::Restarts, format!("ICE restart (try {attempt})")))),
+            VoiceEvent::FreshStart { sid } => self.call_peer(&sid, None, Some((report::Count::Rebuilds, "connection rebuilt (they started over)".into()))),
         }
     }
 
@@ -429,6 +440,7 @@ impl Core {
         };
         self.rejoining = false;
         self.end_resume();
+        self.call_ended("you left");
         let ghosts: Vec<String> = self.shared.model.lock().ghosts.keys().cloned().collect();
         for g in ghosts {
             self.drop_ghost(&g, true);

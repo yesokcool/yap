@@ -17,6 +17,13 @@ import Foundation
 /// transport-wide feedback on audio, WebRTC's bandwidth estimator probes
 /// with padding packets — ~18 kbps per direction per peer on a clean line,
 /// hundreds of kbps on a lossy one — and voice doesn't need the estimate.
+///
+/// And it puts redundancy (RED, RFC 2198: `red/48000/2`, fmtp
+/// `<opus>/<opus>`) first in the voice section, Opus right after, so each
+/// voice packet also carries the frame before it (PROTOCOL.md › Voice ›
+/// Redundancy). libwebrtc sends with the first codec of the *remote*
+/// description, so this asks the far side for RED; it packs and unpacks the
+/// copies itself. A screen share's audio stays plain Opus (Opus before RED).
 public enum SDPTuner {
     public static func opusParameters(bitrate: Int, sendStereo: Bool) -> [(String, String)] {
         [
@@ -35,10 +42,10 @@ public enum SDPTuner {
     public static let screenAudioBitrate = 160_000
 
     /// Tunes every audio section: the first is the voice (`sendStereo` =
-    /// music mode); any later one is a screen share's audio
-    /// (PROTOCOL.md › Screen sharing): at least 160 kbps, and stereo where
-    /// we're the one sending it.
-    public static func tuneOpus(_ sdp: String, bitrate: Int, sendStereo: Bool = false) -> String {
+    /// music mode; `redundancy`: RED first, or no RED at all when off); any
+    /// later one is a screen share's audio (PROTOCOL.md › Screen sharing):
+    /// at least 160 kbps, stereo where we're the one sending it, plain Opus.
+    public static func tuneOpus(_ sdp: String, bitrate: Int, sendStereo: Bool = false, redundancy: Bool = true) -> String {
         let newline = sdp.contains("\r\n") ? "\r\n" : "\n"
         let lines = withoutAudioTransportCC(sdp.components(separatedBy: newline))
         var out: [String] = []
@@ -50,6 +57,7 @@ public enum SDPTuner {
                 let voice = audioSections == 0
                 audioSections += 1
                 let sending = section.contains("a=sendrecv") || section.contains("a=sendonly")
+                section = voice ? (redundancy ? redFirst(section) : withoutRed(section)) : opusBeforeRed(section)
                 section = tuneAudioSection(section, want: opusParameters(bitrate: voice ? bitrate : max(bitrate, screenAudioBitrate),
                                                                          sendStereo: voice ? sendStereo : sending))
             }
@@ -93,6 +101,97 @@ public enum SDPTuner {
         return lines
     }
 
+    // MARK: Redundancy (RED)
+
+    /// The voice: `red/48000/2` first in the m= line, Opus right after, the
+    /// rest as they were; the RED fmtp says one earlier Opus frame
+    /// (`<opus>/<opus>`). A section without RED (the far side's offer had
+    /// none) stays as it is: RED is never required.
+    static func redFirst(_ lines: [String]) -> [String] {
+        guard let opus = lines.lazy.compactMap(opusPayloadType).first,
+              let red = lines.lazy.compactMap(redPayloadType).first,
+              let m = lines.firstIndex(where: { $0.hasPrefix("m=audio") }) else { return lines }
+        var lines = lines
+        lines[m] = reordered(lines[m]) { formats in [red, opus] + formats.filter { $0 != red && $0 != opus } }
+        let fmtp = "a=fmtp:\(red) \(opus)/\(opus)"
+        if let i = lines.firstIndex(where: { $0.hasPrefix("a=fmtp:\(red) ") }) {
+            lines[i] = fmtp
+        } else if let r = lines.firstIndex(where: { redPayloadType($0) == red }) {
+            lines.insert(fmtp, at: r + 1)
+        }
+        return lines
+    }
+
+    /// The voice without RED at all (redundancy off: measurements, tests).
+    static func withoutRed(_ lines: [String]) -> [String] {
+        guard let red = lines.lazy.compactMap(redPayloadType).first,
+              let m = lines.firstIndex(where: { $0.hasPrefix("m=audio") }) else { return lines }
+        var lines = lines
+        lines[m] = reordered(lines[m]) { $0.filter { $0 != red } }
+        return lines.filter { line in
+            !["a=rtpmap:", "a=fmtp:", "a=rtcp-fb:"].contains { line.hasPrefix("\($0)\(red) ") }
+        }
+    }
+
+    /// A screen share's audio stays plain Opus: if RED comes before Opus in
+    /// the m= line, Opus moves in front of it.
+    static func opusBeforeRed(_ lines: [String]) -> [String] {
+        guard let opus = lines.lazy.compactMap(opusPayloadType).first,
+              let red = lines.lazy.compactMap(redPayloadType).first,
+              let m = lines.firstIndex(where: { $0.hasPrefix("m=audio") }) else { return lines }
+        var lines = lines
+        lines[m] = reordered(lines[m]) { formats in
+            guard let r = formats.firstIndex(of: red), let o = formats.firstIndex(of: opus), r < o else { return formats }
+            var formats = formats
+            formats.remove(at: o)
+            formats.insert(opus, at: r)
+            return formats
+        }
+        return lines
+    }
+
+    /// `m=audio 9 UDP/TLS/RTP/SAVPF 111 63 9` with its payload types rearranged.
+    private static func reordered(_ mLine: String, _ arrange: ([String]) -> [String]) -> String {
+        let parts = mLine.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count > 3 else { return mLine }
+        return (parts.prefix(3) + arrange(Array(parts.dropFirst(3)))).joined(separator: " ")
+    }
+
+    /// `a=rtpmap:63 red/48000/2` → "63"
+    static func redPayloadType(_ line: String) -> String? {
+        let lower = line.lowercased()
+        guard lower.hasPrefix("a=rtpmap:"), lower.contains(" red/48000") else { return nil }
+        let rest = line.dropFirst("a=rtpmap:".count)
+        guard let space = rest.firstIndex(of: " ") else { return nil }
+        let pt = String(rest[..<space])
+        return pt.allSatisfy(\.isNumber) && !pt.isEmpty ? pt : nil
+    }
+
+    /// The codecs of each audio section, in m= line order, by name
+    /// (`[["red", "opus", "G722", …], ["opus", …]]`; tests and diagnostics).
+    public static func audioCodecOrder(in sdp: String) -> [[String]] {
+        let lines = sdp.components(separatedBy: sdp.contains("\r\n") ? "\r\n" : "\n")
+        var out: [[String]] = []
+        var formats: [String]?
+        var names: [String: String] = [:]
+        func flush() {
+            if let formats { out.append(formats.map { names[$0] ?? $0 }) }
+            formats = nil
+            names = [:]
+        }
+        for line in lines {
+            if line.hasPrefix("m=") {
+                flush()
+                if line.hasPrefix("m=audio") { formats = Array(line.split(separator: " ").dropFirst(3).map(String.init)) }
+            } else if formats != nil, line.hasPrefix("a=rtpmap:") {
+                let rest = line.dropFirst("a=rtpmap:".count).split(separator: " ", maxSplits: 1)
+                if rest.count == 2 { names[String(rest[0])] = String(rest[1].split(separator: "/").first ?? "") }
+            }
+        }
+        flush()
+        return out
+    }
+
     /// The DTLS fingerprint in an SDP (`a=fingerprint:sha-256 AB:CD:…`): a
     /// different one in a new offer means the far side started a brand-new
     /// connection (PROTOCOL.md › Keeping calls across reconnects › fresh start).
@@ -130,6 +229,14 @@ public enum SDPTuner {
         guard let space = rest.firstIndex(of: " ") else { return nil }
         let pt = String(rest[..<space])
         return pt.allSatisfy(\.isNumber) && !pt.isEmpty ? pt : nil
+    }
+
+    /// The voice's Opus fmtp, as written (`minptime=10;useinbandfec=1;…`; the call report).
+    public static func opusFmtpLine(in sdp: String) -> String? {
+        let lines = sdp.components(separatedBy: sdp.contains("\r\n") ? "\r\n" : "\n")
+        guard let pt = lines.lazy.compactMap(opusPayloadType).first,
+              let line = lines.first(where: { $0.hasPrefix("a=fmtp:\(pt) ") }) else { return nil }
+        return String(line.dropFirst("a=fmtp:\(pt) ".count))
     }
 
     /// The Opus fmtp parameters in an SDP (for tests and diagnostics).

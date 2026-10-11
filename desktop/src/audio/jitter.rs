@@ -21,6 +21,10 @@
 //! - **Gaps**: FEC from the packet of the following frame, else PLC. A frame
 //!   that's missing while the buffer is well under its target is probably just
 //!   late: conceal without moving on (the buffer grows, and it may still make it).
+//! - **RED** (RFC 2198, PROTOCOL.md › Voice › Redundancy): a packet may also
+//!   carry the frame before it. That copy only goes in for a frame whose own
+//!   packet hasn't come and that isn't played or patched over yet (its turn
+//!   hasn't passed), never twice; it then plays like the real thing.
 //! - **Underruns**: conceal up to 100 ms, then go quiet and re-buffer.
 //!
 //! Time comes in from outside (`arrival_ms` per packet; the playout clock is
@@ -74,6 +78,12 @@ pub struct JitterStats {
     pub concealed: u64,
     /// Frames recovered from the next packet's in-band FEC.
     pub fec: u64,
+    /// Frames rebuilt, word for word, from the copy a RED packet carried.
+    pub red: u64,
+    /// Packets that came RED-packed (the codec they used: red+opus).
+    pub red_packets: u64,
+    /// Packets the sequence numbers say were sent (lost = this − received).
+    pub expected: u64,
     pub underruns: u64,
     /// Padding-only packets (bandwidth probes): sequence numbers without audio.
     pub padding: u64,
@@ -95,6 +105,8 @@ struct Packet {
     data: Vec<u8>,
     /// Samples per channel in this packet (from its TOC).
     samples: usize,
+    /// A RED copy standing in for a packet that hasn't come (yet).
+    red: bool,
 }
 
 /// Samples per channel (48 kHz) in an Opus packet, from its TOC byte.
@@ -209,6 +221,8 @@ pub struct JitterBuffer {
     /// When recent frames went missing (ms of `played_ms`).
     gaps: VecDeque<f64>,
     last_adjust: f64,
+    /// The highest sequence number seen (for `expected`).
+    last_seq: Option<u16>,
 }
 
 impl JitterBuffer {
@@ -236,7 +250,18 @@ impl JitterBuffer {
             off_since: None,
             last_adjust: 0.0,
             gaps: VecDeque::new(),
+            last_seq: None,
         }
+    }
+
+    /// Count a sequence number towards `expected` (a jump of 1000+ is the sender starting over).
+    fn count_seq(&mut self, seq: u16) {
+        let step = self.last_seq.map_or(1, |l| seq.wrapping_sub(l));
+        if step == 0 || step >= 0x8000 {
+            return; // a duplicate, or an older one arriving late (already expected)
+        }
+        self.stats.expected += if step < 1000 { step as u64 } else { 1 };
+        self.last_seq = Some(seq);
     }
 
     fn extend(&self, ts: u32) -> u64 {
@@ -271,7 +296,37 @@ impl JitterBuffer {
 
     /// One RTP packet, arrived at `arrival_ms` (any fixed clock). An empty
     /// `payload` is padding: a sequence number with no audio, ignored.
-    pub fn push(&mut self, _seq: u16, ts: u32, payload: &[u8], arrival_ms: f64) {
+    pub fn push(&mut self, seq: u16, ts: u32, payload: &[u8], arrival_ms: f64) {
+        self.count_seq(seq);
+        self.push_audio(ts, payload, arrival_ms);
+    }
+
+    /// A RED packet (RFC 2198): its own frame goes in like any packet's; each
+    /// earlier frame it carries only takes the place of one whose own packet
+    /// never came and whose turn hasn't passed. A malformed one is dropped.
+    pub fn push_red(&mut self, seq: u16, ts: u32, payload: &[u8], arrival_ms: f64) {
+        self.count_seq(seq);
+        let Some((copies, primary)) = crate::voice::red::unpack(payload) else { return };
+        self.stats.red_packets += 1;
+        self.push_audio(ts, primary.data, arrival_ms);
+        self.stats.bytes += (payload.len() - primary.data.len()) as u64;
+        for c in copies.iter().filter(|c| c.pt == primary.pt && c.offset > 0) {
+            self.push_copy(ts.wrapping_sub(c.offset), c.data);
+        }
+    }
+
+    /// An earlier frame from a RED packet: queued only if its own packet isn't
+    /// here and it isn't played or patched over yet (and never twice).
+    fn push_copy(&mut self, ts: u32, payload: &[u8]) {
+        let (Some(h), Some(samples)) = (self.highest, opus_samples(payload)) else { return };
+        let ext = self.extend(ts);
+        if ext.abs_diff(h) > 3 * RATE as u64 || self.next.is_some_and(|n| ext < n) || self.packets.contains_key(&ext) {
+            return;
+        }
+        self.packets.insert(ext, Packet { data: payload.to_vec(), samples, red: true });
+    }
+
+    fn push_audio(&mut self, ts: u32, payload: &[u8], arrival_ms: f64) {
         if payload.is_empty() {
             self.stats.padding += 1;
             return;
@@ -301,11 +356,12 @@ impl JitterBuffer {
             return;
         }
         self.late_run = 0;
-        if self.packets.contains_key(&ext) {
+        if let Some(p) = self.packets.get_mut(&ext) {
+            p.red = false; // its own packet made it after all (a copy was waiting)
             return;
         }
         self.highest = Some(self.highest.map_or(ext, |h| h.max(ext)));
-        self.packets.insert(ext, Packet { data: payload.to_vec(), samples });
+        self.packets.insert(ext, Packet { data: payload.to_vec(), samples, red: false });
         // The level an on-time packet would find: this one's slack plus its lateness.
         if self.playing
             && let Some(n) = self.next
@@ -429,6 +485,11 @@ impl JitterBuffer {
             self.plc_run = 0;
             self.waited = 0;
             self.owed = 0;
+            if packet.red {
+                // Its own packet was lost: rebuilt from the next one's copy (and still a gap).
+                self.stats.red += 1;
+                self.gaps.push_back(self.played_ms);
+            }
             match self.decode(&packet.data, false, self.frame) {
                 Some(got) => {
                     self.frame = got;
@@ -529,6 +590,7 @@ impl JitterBuffer {
             // Too much queued: play the next frame's quiet part only.
             let Some(packet) = self.packets.remove(&n) else { return false };
             self.next = Some(n + packet.samples as u64);
+            self.stats.red += packet.red as u64;
             let Some(got) = self.decode(&packet.data, false, self.frame) else { return false };
             self.frame = got;
             let skip = got.min(DEFAULT_FRAME);
@@ -688,9 +750,11 @@ mod tests {
         stall_every: f64,
         /// From this second on, the path is 150 ms slower (a route change).
         step_at: f64,
+        /// Every packet is RED: it also carries the frame before it.
+        red: bool,
     }
 
-    const CLEAN: Net = Net { secs: 60.0, base: 20.0, jitter: 0.0, spike_p: 0.0, spike: (0.0, 0.0), loss: 0.0, drift_ppm: 0.0, padding_every: 0, stall_every: 0.0, step_at: 0.0 };
+    const CLEAN: Net = Net { secs: 60.0, base: 20.0, jitter: 0.0, spike_p: 0.0, spike: (0.0, 0.0), loss: 0.0, drift_ppm: 0.0, padding_every: 0, stall_every: 0.0, step_at: 0.0, red: false };
 
     struct Outcome {
         sent: usize,
@@ -704,6 +768,10 @@ mod tests {
     impl Outcome {
         fn repaired_pct(&self) -> f64 {
             100.0 * (self.stats.fec + self.stats.concealed) as f64 / self.sent as f64
+        }
+        /// Patched over (PLC), as the connection hint and the call report count it.
+        fn patched_pct(&self) -> f64 {
+            100.0 * self.stats.concealed as f64 / self.sent as f64
         }
     }
 
@@ -734,7 +802,7 @@ mod tests {
                         d = d.max(300.0 - into + net.base);
                     }
                 }
-                arrivals.push((send + d, seq, ts, k % pk.len()));
+                arrivals.push((send + d, seq, ts, k));
             }
             seq = seq.wrapping_add(1);
             if net.padding_every > 0 && k % net.padding_every == 0 {
@@ -746,13 +814,22 @@ mod tests {
         let tick = 10.0 / (1.0 + net.drift_ppm * 1e-6);
         let mut jb = JitterBuffer::new();
         let mut out = vec![0f32; 960];
+        let mut red = Vec::new();
         let (mut ai, mut t) = (0, 0.0);
         let (mut delay_sum, mut delay_n, mut rebuffer) = (0.0, 0usize, 0usize);
         let end = net.secs * 1000.0 - 300.0;
         while t < end {
             while ai < arrivals.len() && arrivals[ai].0 <= t {
-                let (at, s, ts, i) = arrivals[ai];
-                jb.push(s, ts, if i == usize::MAX { &[] } else { &pk[i] }, at);
+                let (at, s, ts, k) = arrivals[ai];
+                if k == usize::MAX {
+                    jb.push(s, ts, &[], at);
+                } else if net.red {
+                    let prev: &[u8] = if k > 0 { &pk[(k - 1) % pk.len()] } else { &[] };
+                    crate::voice::red::pack(&mut red, 111, &pk[k % pk.len()], prev, 960);
+                    jb.push_red(s, ts, &red, at);
+                } else {
+                    jb.push(s, ts, &pk[k % pk.len()], at);
+                }
                 ai += 1;
             }
             jb.pull(&mut out);
@@ -772,8 +849,8 @@ mod tests {
     fn report(name: &str, o: &Outcome) {
         let s = o.stats;
         println!(
-            "{name:<10} sent {} lost {} | late {} fec {} plc {} ({:.2}% repaired) under {} rebuffer {} ms | inserted {} dropped {} (max {} ms) | delay avg {:.1} ms, target {:.0} ms",
-            o.sent, o.lost, s.late, s.fec, s.concealed, o.repaired_pct(), s.underruns, o.rebuffer_ms, s.inserted, s.dropped, s.max_drop_ms, o.avg_delay, s.target_ms
+            "{name:<10} sent {} lost {} | late {} red {} fec {} plc {} ({:.2}% repaired, {:.2}% patched) under {} rebuffer {} ms | inserted {} dropped {} (max {} ms) | delay avg {:.1} ms, target {:.0} ms",
+            o.sent, o.lost, s.late, s.red, s.fec, s.concealed, o.repaired_pct(), o.patched_pct(), s.underruns, o.rebuffer_ms, s.inserted, s.dropped, s.max_drop_ms, o.avg_delay, s.target_ms
         );
     }
 
@@ -842,5 +919,78 @@ mod tests {
         let share = o.stats.fec as f64 / (o.stats.fec + o.stats.concealed).max(1) as f64;
         assert!(share > 0.6, "FEC covered {:.0}% of losses", share * 100.0);
         assert!(o.stats.padding > 0);
+    }
+
+    /// RED on the simulated networks: the frame before rides along, so a lost
+    /// (or too late) packet is rebuilt for real instead of roughed in by FEC
+    /// or patched over; what's left is two (and more) gone in a row. Same
+    /// seeds, RED off vs on.
+    #[test]
+    fn sim_red_rebuilds_what_fec_only_roughs_in() {
+        let nets = [
+            ("loss5", Net { secs: 120.0, loss: 0.05, ..CLEAN }, 11),
+            ("wifi", Net { secs: 180.0, base: 15.0, jitter: 10.0, spike_p: 0.02, spike: (60.0, 200.0), loss: 0.01, ..CLEAN }, 2),
+            ("cell", Net { secs: 180.0, base: 40.0, jitter: 20.0, spike_p: 0.03, spike: (100.0, 300.0), loss: 0.02, ..CLEAN }, 4),
+        ];
+        for (name, net, seed) in nets {
+            let off = simulate(&net, seed);
+            let on = simulate(&Net { red: true, ..net }, seed);
+            report(name, &off);
+            report(&format!("{name}+red"), &on);
+            assert!(on.stats.red > 0, "{name}: RED rebuilt nothing");
+            // Only for frames that were lost or came too late: never one that made it.
+            assert!(on.stats.red <= on.lost as u64 + on.stats.late, "{name}: rebuilt {} of {} lost + {} late", on.stats.red, on.lost, on.stats.late);
+            assert!(on.patched_pct() <= off.patched_pct(), "{name}: patched {:.2}% with RED vs {:.2}% without", on.patched_pct(), off.patched_pct());
+            assert!(on.repaired_pct() < off.repaired_pct() * 0.2, "{name}: FEC + PLC {:.2}% with RED vs {:.2}% without", on.repaired_pct(), off.repaired_pct());
+        }
+        // A clean network: every packet arrives, so no copy is ever used.
+        let clean = simulate(&Net { red: true, ..CLEAN }, 1);
+        assert_eq!(clean.stats.red + clean.stats.fec + clean.stats.concealed, 0);
+        assert!(clean.stats.red_packets > 2000);
+    }
+
+    /// A copy only for a frame whose own packet hasn't come and whose turn
+    /// hasn't passed; never twice; its own packet arriving later wins.
+    #[test]
+    fn red_copies_fill_only_real_gaps() {
+        let pkt = opus_silence();
+        let mut red = Vec::new();
+        let mut out = vec![0f32; 960];
+        let mut jb = JitterBuffer::new();
+        let mut push = |jb: &mut JitterBuffer, k: u32, with_prev: bool| {
+            crate::voice::red::pack(&mut red, 111, &pkt, if with_prev { &pkt } else { &[] }, 960);
+            jb.push_red(k as u16, 1000 + k * 960, &red, k as f64 * 20.0);
+        };
+        let at = |jb: &JitterBuffer, k: u32| jb.extend(1000 + k * 960);
+        // 0, 1, 2 arrive; 3 is lost; 4 brings 3's copy.
+        for k in 0..3 {
+            push(&mut jb, k, k > 0);
+        }
+        push(&mut jb, 4, true);
+        assert!(jb.packets.get(&at(&jb, 3)).is_some_and(|p| p.red), "3 from 4's copy");
+        // 3 turns up after all: its own packet replaces the copy.
+        push(&mut jb, 3, true);
+        assert!(jb.packets.values().all(|p| !p.red));
+        // Play 0 and 1.
+        for _ in 0..4 {
+            jb.pull(&mut out);
+        }
+        assert_eq!(jb.next, Some(at(&jb, 2)));
+        // 2 again (a duplicate) with its copy of 1, already played: neither goes in.
+        push(&mut jb, 2, true);
+        assert_eq!(jb.packets.len(), 3);
+        assert!(!jb.packets.contains_key(&at(&jb, 1)));
+        // 5 is lost; 6 brings its copy in time: rebuilt, nothing patched.
+        push(&mut jb, 6, true);
+        for _ in 0..8 {
+            jb.pull(&mut out);
+        }
+        assert_eq!((jb.stats.red, jb.stats.concealed, jb.stats.fec), (1, 0, 0));
+        assert_eq!(jb.stats.red_packets, 7);
+        assert_eq!(jb.stats.expected, 7);
+        // Malformed RED: dropped (but counted as arrived, not lost), never a panic.
+        jb.push_red(7, 1000 + 7 * 960, &[0x80 | 111, 15], 140.0);
+        jb.push_red(8, 1000 + 8 * 960, &[], 160.0);
+        assert_eq!((jb.stats.red_packets, jb.stats.expected), (7, 9));
     }
 }

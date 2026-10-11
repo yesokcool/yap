@@ -1,4 +1,5 @@
 import { settings } from './settings.js';
+import { negotiatedVoice, readCallStats } from './call-report.js';
 
 /**
  * RNNoise (the noise remover the desktop app uses too), as an AudioWorklet
@@ -22,6 +23,11 @@ async function rnnoiseNode(ctx) {
  * peer-to-peer connection carrying Opus audio; the server only relays the
  * setup messages ("signals"). Audio never touches the server, which is why
  * bitrate is free.
+ *
+ * The voice goes as RED (RFC 2198) around Opus when the other app offers it:
+ * each packet also carries the frame before it, so a lost packet is rebuilt
+ * word for word from the next one (PROTOCOL.md › Voice › Redundancy). Browsers
+ * only send RED when it's first in the list, so `preferAudio` puts it there.
  *
  * Who offers: the newcomer offers to everyone already in the channel.
  * Glare (both sides renegotiating at once) is resolved with the standard
@@ -96,11 +102,40 @@ function preferCodecs(transceiver, names) {
   }
 }
 
+/**
+ * Audio codecs in the order we want them. The voice (`red`): RED first, so
+ * every packet also carries the 20 ms before it, then Opus (an app without RED
+ * just picks Opus), then the rest. Anything else (a screen share's sound, or
+ * the voice with RED switched off): Opus first and no RED, so it's plain Opus
+ * both ways. Nothing but RED is ever dropped.
+ */
+export function orderAudioCodecs(codecs, { red }) {
+  const kind = (c) => c.mimeType.toLowerCase();
+  const rank = (c) => (kind(c) === 'audio/red' ? 0 : kind(c) === 'audio/opus' ? 1 : 2);
+  return codecs.filter((c) => red || kind(c) !== 'audio/red').sort((a, b) => rank(a) - rank(b));
+}
+
+/** Set an audio transceiver's codec order (see orderAudioCodecs). Without setCodecPreferences, the browser's own order stays. */
+function preferAudio(transceiver, { red }) {
+  try {
+    const caps = RTCRtpReceiver.getCapabilities?.('audio')?.codecs;
+    if (!caps || !transceiver?.setCodecPreferences || transceiver.currentDirection === 'stopped') return;
+    transceiver.setCodecPreferences(orderAudioCodecs(caps, { red }));
+  } catch (err) {
+    console.warn('audio codec preference not applied', err);
+  }
+}
+
+/** `?red=0` in the page's address: the voice goes as plain Opus (for measuring what RED does; not a setting). */
+const RED_DEFAULT = !/(?:^\?|&)red=0(?:&|$)/.test(globalThis.location?.search ?? '');
+
 export class Voice extends EventTarget {
   mySid = null;
   iceServers = [];
   /** Only through the TURN relay (hides your IP from peers). Set before prepare(). */
   relayOnly = false;
+  /** Offer RED on the voice (on unless the page was opened with ?red=0). Applies to connections made after it changes. */
+  red = RED_DEFAULT;
   /** @type {Map<string, Peer>} */
   peers = new Map();
   rawStream = null; // the mic, as captured
@@ -324,7 +359,10 @@ export class Voice extends EventTarget {
     if (iceServers) this.iceServers = iceServers;
     if (!this.#ctx) {
       this.#ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
-      this.#ctx.onstatechange = () => this.#kickContext();
+      this.#ctx.onstatechange = () => {
+        this.#emit('context', { state: this.#ctx?.state }); // (the call report notes interruptions)
+        this.#kickContext();
+      };
       await this.#ctx.audioWorklet.addModule(new URL('./gate-worklet.js', import.meta.url));
     }
     await this.#ctx.resume();
@@ -739,6 +777,7 @@ export class Voice extends EventTarget {
       if (had && now && had !== now) {
         this.drop(from);
         peer = null;
+        this.#emit('rebuild', { sid: from, by: 'them' });
       }
     }
     if (data?.screen) {
@@ -866,6 +905,7 @@ export class Voice extends EventTarget {
     if (!this.peers.has(sid)) return;
     this.drop(sid);
     this.#createPeer(sid, true);
+    this.#emit('rebuild', { sid, by: 'us' });
   }
 
   /** Fully off: no peers, mic released, audio graph closed. */
@@ -934,11 +974,16 @@ export class Voice extends EventTarget {
     }, 100);
   }
 
-  /** Average round-trip time (ms) and what we're actually sending (kbps). */
+  /**
+   * Average round-trip time (ms) and what we're actually sending (kbps), plus
+   * each connection's reading for the call report (`peers`: { sid, uid, peer,
+   * reading, codecs }; see call-report.js › readCallStats, negotiatedVoice).
+   */
   async stats() {
     let rtt = 0;
     let rttCount = 0;
     let sendKbps = 0;
+    const peers = [];
     for (const peer of [...this.peers.values()]) {
       const s = await peer.stats();
       if (s.rtt != null) {
@@ -947,8 +992,9 @@ export class Voice extends EventTarget {
       }
       sendKbps = Math.max(sendKbps, s.sendKbps ?? 0);
       if (s.weakChanged) this.#emit('quality', { sid: peer.sid, weak: peer.weak });
+      peers.push({ sid: peer.sid, uid: peer.uid, peer, reading: s.reading, codecs: negotiatedVoice(peer.pc.localDescription?.sdp, peer.pc.remoteDescription?.sdp) });
     }
-    return { rtt: rttCount ? Math.round(rtt / rttCount) : null, sendKbps: Math.round(sendKbps) };
+    return { rtt: rttCount ? Math.round(rtt / rttCount) : null, sendKbps: Math.round(sendKbps), peers };
   }
 
   #emit(type, detail) {
@@ -1032,8 +1078,9 @@ class Peer {
     };
 
     if (initiator) {
-      // Adding the transceiver fires negotiationneeded → we send the offer.
-      this.pc.addTransceiver(voice.outTrack ?? 'audio', { direction: 'sendrecv' });
+      // Adding the transceiver fires negotiationneeded → we send the offer (RED first, then Opus).
+      const voiceTransceiver = this.pc.addTransceiver(voice.outTrack ?? 'audio', { direction: 'sendrecv' });
+      preferAudio(voiceTransceiver, { red: voice.red });
     }
   }
 
@@ -1066,6 +1113,7 @@ class Peer {
     if (!this.voice.peers.has(this.sid) || this.voice.peers.get(this.sid) !== this) return; // closed meanwhile
     this.restarts++;
     if (this.restarts > 3 && !this.polite && this.voice.resumable(this.sid)) return this.voice.restart(this.sid);
+    this.voice.dispatchEvent(new CustomEvent('restart', { detail: { sid: this.sid, attempt: this.restarts } }));
     const iceServers = await this.voice.freshIceServers();
     try {
       this.pc.setConfiguration({ ...this.pc.getConfiguration(), iceServers });
@@ -1136,6 +1184,11 @@ class Peer {
           const tr = this.pc.getTransceivers().find((t) => t.receiver.track.kind === 'audio');
           if (tr && !tr.sender.track && this.voice.outTrack) await tr.sender.replaceTrack(this.voice.outTrack);
           if (tr) tr.direction = 'sendrecv';
+          // The answer lists RED first on the voice (if they offered it), plain Opus on any other audio:
+          // what they send us follows our answer's order, what we send follows their offer's.
+          for (const t of this.pc.getTransceivers()) {
+            if (t.receiver.track.kind === 'audio') preferAudio(t, { red: t === tr && this.voice.red });
+          }
           const answer = await this.pc.createAnswer();
           await this.pc.setLocalDescription({ type: 'answer', sdp: tuneOpus(answer.sdp) });
           this.send({ sdp: this.pc.localDescription.toJSON() });
@@ -1211,6 +1264,7 @@ class Peer {
       const sender = this.pc.addTrack(track, stream);
       tr = this.#screenOut[kind] = this.pc.getTransceivers().find((t) => t.sender === sender) ?? null;
       if (tr && codecs) preferCodecs(tr, codecs);
+      if (tr && kind === 'audio') preferAudio(tr, { red: false }); // a share's sound: plain Opus, never RED
       return;
     }
     if (tr.sender.track !== track) tr.sender.replaceTrack(track).catch((err) => console.warn('replaceTrack failed', err));
@@ -1304,7 +1358,9 @@ class Peer {
         sender.setParameters(params).catch(() => {});
         continue;
       }
-      // The voice, or a screen share's audio (stereo music: its own, higher cap).
+      // The voice, or a screen share's audio (stereo music: its own, higher cap). The cap is Opus's
+      // target: Chrome doesn't count RED's copy against it (measured: 128 kbps cap → Opus target
+      // 128,000, ~258 kbps of payload), so the voice keeps the quality setting with RED on top.
       params.encodings[0].maxBitrate = sender === this.#screenOut.audio?.sender ? screenAudioBitrate() : callBitrate();
       params.encodings[0].priority = 'high';
       params.encodings[0].networkPriority = 'high';
@@ -1335,17 +1391,9 @@ class Peer {
    */
   async stats() {
     const report = await this.pc.getStats();
-    let rtt = null;
-    let bytesSent = 0;
-    const voiceMid = this.pc.getTransceivers().find((t) => t.receiver.track.kind === 'audio')?.mid;
-    let inbound = null;
-    report.forEach((s) => {
-      if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded' && s.currentRoundTripTime != null) {
-        rtt = s.currentRoundTripTime * 1000;
-      }
-      if (s.type === 'outbound-rtp' && s.kind === 'audio') bytesSent += s.bytesSent;
-      if (s.type === 'inbound-rtp' && s.kind === 'audio' && (s.mid === voiceMid || !inbound)) inbound = s;
-    });
+    const voiceMid = this.#micTransceiver()?.mid;
+    const reading = readCallStats(report, voiceMid);
+    const { rtt, audioBytesSent: bytesSent, received: inbound } = reading;
     const now = performance.now();
     const last = this.#lastStats;
     let sendKbps = null;
@@ -1353,10 +1401,10 @@ class Peer {
     if (last) {
       const secs = (now - last.at) / 1000;
       if (secs > 0) sendKbps = ((bytesSent - last.bytesSent) * 8) / 1000 / secs;
-      const pps = inbound && last.inbound ? (inbound.packetsReceived - last.inbound.packetsReceived) / secs : 0;
+      const pps = inbound && last.inbound ? (inbound.packets - last.inbound.packets) / secs : 0;
       if (pps >= 30 && this.pc.connectionState === 'connected' && now - this.#connectedAt > 10_000) {
-        const samples = inbound.totalSamplesReceived - last.inbound.totalSamplesReceived;
-        const concealed = (inbound.concealedSamples - last.inbound.concealedSamples) - ((inbound.silentConcealedSamples ?? 0) - (last.inbound.silentConcealedSamples ?? 0));
+        const samples = inbound.samples - last.inbound.samples;
+        const concealed = (inbound.concealed - last.inbound.concealed) - (inbound.silentConcealed - last.inbound.silentConcealed);
         const share = samples > 0 ? Math.max(0, concealed) / samples : 0;
         const bad = share > WEAK_CONCEALED || (rtt ?? 0) > WEAK_RTT_MS;
         this.#weakRun = bad ? Math.max(1, this.#weakRun + 1) : Math.min(-1, this.#weakRun - 1);
@@ -1368,7 +1416,7 @@ class Peer {
       }
     }
     this.#lastStats = { at: now, bytesSent, inbound };
-    return { rtt, sendKbps, weakChanged };
+    return { rtt, sendKbps, weakChanged, reading };
   }
 
   close() {
@@ -1400,6 +1448,12 @@ const TWCC = /^a=(?:rtcp-fb:\d+ transport-cc|extmap:\d+(?:\/\w+)? http:\/\/www\.
  *  - minptime=10, maxplaybackrate=48000: low latency, full band
  * The first audio section is the voice; any later one is a screen share's
  * audio (PROTOCOL.md › Screen sharing).
+ *
+ * RED doesn't need tuning here: the voice's codec order (RED, then Opus) comes
+ * from setCodecPreferences (preferAudio), and the browser writes RED's own
+ * `a=fmtp:<red> <opus>/<opus>` (one earlier frame). The Opus line is found by
+ * its rtpmap, wherever it sits in the m= line, and is what RED carries, so
+ * these parameters still set the bitrate, FEC and stereo of the voice.
  *
  * Audio sections also drop `transport-cc` (both the rtcp-fb and the header
  * extension): with it, Chrome's bandwidth probing pads the audio stream

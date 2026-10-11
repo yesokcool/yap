@@ -51,6 +51,8 @@ export const state = {
   speaking: new Set(),
   peerStates: new Map(),
   voiceStats: null,
+  /** This web client's version (changelog.json › current), once loaded: the call report says it. */
+  appVersion: null,
   awaitingChannel: null,
   micTest: false,
   failures: 0,

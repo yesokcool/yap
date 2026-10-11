@@ -246,6 +246,7 @@ export function bindChannelDialog() {
 export async function showVersion() {
   try {
     const log = await (await fetch('/changelog.json')).json();
+    state.appVersion = log.current; // (the call report says which version)
     $('version-link').textContent = `v${log.current} · what's new`;
   } catch {}
 }

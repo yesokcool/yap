@@ -1,7 +1,8 @@
 // End-to-end in real (headless) Chromium against a running dev server:
 // text chat, the GIF picker (KLIPY mocked at the network layer), and two
 // users in a voice channel — checks audio actually flows peer to peer as
-// tuned Opus at the real bitrate, mute propagation — plus screenshots.
+// tuned Opus inside RED at the real bitrate, mute propagation, the call
+// report — plus screenshots.
 // Easiest: npm run test:all (it starts a fresh test server). By hand:
 //   YAP_URL=http://localhost:8787 YAP_KEY=testkey YAP_ADMIN_KEY=testadmin node test/e2e.test.mjs [outDir]
 // The dev server needs any KLIPY_KEY var set (npm run dev:test does).
@@ -1149,6 +1150,18 @@ await test('standard emojis: picker, :shortcode: autocomplete, convert on send',
   await a.keyboard.press('Escape');
 });
 
+await test('Settings › Voice before any call: Copy last call report is disabled, "No call yet."', async () => {
+  await a.click('[data-action="open-settings"]');
+  await a.click('#settings-tabs [role=tab]:text-is("Voice")');
+  await a.waitForSelector('#call-report-copy:disabled', { timeout: 3000 });
+  assert.equal(await a.textContent('#call-report-copy'), 'Copy last call report');
+  assert.equal(await a.isVisible('#call-report-none'), true);
+  assert.equal(await a.textContent('#call-report-none'), 'No call yet.');
+  assert.equal(await a.textContent('#call-report-field > small'), 'What Yap noticed about your last call: connections, lost audio, devices. No messages or IP addresses. Send it along when a call sounded off.');
+  await a.locator('#call-report-field').screenshot({ path: path.join(OUT, 'call-report-settings-none.png') });
+  await a.click('#settings-form .settings-actions .btn');
+});
+
 await test('both join Lounge and connect peer to peer', async () => {
   await a.click('button.channel.voice:has-text("Lounge")');
   await a.waitForSelector('.vp-status.ok', { timeout: 10000 });
@@ -1170,20 +1183,63 @@ const inbound = (page) => page.evaluate(async () => {
 });
 
 let measured;
-await test(`audio flows as tuned Opus at ~${BITRATE / 1000} kbps`, async () => {
+await test(`audio flows as tuned Opus at ~${BITRATE / 1000} kbps (inside RED)`, async () => {
   await b.waitForTimeout(3000); // let the bitrate ramp up
   const s1 = await inbound(b);
   await b.waitForTimeout(4000);
   const s2 = await inbound(b);
   const kbps = ((s2.bytes - s1.bytes) * 8) / (s2.at - s1.at);
   measured = { ...s2, kbps: Math.round(kbps) };
-  assert.equal(s2.mime, 'audio/opus');
+  assert.equal(s2.mime, 'audio/opus', 'Chrome names the Opus inside RED as the codec (next test: RED itself)');
   assert.match(s2.fmtp, /useinbandfec=1/);
   assert.match(s2.fmtp, new RegExp(`maxaveragebitrate=${BITRATE}`));
   assert.ok(s2.packets > 100, `packets received: ${s2.packets}`);
   assert.ok(s2.level > 0.001, `audio level: ${s2.level}`);
   // Payload bitrate should land near the target (VBR; allow a wide band).
   assert.ok(kbps > BITRATE / 1000 * 0.6, `measured ${kbps.toFixed(1)} kbps`);
+});
+
+await test(`RED on the voice: first in every description, both ways; each packet carries the frame before it; Opus stays at ${BITRATE / 1000} kbps`, async () => {
+  const look = (page) => page.evaluate(async () => {
+    const peer = [...yap.voice.peers.values()][0];
+    // The codec each description lists first in its voice (first audio) section.
+    const first = (d) => {
+      const m = d.sdp.split(/\r\nm=/).find((x) => x.startsWith('audio'));
+      return m.match(new RegExp(`a=rtpmap:${m.split('\r\n')[0].split(' ')[3]} ([^/]+)/`))?.[1];
+    };
+    const snap = async () => {
+      let o, i;
+      (await peer.pc.getStats()).forEach((x) => {
+        if (x.type === 'outbound-rtp' && x.kind === 'audio') o = x;
+        if (x.type === 'inbound-rtp' && x.kind === 'audio') i = x;
+      });
+      return { at: performance.now(), sent: o.bytesSent, sentPk: o.packetsSent, target: o.targetBitrate, got: i.bytesReceived, gotPk: i.packetsReceived };
+    };
+    const s1 = await snap();
+    await new Promise((r) => setTimeout(r, 3000));
+    const s2 = await snap();
+    return {
+      local: first(peer.pc.localDescription), remote: first(peer.pc.remoteDescription), target: s2.target,
+      sentKbps: ((s2.sent - s1.sent) * 8) / (s2.at - s1.at),
+      sentPerPacket: (s2.sent - s1.sent) / (s2.sentPk - s1.sentPk),
+      gotPerPacket: (s2.got - s1.got) / (s2.gotPk - s1.gotPk),
+    };
+  });
+  const [ada, ben] = await Promise.all([look(a), look(b)]);
+  const opusPerPacket = BITRATE / 8 / 50; // a 20 ms Opus frame at the target
+  // (Up to 256 kbps a frame and its copy fit a packet; at 510 kbps the copy is left out: RFC 2198 / PROTOCOL.md.)
+  const copies = BITRATE <= 128000;
+  for (const [who, s] of [['Ada', ada], ['Ben', ben]]) {
+    assert.equal(s.local, 'red', `${who}'s description lists RED first`);
+    assert.equal(s.remote, 'red', `${who} gets a description with RED first`);
+    assert.equal(s.target, BITRATE, `${who}'s Opus target is the quality setting (RED's copy isn't counted against it)`);
+    if (copies) {
+      assert.ok(s.sentPerPacket > opusPerPacket * 1.7 && s.sentPerPacket < opusPerPacket * 2.3, `${who} sends ${s.sentPerPacket.toFixed(0)} bytes a packet (Opus alone: ${opusPerPacket})`);
+      assert.ok(s.gotPerPacket > opusPerPacket * 1.7 && s.gotPerPacket < opusPerPacket * 2.3, `${who} gets ${s.gotPerPacket.toFixed(0)} bytes a packet`);
+      assert.ok(s.sentKbps > (BITRATE / 1000) * 1.7, `${who} sends ${s.sentKbps.toFixed(0)} kbps of payload: Opus plus the copy`);
+    }
+  }
+  measured.red = { sentKbps: Math.round(ada.sentKbps), perPacket: Math.round(ada.sentPerPacket), target: ada.target };
 });
 
 await test('no transport-cc on audio: 50 packets a second, no bandwidth-probe padding', async () => {
@@ -1361,6 +1417,62 @@ await test('a half-dead old socket: the server still lists our old session, and 
   await b.waitForFunction(() => [...yap.voice.peers.values()].every((p) => p.pc.connectionState === 'connected'), null, { timeout: 5000 });
 });
 
+/** What a page put on the clipboard (the clipboard itself isn't readable headless). */
+const catchCopies = (page) => page.evaluate(() => {
+  globalThis.__copied = null;
+  navigator.clipboard.writeText = async (text) => { globalThis.__copied = text; };
+});
+const IPV4 = /\b\d{1,3}(?:\.\d{1,3}){3}\b/;
+
+await test("call report: Copy call report (the call's ⋯): header, Ada with red+opus, a timeline with the join, the kept reconnects and a line per person", async () => {
+  await catchCopies(b);
+  await b.click('#voice-panel [data-action="voice-more"]');
+  await b.waitForSelector('#popover [data-action="copy-call-report"]');
+  await b.locator('#popover').screenshot({ path: path.join(OUT, 'call-report-menu.png') });
+  await b.click('#popover [data-action="copy-call-report"]');
+  await b.waitForSelector('#toast:not([hidden]):text-is("Call report copied.")', { timeout: 3000 });
+  const text = await b.evaluate(() => globalThis.__copied);
+  fs.writeFileSync(path.join(OUT, 'call-report-example.txt'), text);
+  const lines = text.split('\n');
+  assert.equal(lines[0], 'Yap call report');
+  assert.match(text, /^App: Yap web \d+\.\d+\.\d+ \(build [0-9a-f]{12}\)$/m);
+  assert.match(text, /^Device: (Headless )?Chrome \d+ on \w+ \(computer\)$/m);
+  assert.match(text, /^Channel: Lounge$/m);
+  assert.match(text, /^Started: \d{4}-\d\d-\d\d \d\d:\d\d:\d\d \(local time\)$/m);
+  assert.match(text, /^Lasted: \d+:\d\d so far \(still in the call\)$/m);
+  assert.match(text, new RegExp(`^  Quality: ${BITRATE / 1000} kbps$`, 'm'));
+  assert.match(text, /^ {2}Channel quality: each person's own$/m);
+  assert.ok(lines.includes('+00:00 You joined Lounge; Ada was there') && text.includes(' Settings: channel quality 256 kbps for everyone\n'), 'a setting changed mid-call (the channel quality test)');
+  assert.match(text, /^ {2}Input mode: always on$/m);
+  assert.match(text, /^ {2}Echo cancellation: on$/m);
+  assert.match(text, /^ {2}Microphone: .+$/m);
+  const at = (l) => lines.indexOf(l);
+  assert.ok(at('Settings:') > 0 && at('Settings:') < at('Audio devices:') && at('Audio devices:') < at('People (1)') && at('People (1)') < at('Timeline'), 'header, people, timeline');
+  const ada = lines.slice(at('People (1)') + 1, at('Timeline')).join('\n');
+  assert.match(ada, /^Ada$/m);
+  assert.match(ada, /^ {2}Connection: direct \((host|srflx|prflx) ↔ (host|srflx|prflx)\)/m);
+  assert.match(ada, /^ {2}Codec: red\+opus out, red\+opus in$/m);
+  assert.match(ada, new RegExp(`^  Opus fmtp sent: (?=.*useinbandfec=1)(?=.*maxaveragebitrate=${BITRATE}(;|$))`, 'm'), '(Chrome sorts the parameters)');
+  assert.match(ada, /^ {2}Bitrate \(median\): \d+ kbps out, \d+ kbps in$/m);
+  assert.match(ada, /^ {2}Round trip: \d+ ms median, \d+ ms worst$/m);
+  assert.match(ada, /^ {2}Lost packets: \d+\.\d % \([\d,]+ of [\d,]+\)$/m);
+  assert.match(ada, /^ {2}Audio patched over: \d+\.\d %$/m);
+  assert.match(ada, /^ {2}ICE restarts: \d+, connection rebuilds: \d+, reconnects kept: [1-9]\d*$/m, 'Ada dropped her socket twice and the call was kept');
+  const timeline = lines.slice(at('Timeline') + 1);
+  assert.equal(timeline[0], '+00:00 You joined Lounge; Ada was there');
+  assert.ok(timeline.some((l) => /^\+\d\d:\d\d Ada: connected$/.test(l)), 'connection states');
+  assert.ok(timeline.some((l) => /^\+\d\d:\d\d Ada: red\+opus out, red\+opus in$/.test(l)), 'the codec, once negotiated');
+  assert.ok(timeline.some((l) => /^\+\d\d:\d\d Ada lost their connection to Yap; keeping the call/.test(l)), 'her socket dropping');
+  assert.ok(timeline.some((l) => /^\+\d\d:\d\d Ada is back: the call was kept$/.test(l)), 'and the call kept');
+  const per = timeline.filter((l) => /^\+\d\d:\d\d Ada: rtt \d+ ms, lost \d+\.\d %, patched \d+\.\d %, \d+ kbps in, \d+ out$/.test(l));
+  assert.ok(per.length >= 2, `a line for Ada every 10 s (${per.length})`);
+  assert.ok(per[0].startsWith('+00:1'), `the first at +00:10 (${per[0]})`);
+  assert.doesNotMatch(text, IPV4, 'no IP addresses');
+  assert.doesNotMatch(text, /candidate|typ host|\.local\b/);
+  // The same report is kept on this device while the call goes on.
+  assert.match(await b.evaluate(() => JSON.parse(localStorage.getItem('yap.callReport')).text), /^Yap call report\n/);
+});
+
 await test('soundboard: add a clip (decoded + trimmed in the browser), play it, the other person gets it', async () => {
   // A 7-second WAV: the panel trims it to 5 s before uploading.
   const rate = 24000;
@@ -1497,6 +1609,12 @@ await test('screen sharing: share in voice, a LIVE badge, the other person watch
   const fmtp = await b.evaluate((sid) => yap.voice.peers.get(sid).pc.localDescription.sdp.split(/\r\nm=/).filter((m) => m.startsWith('audio'))[1]?.match(/a=fmtp:\d+ ([^\r\n]+)/)?.[1], sharerSid);
   assert.match(fmtp ?? '', /stereo=1/);
   assert.match(fmtp ?? '', /maxaveragebitrate=160000/);
+  // The share's sound stays plain Opus (RED is for the voice only): Opus first and no RED, both sides.
+  for (const [page, sid] of [[a, benSid], [b, sharerSid]]) {
+    const section = await page.evaluate((s) => yap.voice.peers.get(s).pc.localDescription.sdp.split(/\r\nm=/).filter((m) => m.startsWith('audio'))[1], sid);
+    assert.match(section, new RegExp(`a=rtpmap:${section.split('\r\n')[0].split(' ')[3]} opus/48000`), "the share's sound lists Opus first");
+    assert.doesNotMatch(section, /red\/48000/, "and no RED");
+  }
   const split = await b.evaluate(async (sid) => {
     const track = yap.voice.screens.get(sid).getAudioTracks()[0];
     const ctx = new AudioContext();
@@ -2494,6 +2612,24 @@ await test('leaving hangs up on both sides', async () => {
   await b.click('[data-action="leave-voice"]');
   await a.waitForFunction(() => yap.voice.peers.size === 0, null, { timeout: 5000 });
   assert.equal(await b.evaluate(() => yap.voice.peers.size), 0);
+});
+
+await test('call report after the call: Settings › Voice › Copy last call report copies the one that ended, kept on this device', async () => {
+  await catchCopies(b);
+  await b.click('[data-action="open-settings"]');
+  await b.click('#settings-tabs [role=tab]:text-is("Voice")');
+  await b.waitForSelector('#call-report-copy:enabled', { timeout: 3000 });
+  assert.equal(await b.textContent('#call-report-copy'), 'Copy last call report');
+  assert.equal(await b.isVisible('#call-report-none'), false);
+  await b.locator('#call-report-field').screenshot({ path: path.join(OUT, 'call-report-settings.png') });
+  await b.click('#call-report-copy');
+  await b.waitForSelector('#toast:not([hidden]):text-is("Call report copied.")', { timeout: 3000 });
+  const text = await b.evaluate(() => globalThis.__copied);
+  assert.match(text, /^Lasted: \d+:\d\d$/m, 'over, so no "so far"');
+  assert.match(text, /\n\+\d+:\d\d(:\d\d)? Call ended: you left\n$/);
+  assert.match(text, /^ {2}Codec: red\+opus out, red\+opus in$/m);
+  assert.equal(await b.evaluate(() => JSON.parse(localStorage.getItem('yap.callReport')).text), text, 'kept in localStorage');
+  await b.click('#settings-form .settings-actions .btn');
 });
 
 // Phone-sized screenshots.

@@ -81,6 +81,7 @@ impl Core {
         };
         if silent != self.shared.model.lock().mic_silent {
             self.shared.model.lock().mic_silent = silent;
+            self.call_note(if silent { "Your mic is sending silence (nothing at all comes from it)" } else { "Your mic is sending sound again" });
             self.emit(CoreEvent::Extra("MIC", if silent { "sending silence".into() } else { "sound again".into() }));
             self.repaint();
         }
@@ -104,9 +105,11 @@ impl Core {
         let peers = self.voice.peers();
         let debug = cfg!(debug_assertions).then(|| std::env::var("YAP_DEBUG_HINT").ok()).flatten();
         let mut hints: HashMap<String, Hint> = HashMap::new();
+        let mut weak_changes = Vec::new();
         for p in &peers {
             let sid = p.sid();
             let track = self.hint_track.entry(p.id).or_default();
+            let was_weak = track.weak;
             let stats = self.shared.audio.stream(&sid).map(|s| s.stats()).unwrap_or_default();
             let now = Instant::now();
             let connected = *p.state.lock() == "connected";
@@ -125,6 +128,10 @@ impl Core {
             track.packets = stats.packets;
             track.frames = stats.frames;
             track.concealed = stats.concealed;
+            let weak = track.weak;
+            if weak.is_some() != was_weak.is_some() {
+                weak_changes.push((sid.clone(), weak));
+            }
             let hint = if p.failed.load(Ordering::Relaxed) && !connected {
                 Some(if relay { Hint::CantConnect } else { Hint::NeedsRelay })
             } else {
@@ -141,6 +148,9 @@ impl Core {
             if let Some(h) = hint {
                 hints.insert(sid, h);
             }
+        }
+        for (sid, weak) in weak_changes {
+            self.call_weak(&sid, weak);
         }
         let live: HashSet<u64> = peers.iter().map(|p| p.id).collect();
         self.hint_track.retain(|id, _| live.contains(id));
@@ -180,6 +190,7 @@ impl Core {
         if input || output {
             log::warn!("audio: {health:?}; reopening");
             self.emit(CoreEvent::Extra("AUDIO", format!("reopening{}{}", if input { " mic" } else { "" }, if output { " speakers" } else { "" })));
+            self.call_note(format!("The {} stopped or failed: reopening it", if input && output { "mic and speakers" } else if input { "mic" } else { "speakers" }));
             let _ = self.cmd_tx.send(Cmd::AudioRestart { input, output });
             return;
         }

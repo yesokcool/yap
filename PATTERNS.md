@@ -65,6 +65,18 @@ and the sender also caps itself with `RTCRtpSender.setParameters`
 `inbound-rtp.bytesReceived` over time (see `test/e2e.test.mjs`; the SDP
 rewriting itself is unit-tested in `test/voice.test.mjs`).
 
+RED on the voice isn't munged: `preferAudio()` puts `audio/red` first with
+`setCodecPreferences` on the voice transceiver (when offering, and before
+answering), and a share's sound gets Opus first with RED left out. Chrome
+*sends* the first codec of the other side's description, so each direction
+follows the other person's order; an app that doesn't offer RED gets plain
+Opus. Chrome's stats name the Opus inside RED as the codec both ways
+(`audio/opus`, and `fecPacketsReceived` doesn't count RED's copies), so check
+RED from the descriptions (the voice section's first payload type) and from
+bytes per packet: ~2× Opus's, while `outbound-rtp.targetBitrate` stays at
+`maxBitrate` (the copy isn't counted against it; at 510 kbps the copy doesn't
+fit and is left out).
+
 ### Voice gate on the audio thread, without killing the meter
 The mic goes through an `AudioWorklet` (`web/js/gate-worklet.js`) into a
 `MediaStreamAudioDestinationNode`, and *that* track is what peers get. The
@@ -193,6 +205,24 @@ louder than that: every client plays at `gain × your volume` through a
 `DynamicsCompressor` limiter, two clips at most.
 
 ## Gotchas & lessons
+
+- **An RTP check by payload type misses RED.** The impairment proxy treated
+  only payload types 96–127 as RTP, so Chrome's RED (63) skipped the loss and
+  every RED number looked perfect (2026-10-11). Tell RTCP apart by RFC 5761
+  (second byte 192–223) and treat everything else as RTP; send media back to
+  the socket it last came from, not to whoever pinged last.
+
+- **webrtc-rs `get_transceivers()` comes out of a HashMap.** "The first one"
+  can be a screen share's transceiver: find the voice by transceiver id 0.
+  Answering an offer, webrtc-rs lists exact-fmtp matches first, so set codec
+  preferences on every audio section you care about (a share's sound came out
+  RED-first).
+
+- **SwiftPM builds a package without `DEBUG` under a custom configuration.**
+  The app's "Dev" configuration defines `DEBUG`, but YapKit is built as
+  release there, so app code under `#if DEBUG` that calls YapKit's
+  `#if DEBUG` API fails only in Yap DEV (2026-10-11). Keep debug hooks the
+  app calls outside `#if DEBUG` in the package.
 
 - **Test data leaks between suites on a reused dev database.** e2e matched
   `:has-text("Horn")` against an older "Airhorn" and a hang titled "Game

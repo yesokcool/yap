@@ -104,25 +104,54 @@ const PROFILES = {
   cell: { base: 40, jit: 20, spikeP: 0.03, spike: [100, 300], loss: 0.02 },
 };
 if (IMPAIR && !PROFILES[IMPAIR]) throw new Error(`YAP_IMPAIR: one of ${Object.keys(PROFILES).join(', ')}`);
-const impairStats = { rtp: 0, dropped: 0 };
+// What crossed the proxy, each way: RTP payload types (the header isn't encrypted: RED is 63, Opus 111) and payload bytes (with SRTP's tag).
+const impairStats = { rtp: 0, dropped: 0, toWeb: { pt: {}, bytes: 0 }, toNative: { pt: {}, bytes: 0 } };
+const resetWire = () => { for (const d of [impairStats.toWeb, impairStats.toNative]) { d.pt = {}; d.bytes = 0; } };
 const proxies = [];
+// YAP_IMPAIR_SEED=<n>: the same drops and delays every run (so RED on and off meet the same network).
+let seed = Number(process.env.YAP_IMPAIR_SEED ?? 0);
+const rand = seed > 0 ? () => ((seed = (seed * 16807) % 2147483647) / 2147483647) : Math.random;
 /** A UDP proxy in front of one of the native app's candidates; RTP through it gets the profile. */
 function mkProxy(host, port) {
   const prof = PROFILES[IMPAIR];
   const sock = dgram.createSocket('udp4');
   proxies.push(sock);
+  // Who last sent a STUN check through us, and the socket media (DTLS, RTP, RTCP) last came
+  // from: media goes back to the selected pair's socket, so another pair's checks can't steal it.
+  // A STUN answer goes back to whoever asked (by transaction id): the web checks one candidate
+  // from several sockets at once.
   let client = null;
+  let media = null;
+  const asked = new Map();
   sock.on('message', (msg, r) => {
     const fromTarget = r.address === host && r.port === port;
-    if (!fromTarget) client = { address: r.address, port: r.port };
-    const to = fromTarget ? client : { address: host, port };
+    const stun = msg[0] < 4 && msg.length >= 20;
+    const txid = stun ? msg.toString('hex', 8, 20) : null;
+    if (!fromTarget) {
+      client = { address: r.address, port: r.port };
+      if (!stun) media = client;
+      else if (!(msg.readUInt16BE(0) & 0x0100)) {
+        asked.set(txid, client);
+        if (asked.size > 500) asked.delete(asked.keys().next().value);
+      }
+    }
+    const answer = stun && msg.readUInt16BE(0) & 0x0100 ? asked.get(txid) : null;
+    const to = fromTarget ? (answer ?? (stun ? client : media ?? client)) : { address: host, port };
     if (!to) return;
-    const isRtp = msg.length > 12 && (msg[0] & 0xc0) === 0x80 && (msg[1] & 0x7f) >= 96 && (msg[1] & 0x7f) <= 127;
+    // RTP, not RTCP (RFC 5761: RTCP's second byte is 192–223), STUN or DTLS. Any payload type: RED is 63.
+    const isRtp = msg.length > 12 && (msg[0] & 0xc0) === 0x80 && (msg[1] < 192 || msg[1] > 223);
     if (!isRtp) return sock.send(msg, to.port, to.address);
     impairStats.rtp++;
-    if (Math.random() < prof.loss) return impairStats.dropped++;
-    let d = prof.base + (prof.jit ? -prof.jit * Math.log(1 - Math.random()) : 0);
-    if (Math.random() < prof.spikeP) d += prof.spike[0] + Math.random() * (prof.spike[1] - prof.spike[0]);
+    const dir = fromTarget ? impairStats.toWeb : impairStats.toNative;
+    const pt = msg[1] & 0x7f;
+    if (pt === 63 || pt === 111) {
+      dir.pt[pt] = (dir.pt[pt] ?? 0) + 1;
+      const csrc = 4 * (msg[0] & 0x0f);
+      dir.bytes += msg.length - 12 - csrc - (msg[0] & 0x10 ? 4 + 4 * msg.readUInt16BE(14 + csrc) : 0); // the payload (and SRTP's tag)
+    }
+    if (rand() < prof.loss) return impairStats.dropped++;
+    let d = prof.base + (prof.jit ? -prof.jit * Math.log(1 - rand()) : 0);
+    if (rand() < prof.spikeP) d += prof.spike[0] + rand() * (prof.spike[1] - prof.spike[0]);
     if (d < 1) return sock.send(msg, to.port, to.address);
     setTimeout(() => sock.send(msg, to.port, to.address), d);
   });
@@ -324,13 +353,27 @@ const inbound = (page) => page.evaluate(async () => {
   if (rtp) codec = report.get(rtp.codecId);
   if (out) outCodec = report.get(out.codecId);
   const ssrc = peer.pc.getReceivers()[0]?.getSynchronizationSources?.()[0];
+  // The voice section's Opus fmtp, as each side described it (with RED the codec stats name red).
+  const opusFmtp = (sdp) => {
+    const voice = (sdp ?? '').split('\r\nm=')[1] ?? '';
+    const pt = voice.match(/a=rtpmap:(\d+) opus\/48000/i)?.[1];
+    return pt ? voice.match(new RegExp(`a=fmtp:${pt} ([^\\r\\n]*)`))?.[1] : null;
+  };
+  const order = (sdp) => {
+    const voice = (sdp ?? '').split('\r\nm=')[1] ?? '';
+    return voice.split('\r\n')[0].split(' ').slice(3).map((pt) => voice.match(new RegExp(`a=rtpmap:${pt} ([^/]+)/`))?.[1]?.toLowerCase()).filter(Boolean).slice(0, 2).join(',');
+  };
   return {
     bytes: rtp?.bytesReceived ?? 0, packets: rtp?.packetsReceived ?? 0, lost: rtp?.packetsLost ?? 0,
-    level: rtp?.audioLevel ?? 0, mime: codec?.mimeType, fmtp: codec?.sdpFmtpLine,
+    level: rtp?.audioLevel ?? 0, mime: codec?.mimeType, fmtp: codec?.sdpFmtpLine, outMime: outCodec?.mimeType,
+    opusFmtp: opusFmtp(peer.pc.remoteDescription?.sdp), localOrder: order(peer.pc.localDescription?.sdp), remoteOrder: order(peer.pc.remoteDescription?.sdp),
+    concealed: (rtp?.concealedSamples ?? 0) - (rtp?.silentConcealedSamples ?? 0), samples: rtp?.totalSamplesReceived ?? 0,
     sentBytes: out?.bytesSent ?? 0, sentPackets: out?.packetsSent ?? 0, outFmtp: outCodec?.sdpFmtpLine,
     rtpExtLevel: ssrc?.audioLevel ?? null, at: performance.now(),
   };
 });
+/** Audio the web patched over between two readings (% of what it received). */
+const patchedPct = (a, b) => +((100 * (b.concealed - a.concealed)) / Math.max(1, b.samples - a.samples)).toFixed(2);
 
 const results = [];
 const evidence = {};
@@ -848,8 +891,13 @@ await test('native account: sign in on a "new device" with name + PIN, then reco
 });
 
 // ── Voice ───────────────────────────────────────────────────────────────
+// RED (PROTOCOL.md › Voice › Redundancy): on unless YAP_RED=0, which the native app also reads (plain Opus both ways).
+const RED = process.env.YAP_RED !== '0';
+// YAP_VOICE_SECS: how long the native app stays in each call (longer = steadier loss numbers).
+const VOICE_SECS = Number(process.env.YAP_VOICE_SECS ?? 24);
 async function voiceScenario(label, nativeFirst) {
-  const n = native(`Voice${RUN}${nativeFirst ? 'N' : 'W'}`, null, ['--join-voice', 'lounge', '--duration', '24', '--mute-after', '14']);
+  const reportFile = path.join(OUT, `call-report-${label}.txt`);
+  const n = native(`Voice${RUN}${nativeFirst ? 'N' : 'W'}`, null, ['--join-voice', 'lounge', '--duration', String(VOICE_SECS), '--mute-after', String(VOICE_SECS - 10), '--call-report', reportFile]);
   if (nativeFirst) await n.waitFor(/voice joined lounge/);
   await web.click('button.channel.voice:has-text("Lounge")');
   if (!nativeFirst) {
@@ -859,6 +907,7 @@ async function voiceScenario(label, nativeFirst) {
   await n.waitFor(/peer \S+ connected/, 20000);
   await web.waitForTimeout(3000); // let the bitrate ramp up
   const s1 = await inbound(web);
+  resetWire();
   await web.waitForTimeout(4000);
   const s2 = await inbound(web);
   const kbps = ((s2.bytes - s1.bytes) * 8) / (s2.at - s1.at);
@@ -868,8 +917,10 @@ async function voiceScenario(label, nativeFirst) {
     return s ? document.querySelector(`.voice-member[data-voice-sid="${CSS.escape(s.sid)}"]`) : null;
   };
   const ring = await web.waitForFunction(`(${nativeRow})()?.classList.contains('speaking')`, null, { timeout: 5000 }).then(() => true, () => false);
-  // Native mutes itself at ~14 s: the web side should see the flag and silence.
-  await n.waitFor(/toggling mute/, 20000);
+  // Native mutes itself 10 s before the end: the web side should see the flag and silence.
+  await n.waitFor(/toggling mute/, VOICE_SECS * 1000);
+  const s3 = await inbound(web);
+  const wire = JSON.parse(JSON.stringify({ toWeb: impairStats.toWeb, toNative: impairStats.toNative }));
   await web.waitForFunction(`!!(${nativeRow})()?.querySelector('.flags svg')`, null, { timeout: 6000 }).catch(() => {});
   await web.waitForTimeout(1500);
   const muted = await inbound(web);
@@ -879,13 +930,35 @@ async function voiceScenario(label, nativeFirst) {
   await web.click('[data-action="leave-voice"]');
   await web.waitForFunction(() => yap.voice.peers.size === 0, null, { timeout: 5000 });
   const peer = summary?.peers?.[0] ?? {};
+  const pct = (x) => +((100 * (x ?? 0)) / Math.max(1, peer.frames ?? 0)).toFixed(2);
+  const secs = (s3.at - s1.at) / 1000;
   evidence[label] = {
-    web: { mime: s2.mime, fmtp: s2.fmtp, outFmtp: s2.outFmtp, recvKbps: Math.round(kbps), sentKbps: Math.round(sentKbps), packets: s2.packets, lost: s2.lost, audioLevel: s2.level, rtpExtAudioLevel: s2.rtpExtLevel, speakingRing: ring, levelWhileNativeMuted: muted.level, muteFlagShown: flag },
-    native: { recvKbps: summary?.recvKbps, maxRecvLevel: summary?.maxRecvLevel, bytesReceived: peer.bytesReceived, packetsReceived: peer.packetsReceived, bytesSent: peer.bytesSent, sendBitrate: peer.sendBitrate, polite: peer.polite, localFmtp: peer.localFmtp, remoteFmtp: peer.remoteFmtp, concealed: peer.concealed, fec: peer.fec, late: peer.late, underruns: peer.underruns, jitterTargetMs: peer.targetMs, lossHint: peer.lossHint },
-    ...(IMPAIR ? { impair: { profile: IMPAIR, rtpThroughProxy: impairStats.rtp, dropped: impairStats.dropped, nativeRepairedPct: +((100 * ((peer.concealed ?? 0) + (peer.fec ?? 0))) / Math.max(1, peer.packetsReceived ?? 0)).toFixed(2) } } : {}),
+    web: { inbound: s2.mime, outbound: s2.outMime, voiceCodecs: { web: s2.localOrder, native: s2.remoteOrder }, opusFmtp: s2.opusFmtp, outFmtp: s2.outFmtp, recvKbps: Math.round(kbps), sentKbps: Math.round(sentKbps),
+      wireKbpsFromNative: Math.round(((s3.bytes - s1.bytes) * 8) / 1000 / secs), wireKbpsToNative: Math.round(((s3.sentBytes - s1.sentBytes) * 8) / 1000 / secs),
+      packets: s2.packets, lost: s3.lost, patchedPct: patchedPct(s1, s3), audioLevel: s2.level, rtpExtAudioLevel: s2.rtpExtLevel, speakingRing: ring, levelWhileNativeMuted: muted.level, muteFlagShown: flag },
+    native: { recvKbps: summary?.recvKbps, maxRecvLevel: summary?.maxRecvLevel, bytesReceived: peer.bytesReceived, packetsReceived: peer.packetsReceived, bytesSent: peer.bytesSent, opusBytesSent: peer.opusBytesSent, sendRed: peer.sendRed, redPacketsReceived: peer.redPackets, sendBitrate: peer.sendBitrate, polite: peer.polite, localFmtp: peer.localFmtp, remoteFmtp: peer.remoteFmtp,
+      frames: peer.frames, concealed: peer.concealed, fec: peer.fec, redRebuilt: peer.red, patchedPct: pct(peer.concealed), fecPct: pct(peer.fec), redPct: pct(peer.red), late: peer.late, underruns: peer.underruns, lostPct: +((100 * Math.max(0, (peer.expected ?? 0) - (peer.packetsReceived ?? 0) - (peer.padding ?? 0))) / Math.max(1, peer.expected ?? 0)).toFixed(2), jitterTargetMs: peer.targetMs, lossHint: peer.lossHint },
+    ...(IMPAIR ? { impair: { profile: IMPAIR, red: RED, rtpThroughProxy: impairStats.rtp, dropped: impairStats.dropped, nativeRepairedPct: +((100 * ((peer.concealed ?? 0) + (peer.fec ?? 0))) / Math.max(1, peer.frames ?? 0)).toFixed(2),
+      wire: Object.fromEntries(Object.entries(wire).map(([k, d]) => [k, { payloadTypes: d.pt, kbps: Math.round((d.bytes * 8) / 1000 / secs) }])) } } : {}),
   };
+  // RED both ways when both offer it. (Chrome's stats name the codec that decodes, Opus, even
+  // for RED packets: the proof is the packets' payload type on the wire, RED's 63, through the
+  // proxy each way; the RED packets native unpacked; the copies doubling the bytes.)
   assert.equal(s2.mime, 'audio/opus');
-  assert.match(s2.fmtp, /useinbandfec=1/);
+  assert.equal(s2.remoteOrder, RED ? 'red,opus' : 'opus', "native's description lists RED first");
+  assert.ok(RED ? (peer.redPackets ?? 0) > 100 : !peer.redPackets, `native received ${peer.redPackets} RED packets from the web`);
+  assert.equal(!!peer.sendRed, RED, 'native sends RED');
+  // The copy only fits under 1200 bytes a packet up to ~239 kbps (at 256/510 the primary goes alone).
+  const copyFits = 5 + 2 * (BITRATE / 400) <= 1200;
+  const fromNative = ((s3.bytes - s1.bytes) * 8) / 1000 / secs;
+  assert.ok(RED && copyFits ? fromNative > (BITRATE / 1000) * 1.6 : fromNative < (BITRATE / 1000) * 1.3, `the web received ${fromNative.toFixed(0)} kbps from native (Opus at ${BITRATE / 1000}${RED && copyFits ? ' + its copy' : ''})`);
+  if (IMPAIR) {
+    for (const [dir, d] of Object.entries(wire)) {
+      const red = d.pt[63] ?? 0, opus = d.pt[111] ?? 0;
+      assert.ok(RED ? red > 100 && opus === 0 : red === 0 && opus > 100, `${dir}: payload types on the wire ${JSON.stringify(d.pt)}`);
+    }
+  }
+  assert.match(s2.opusFmtp ?? '', /useinbandfec=1/);
   assert.ok(s2.packets > 100, `web received packets: ${s2.packets}`);
   assert.ok(s2.level > 0.001, `web inbound audioLevel: ${s2.level}`);
   assert.ok(kbps > (BITRATE / 1000) * 0.6, `web received ${kbps.toFixed(1)} kbps from native`);
@@ -896,6 +969,18 @@ async function voiceScenario(label, nativeFirst) {
   assert.ok((summary?.maxRecvLevel ?? 0) > 0.01, `native decoded level: ${summary?.maxRecvLevel}`);
   assert.ok((summary?.recvKbps ?? 0) > (BITRATE / 1000) * 0.6, `native received ${summary?.recvKbps} kbps from web`);
   assert.match(peer.localFmtp ?? '', new RegExp(`maxaveragebitrate=${BITRATE}`));
+  // The call report (PROTOCOL.md › Voice › Call report): the call as native saw it, no IP addresses.
+  await new Promise((r) => setTimeout(r, 500));
+  const report = fs.existsSync(reportFile) ? fs.readFileSync(reportFile, 'utf8') : '';
+  evidence[label].callReport = report.split('\n').filter((l) => /^(App|Channel|Lasted|  (Connection|Codec|Lost|Audio patched|Rebuilt|Jitter)):?/.test(l) || /Call ended/.test(l));
+  const webName = `Web${RUN}`;
+  for (const want of [/^Yap call report\nApp: Yap desktop \d+\.\d+\.\d+ /, /\nChannel: Lounge\n/, /\nSettings:\n  Quality: \d+ kbps/, /\nAudio devices:\n  Microphone: /,
+    /\nPeople \(1\)\n/, new RegExp(`\\n${webName}\\n  Connection: (direct|relay) \\((host|srflx|prflx|relay) ↔ (host|srflx|prflx|relay)\\)`),
+    new RegExp(`  Codec: ${RED ? 'red\\+opus out, red\\+opus in' : 'opus out, opus in'}\\n`), /  Opus fmtp sent: .*useinbandfec=1/, /  Lost packets: \d+\.\d % /, /  Audio patched over: \d+\.\d %/,
+    /\nTimeline\n\+00:00 You joined Lounge; /, /: connected\n/, /\+00:10 .*: rtt \d+ ms, lost /, /You muted\n/, /Call ended: you quit Yap\n$/]) {
+    assert.match(report, want, `call report: ${want}`);
+  }
+  assert.doesNotMatch(report, /\b\d{1,3}(\.\d{1,3}){3}\b|[0-9a-f]{0,4}::[0-9a-f]|([0-9a-f]{1,4}:){5}/i, 'the call report holds no IP address');
 }
 
 await test('voice: native joins first, web offers, native answers; audio both ways', () => voiceScenario('nativeFirst', true));
@@ -952,6 +1037,20 @@ const screenStats = (page) => page.evaluate(async () => {
   };
 });
 
+/** Each audio section's first two codecs in m-line order, as each side described it: [voice, a screen's sound…]. */
+const audioOrders = (page) => page.evaluate(() => {
+  const peer = [...yap.voice.peers.values()][0];
+  const orders = (sdp) => (sdp ?? '').split('\r\nm=').slice(1).filter((s) => s.startsWith('audio')).map((sec) =>
+    sec.split('\r\n')[0].split(' ').slice(3).map((pt) => sec.match(new RegExp(`a=rtpmap:${pt} ([^/]+)/`))?.[1]?.toLowerCase()).filter(Boolean).slice(0, 2).join(','));
+  return { web: orders(peer?.pc.localDescription?.sdp), native: orders(peer?.pc.remoteDescription?.sdp) };
+});
+/** RED leads native's voice section only: a screen's sound stays Opus-first (PROTOCOL.md › Voice › Redundancy). */
+function assertRedOnVoiceOnly(orders) {
+  assert.ok(orders.native.length >= 2, `native described the voice and the screen's sound: ${JSON.stringify(orders)}`);
+  assert.equal(orders.native[0], RED ? 'red,opus' : 'opus', "native's voice section");
+  for (const o of orders.native.slice(1)) assert.match(o, /^opus\b/, `native's screen sound section: ${JSON.stringify(orders)}`);
+}
+
 await test("screen: the desktop watches a browser's share (H.264, the pictures decode at the right size; then the web stops and the desktop hears it)", async () => {
   await leaveVoice(sweb);
   // Native is in the call first; the web joins (and offers), then shares
@@ -975,6 +1074,7 @@ await test("screen: the desktop watches a browser's share (H.264, the pictures d
     report.forEach((s) => { if (s.type === 'outbound-rtp' && s.kind === 'video') o = s; });
     return o ? { codec: report.get(o.codecId)?.mimeType, frames: o.framesEncoded, w: o.frameWidth, h: o.frameHeight } : null;
   });
+  const orders = await audioOrders(sweb);
   await sweb.waitForTimeout(3000);
   await sweb.evaluate(() => { yap.voice.stopScreen(); });
   await n.waitFor(new RegExp(`SCREEN ${webSid} off`), 8000);
@@ -982,8 +1082,9 @@ await test("screen: the desktop watches a browser's share (H.264, the pictures d
   await n.waitFor(new RegExp(`SCREEN stopped watching ${webSid}`), 5000);
   const summary = await n.done;
   await leaveVoice(sweb);
-  evidence.screenToNative = { webSent: out, native: { frames: summary?.screenFrames, size: summary?.screenSize, soundBytes: summary?.screenSoundBytes }, log: n.lines.filter((l) => /SCREEN (watching|stopped|frames 1\d\d )|screen's/.test(l)).slice(0, 8) };
+  evidence.screenToNative = { webSent: out, audioSections: orders, native: { frames: summary?.screenFrames, size: summary?.screenSize, soundBytes: summary?.screenSoundBytes }, log: n.lines.filter((l) => /SCREEN (watching|stopped|frames 1\d\d )|screen's/.test(l)).slice(0, 8) };
   assert.equal(out?.codec, 'video/H264', `the web sends H.264 (${JSON.stringify(out)})`);
+  assertRedOnVoiceOnly(orders);
   assert.ok((summary?.screenFrames ?? 0) > 60, `native decoded ${summary?.screenFrames} pictures`);
   assert.deepEqual(summary?.screenSize, [1280, 720]);
   assert.ok((summary?.screenSoundBytes ?? 0) > 2000, `the share's sound reached native on its own track (${summary?.screenSoundBytes} bytes)`);
@@ -1012,6 +1113,7 @@ await test("screen: a browser watches the desktop's share (LIVE badge; H.264 pic
   }, null, { timeout: 15000, polling: 500 });
   await sweb.waitForTimeout(2000);
   const st = await screenStats(sweb);
+  const orders = await audioOrders(sweb);
   await sweb.screenshot({ path: path.join(OUT, 'web-watching-native.png') });
   // Stop watching: the desktop stops sending, and with nobody watching, stops encoding.
   await sweb.click('[data-screen="stop"]');
@@ -1019,8 +1121,9 @@ await test("screen: a browser watches the desktop's share (LIVE badge; H.264 pic
   await n.waitFor(/SCREEN watchers \[\]/, 8000);
   const summary = await n.done;
   await leaveVoice(sweb);
-  evidence.screenToWeb = { web: st, native: { encoded: summary?.screenEncoded, size: summary?.screenEncodedSize }, log: n.lines.filter((l) => /wants|done with|watchers|encoded [1-9]\d* .* viewers 1|capture and encoder/.test(l)).slice(0, 8) };
+  evidence.screenToWeb = { web: st, audioSections: orders, native: { encoded: summary?.screenEncoded, size: summary?.screenEncodedSize }, log: n.lines.filter((l) => /wants|done with|watchers|encoded [1-9]\d* .* viewers 1|capture and encoder/.test(l)).slice(0, 8) };
   assert.equal(st?.mime, 'video/H264');
+  assertRedOnVoiceOnly(orders);
   assert.ok(st.framesDecoded > 30, `web decoded ${st.framesDecoded} pictures`);
   assert.deepEqual([st.width, st.height], [1280, 720]);
   assert.deepEqual(st.element && [st.element.w, st.element.h], [1280, 720], "the web's player shows it at 1280 × 720");

@@ -1,7 +1,7 @@
-// Voice logic that needs no browser: SDP tuning and the transmit gate.
+// Voice logic that needs no browser: SDP tuning, codec order (RED) and the transmit gate.
 //   node test/voice.test.mjs
 import assert from 'node:assert/strict';
-import { orderCodecs, SCREEN_QUALITY, tuneOpus } from '../web/js/voice.js';
+import { orderAudioCodecs, orderCodecs, SCREEN_QUALITY, tuneOpus } from '../web/js/voice.js';
 import { settings } from '../web/js/settings.js';
 import { Gate, GATE } from '../web/js/gate-worklet.js';
 
@@ -78,6 +78,45 @@ t('tuning is idempotent, keeps other lines and line endings', () => {
   assert.match(once, /^a=group:BUNDLE 0 1 2$/m);
   const lf = tuneOpus(OFFER.replaceAll(CRLF, '\n'));
   assert.ok(!lf.includes('\r'), 'LF-only SDP stays LF-only');
+});
+
+// ── RED on the voice (PROTOCOL.md › Voice › Redundancy) ───────────────────
+// What Chrome lists in RTCRtpReceiver.getCapabilities('audio') (153), in its order.
+const AUDIO_CAPS = [
+  { mimeType: 'audio/opus', clockRate: 48000, channels: 2, sdpFmtpLine: 'minptime=10;useinbandfec=1' },
+  { mimeType: 'audio/red', clockRate: 48000, channels: 2 },
+  { mimeType: 'audio/G722', clockRate: 8000 }, { mimeType: 'audio/PCMU', clockRate: 8000 }, { mimeType: 'audio/PCMA', clockRate: 8000 },
+  { mimeType: 'audio/CN', clockRate: 8000 }, { mimeType: 'audio/telephone-event', clockRate: 48000 }, { mimeType: 'audio/telephone-event', clockRate: 8000 },
+];
+
+t('RED: the voice lists RED first, then Opus, then everything else in the browser\'s order', () => {
+  const order = orderAudioCodecs(AUDIO_CAPS, { red: true });
+  assert.deepEqual(order.map((c) => c.mimeType), ['audio/red', 'audio/opus', 'audio/G722', 'audio/PCMU', 'audio/PCMA', 'audio/CN', 'audio/telephone-event', 'audio/telephone-event']);
+  assert.equal(order.length, AUDIO_CAPS.length, 'nothing dropped');
+  assert.equal(AUDIO_CAPS[0].mimeType, 'audio/opus', 'the capabilities list itself is left alone');
+});
+
+t('RED: a screen share\'s sound (and the voice with ?red=0) is Opus first, without RED', () => {
+  const order = orderAudioCodecs(AUDIO_CAPS, { red: false });
+  assert.equal(order[0].mimeType, 'audio/opus');
+  assert.ok(!order.some((c) => c.mimeType === 'audio/red'));
+  assert.equal(order.length, AUDIO_CAPS.length - 1, 'only RED goes');
+  // A browser without RED: Opus first either way.
+  assert.equal(orderAudioCodecs(AUDIO_CAPS.filter((c) => c.mimeType !== 'audio/red'), { red: true })[0].mimeType, 'audio/opus');
+});
+
+t('RED: tuneOpus keeps RED first and its fmtp, tunes the Opus line inside it, strips transport-cc', () => {
+  const red = OFFER.replace('m=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126', 'm=audio 9 UDP/TLS/RTP/SAVPF 63 111 9 0 8 13 110 126');
+  const [voice, screen] = sections(tuneOpus(red));
+  assert.match(voice, /^audio 9 UDP\/TLS\/RTP\/SAVPF 63 111 9 0 8 13 110 126\r\n/, 'the m= line order is the browser\'s (setCodecPreferences)');
+  assert.match(voice, /a=rtpmap:63 red\/48000\/2\r\na=fmtp:63 111\/111/, 'one earlier frame (distance 1)');
+  const p = fmtp(voice);
+  assert.equal(p.maxaveragebitrate, String(settings.bitrate), 'Opus keeps the quality setting');
+  assert.equal(p.useinbandfec, '1');
+  assert.equal(p.usedtx, '0');
+  assert.doesNotMatch(voice, /transport-cc|transport-wide-cc/);
+  assert.match(screen, /^audio 9 UDP\/TLS\/RTP\/SAVPF 111 63\r\n/, 'the screen\'s sound is untouched');
+  assert.equal(tuneOpus(tuneOpus(red)), tuneOpus(red), 'idempotent');
 });
 
 t('an Opus line without fmtp gets one right after its rtpmap', () => {

@@ -81,6 +81,78 @@ struct SDPTunerTests {
     }
 }
 
+/// PROTOCOL.md › Voice › Redundancy: RED first in the voice section only,
+/// Opus right after; a screen share's audio stays plain Opus.
+@Suite("RED on the voice")
+struct RedTests {
+    /// libwebrtc's own offer: Opus first, RED later, a screen share's audio after the video.
+    let offer = [
+        "v=0",
+        "o=- 1 2 IN IP4 127.0.0.1",
+        "a=group:BUNDLE 0 1 2",
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126",
+        "a=mid:0",
+        "a=sendrecv",
+        "a=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01",
+        "a=rtpmap:111 opus/48000/2",
+        "a=rtcp-fb:111 transport-cc",
+        "a=fmtp:111 minptime=10;useinbandfec=1",
+        "a=rtpmap:63 red/48000/2",
+        "a=fmtp:63 111/111",
+        "a=rtpmap:9 G722/8000",
+        "m=video 9 UDP/TLS/RTP/SAVPF 96",
+        "a=mid:1",
+        "a=rtpmap:96 H264/90000",
+        "m=audio 9 UDP/TLS/RTP/SAVPF 63 111",
+        "a=mid:2",
+        "a=sendonly",
+        "a=rtpmap:63 red/48000/2",
+        "a=fmtp:63 111/111",
+        "a=rtpmap:111 opus/48000/2",
+        "a=fmtp:111 minptime=10;useinbandfec=1",
+        "",
+    ].joined(separator: "\r\n")
+
+    @Test func redFirstInTheVoiceOnly() {
+        let tuned = SDPTuner.tuneOpus(offer, bitrate: 128_000)
+        #expect(SDPTuner.audioCodecOrder(in: offer) == [["opus", "red", "G722", "0", "8", "13", "110", "126"], ["red", "opus"]])
+        #expect(SDPTuner.audioCodecOrder(in: tuned) == [["red", "opus", "G722", "0", "8", "13", "110", "126"], ["opus", "red"]],
+                "the voice asks for RED, a screen share's audio for plain Opus")
+        #expect(tuned.contains("m=audio 9 UDP/TLS/RTP/SAVPF 63 111 9 0 8 13 110 126\r\n"))
+        #expect(tuned.contains("a=fmtp:63 111/111\r\n"), "one earlier Opus frame")
+        // The Opus tuning and transport-cc stripping still hold with RED in front.
+        #expect(tuned.contains("a=fmtp:111 minptime=10;useinbandfec=1;usedtx=0;stereo=1;sprop-stereo=0;maxaveragebitrate=128000;maxplaybackrate=48000;sprop-maxcapturerate=48000\r\n"))
+        #expect(SDPTuner.opusFmtp(in: tuned)["maxaveragebitrate"] == "128000")
+        #expect(!tuned.components(separatedBy: "\r\nm=")[1].contains("transport-cc"))
+        #expect(tuned.components(separatedBy: "\r\nm=")[3].contains("maxaveragebitrate=160000"), "screen audio still tuned as music")
+        #expect(SDPTuner.tuneOpus(tuned, bitrate: 128_000) == tuned, "tuning twice changes nothing")
+    }
+
+    @Test func redFmtpFixedOrAdded() {
+        let noFmtp = offer.replacingOccurrences(of: "a=rtpmap:63 red/48000/2\r\na=fmtp:63 111/111\r\na=rtpmap:9", with: "a=rtpmap:63 red/48000/2\r\na=rtpmap:9")
+        #expect(SDPTuner.tuneOpus(noFmtp, bitrate: 96_000).contains("a=rtpmap:63 red/48000/2\r\na=fmtp:63 111/111\r\na=rtpmap:9 G722/8000"))
+        let deeper = offer.replacingOccurrences(of: "a=fmtp:63 111/111\r\na=rtpmap:9", with: "a=fmtp:63 111/111/111\r\na=rtpmap:9")
+        #expect(SDPTuner.tuneOpus(deeper, bitrate: 96_000).contains("a=fmtp:63 111/111\r\na=rtpmap:9"), "distance 1 only")
+    }
+
+    /// An app that doesn't offer RED: our answer can't add it; plain Opus as before.
+    @Test func withoutRedNothingChanges() {
+        let plain = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111 9\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:9 G722/8000\r\n"
+        let tuned = SDPTuner.tuneOpus(plain, bitrate: 128_000)
+        #expect(SDPTuner.audioCodecOrder(in: tuned) == [["opus", "G722"]])
+        #expect(!tuned.lowercased().contains("red"))
+    }
+
+    /// Redundancy off (measurements): no RED in the voice at all, so neither side sends it.
+    @Test func offTakesRedOutOfTheVoice() {
+        let tuned = SDPTuner.tuneOpus(offer, bitrate: 128_000, redundancy: false)
+        let sections = tuned.components(separatedBy: "\r\nm=")
+        #expect(SDPTuner.audioCodecOrder(in: tuned) == [["opus", "G722", "0", "8", "13", "110", "126"], ["opus", "red"]])
+        #expect(!sections[1].contains("red/48000") && !sections[1].contains("a=fmtp:63"))
+        #expect(sections[1].contains("maxaveragebitrate=128000"))
+    }
+}
+
 @Suite("No transport-cc on audio")
 struct TransportCCTests {
     let offer = [

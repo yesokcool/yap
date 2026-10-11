@@ -21,6 +21,7 @@
 //! is always the first). See `crate::screen`.
 
 pub mod loss;
+pub mod red;
 pub mod sdp;
 
 use crate::audio::{AudioEngine, AudioFrame, FRAME};
@@ -54,9 +55,11 @@ use webrtc::peer_connection::{
 use rtc::interceptor::{Slot, TwccReceiverBuilder};
 use rtc::rtp::packetizer::Packetizer as _;
 use rtc::rtp_transceiver::rtp_sender::RTCPFeedback;
-use webrtc::rtp_transceiver::RtpSender;
+use webrtc::rtp_transceiver::{RtpSender, RtpTransceiver};
 
 const OPUS_PT: u8 = 111;
+/// `red/48000/2` (RFC 2198) carrying Opus: the payload type browsers use.
+const RED_PT: u8 = 63;
 /// H.264 for screen video: constrained baseline, packetization mode 1 (what
 /// every client offers and accepts; PROTOCOL.md › Screen sharing).
 const H264_PT: u8 = 102;
@@ -71,12 +74,24 @@ const RESTARTS_BEFORE_REBUILD: u32 = 3;
 const ICE_REFETCH: Duration = Duration::from_secs(30);
 const STATS_EVERY: Duration = Duration::from_secs(2);
 
+/// RED on the voice (PROTOCOL.md › Voice › Redundancy). `YAP_RED=0` leaves it
+/// out (plain Opus both ways, like an app from before it): a switch for
+/// measuring what it does.
+pub fn red_enabled() -> bool {
+    static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("YAP_RED").map_or(true, |v| v != "0"));
+    *ON
+}
+
 #[derive(Debug, Clone)]
 pub enum VoiceEvent {
     /// connectionState of one peer: new/connecting/connected/disconnected/failed/closed.
     PeerState { sid: String, state: String },
     /// ICE restarts didn't bring it back: throw the connection away and offer a new one.
     Rebuild { sid: String },
+    /// An ICE restart (for the call report).
+    IceRestart { sid: String, attempt: u32 },
+    /// They started a brand-new connection (a new DTLS fingerprint): we followed.
+    FreshStart { sid: String },
 }
 
 /// Live numbers for one peer (read by the UI, the core and the headless reporter).
@@ -88,6 +103,12 @@ pub struct PeerInfo {
     pub state: Mutex<String>,
     pub bytes_sent: AtomicU64,
     pub packets_sent: AtomicU64,
+    /// Of `bytes_sent`, the Opus itself (the rest is RED's copies and headers).
+    pub opus_bytes_sent: AtomicU64,
+    /// We send them RED (`red+opus`), not plain Opus.
+    pub send_red: AtomicBool,
+    /// RED payload types they may send us (ours and theirs, a byte each; 0 = none).
+    red_pts: std::sync::atomic::AtomicU16,
     /// Bitrate our encoder is running at for this peer (bps).
     pub send_bitrate: AtomicU32,
     /// Our applied Opus fmtp (what we asked to receive) and theirs.
@@ -108,6 +129,8 @@ pub struct PeerInfo {
     pub loss_hint: AtomicU8,
     /// ICE restarts since it was last connected.
     pub restarts: AtomicU32,
+    /// The candidate pair in use, by type only (host, srflx, prflx, relay; never addresses).
+    pub path: Mutex<Option<(&'static str, &'static str)>>,
     /// The DTLS fingerprint of their current description.
     remote_fp: Mutex<Option<String>>,
     /// They asked to watch our screen (`signal {screen: "want"}`).
@@ -122,6 +145,10 @@ impl PeerInfo {
     }
     pub fn polite(&self) -> bool {
         self.polite.load(Ordering::Relaxed)
+    }
+    fn is_red(&self, pt: u8) -> bool {
+        let r = self.red_pts.load(Ordering::Relaxed);
+        pt != 0 && (pt == r as u8 || pt == (r >> 8) as u8)
     }
 }
 
@@ -281,6 +308,7 @@ impl VoiceEngine {
             && sdp::fingerprint(&desc.sdp).is_some_and(|now| now != had)
         {
             log::info!("peer {from}: a new connection (fingerprint changed); starting over");
+            let _ = self.events.send(VoiceEvent::FreshStart { sid: from.to_string() });
             self.drop_peer(from);
             self.create_peer(from, false, volume);
             self.set_resumable(from, resumable);
@@ -459,6 +487,9 @@ impl VoiceEngine {
             state: Mutex::new("new".into()),
             bytes_sent: AtomicU64::new(0),
             packets_sent: AtomicU64::new(0),
+            opus_bytes_sent: AtomicU64::new(0),
+            send_red: AtomicBool::new(false),
+            red_pts: std::sync::atomic::AtomicU16::new(0),
             send_bitrate: AtomicU32::new(self.settings.bitrate.load(Ordering::Relaxed)),
             local_fmtp: Mutex::new(String::new()),
             remote_fmtp: Mutex::new(String::new()),
@@ -470,6 +501,7 @@ impl VoiceEngine {
             loss_permille: AtomicU32::new(0),
             loss_hint: AtomicU8::new(0),
             restarts: AtomicU32::new(0),
+            path: Mutex::new(None),
             remote_fp: Mutex::new(None),
             wants_screen: AtomicBool::new(false),
             sending_screen: AtomicBool::new(false),
@@ -510,7 +542,10 @@ struct PeerCtx {
 
 /// What the encoder task needs to know, updated after each negotiation.
 struct SendCfg {
+    /// Opus's negotiated payload type.
     payload_type: AtomicU8,
+    /// RED's, when we send RED (0 = plain Opus).
+    red_pt: AtomicU8,
     /// Remote's maxaveragebitrate (0 = none given).
     remote_cap: AtomicU32,
     fec: AtomicBool,
@@ -527,6 +562,29 @@ fn opus_codec(bitrate: u32) -> RTCRtpCodec {
         sdp_fmtp_line: sdp::tuned_fmtp(bitrate, false),
         rtcp_feedback: vec![],
     }
+}
+
+/// RED as we register it: one earlier Opus frame per packet (distance 1).
+fn red_codec() -> RTCRtpCodec {
+    RTCRtpCodec { mime_type: "audio/red".to_owned(), clock_rate: 48_000, channels: 2, sdp_fmtp_line: red::fmtp(OPUS_PT), rtcp_feedback: vec![] }
+}
+
+fn is_mime(c: &RTCRtpCodecParameters, mime: &str) -> bool {
+    c.rtp_codec.mime_type.eq_ignore_ascii_case(mime)
+}
+
+/// `codecs` with `first` moved just in front of `then` (None: one of them
+/// isn't there, or it's already ahead): RED before Opus on the voice.
+fn put_before(codecs: &[RTCRtpCodecParameters], first: &str, then: &str) -> Option<Vec<RTCRtpCodecParameters>> {
+    let a = codecs.iter().position(|c| is_mime(c, first))?;
+    let b = codecs.iter().position(|c| is_mime(c, then))?;
+    if a < b {
+        return None;
+    }
+    let mut out = codecs.to_vec();
+    let moved = out.remove(a);
+    out.insert(b, moved);
+    Some(out)
 }
 
 /// H.264 as we register it for screen video.
@@ -558,6 +616,11 @@ fn rtc_config(servers: &[IceServer], relay_only: bool) -> RTCConfiguration {
 
 async fn build_pc(ctx: &PeerCtx, handler: Arc<Handler>, with_ice: bool) -> Result<Arc<dyn PeerConnection>, String> {
     let mut media = MediaEngine::default();
+    // RED first, then Opus (a screen share's audio takes its codecs from its
+    // Opus track: Opus first there, RED after it).
+    if red_enabled() {
+        media.register_codec(RTCRtpCodecParameters { rtp_codec: red_codec(), payload_type: RED_PT }, RtpCodecKind::Audio).map_err(|e| e.to_string())?;
+    }
     media
         .register_codec(
             RTCRtpCodecParameters { rtp_codec: opus_codec(ctx.settings.bitrate.load(Ordering::Relaxed)), payload_type: OPUS_PT },
@@ -692,6 +755,8 @@ impl PeerConnectionEventHandler for Handler {
                 match ev {
                     // Padding-only packets (empty payload) are counted and ignored
                     // (the jitter buffer goes by timestamp, so they aren't loss).
+                    // RED packets carry the frame before too (PROTOCOL.md › Voice › Redundancy).
+                    TrackRemoteEvent::OnRtpPacket(p) if info.is_red(p.header.payload_type) => stream.push_red(p.header.sequence_number, p.header.timestamp, &p.payload),
                     TrackRemoteEvent::OnRtpPacket(p) => stream.push_rtp(p.header.sequence_number, p.header.timestamp, &p.payload),
                     TrackRemoteEvent::OnEnded => break,
                     _ => {}
@@ -904,6 +969,7 @@ async fn run_peer(ctx: PeerCtx, mut rx: mpsc::UnboundedReceiver<PeerMsg>) {
     };
     let cfg = Arc::new(SendCfg {
         payload_type: AtomicU8::new(OPUS_PT),
+        red_pt: AtomicU8::new(0),
         remote_cap: AtomicU32::new(0),
         fec: AtomicBool::new(true),
         connected: AtomicBool::new(false),
@@ -1064,6 +1130,7 @@ impl Peer {
             log::debug!("peer {}: set_configuration: {e}", self.sid());
         }
         log::info!("peer {}: restarting ICE (try {tries}, {})", self.sid(), if info.polite() { "polite" } else { "impolite" });
+        let _ = self.ctx.events.send(VoiceEvent::IceRestart { sid: self.sid(), attempt: tries });
         if let Err(e) = self.pc.restart_ice().await {
             log::warn!("peer {}: restart_ice: {e}", self.sid());
         }
@@ -1078,15 +1145,35 @@ impl Peer {
         }
         let report = self.pc.get_stats(Instant::now(), StatsSelector::None).await;
         let mut rtt = None;
+        let mut pair = None;
         for e in report.iter() {
             match e {
-                RTCStatsReportEntry::IceCandidatePair(p) if p.nominated && p.state == RTCStatsIceCandidatePairState::Succeeded && p.current_round_trip_time > 0.0 => {
-                    rtt = Some(p.current_round_trip_time * 1000.0);
+                RTCStatsReportEntry::IceCandidatePair(p) if p.nominated && p.state == RTCStatsIceCandidatePairState::Succeeded => {
+                    pair = Some((p.local_candidate_id.clone(), p.remote_candidate_id.clone()));
+                    if p.current_round_trip_time > 0.0 {
+                        rtt = Some(p.current_round_trip_time * 1000.0);
+                    }
                 }
                 RTCStatsReportEntry::RemoteInboundRtp(r) if r.round_trip_time > 0.0 && rtt.is_none() => {
                     rtt = Some(r.round_trip_time * 1000.0);
                 }
                 _ => {}
+            }
+        }
+        // The pair in use, by candidate type only (the call report; never an address).
+        if let Some((local, remote)) = pair {
+            let kind = |id: &str, local: bool| {
+                report.iter().find_map(|e| match e {
+                    // (The pair names "candidate:…"; the candidate's own id is "RTCLocalIceCandidate_candidate:…".)
+                    RTCStatsReportEntry::LocalCandidate(c) if local && c.stats.id.ends_with(id) => crate::core::report::candidate_kind(&c.candidate_type.to_string()),
+                    RTCStatsReportEntry::RemoteCandidate(c) if !local && c.stats.id.ends_with(id) => crate::core::report::candidate_kind(&c.candidate_type.to_string()),
+                    _ => None,
+                })
+            };
+            // A remote candidate they never signalled (learned from their checks) isn't in the
+            // stats at all: that's what peer-reflexive means.
+            if let (Some(l), Some(r)) = (kind(&local, true), kind(&remote, false).or(Some("prflx"))) {
+                *self.ctx.info.path.lock() = Some((l, r));
             }
         }
         // A fresh report from them about our stream (see loss.rs).
@@ -1120,8 +1207,16 @@ impl Peer {
         }
     }
 
+    /// The voice's transceiver: always the first one (id 0), whoever offered.
+    /// (`get_transceivers` comes out of a HashMap, in no particular order:
+    /// with a screen share's transceivers there, "the first in the list" is
+    /// any of them.)
+    async fn voice_transceiver(&self) -> Option<Arc<dyn RtpTransceiver>> {
+        self.pc.get_transceivers().await.into_iter().find(|t| t.id() == 0)
+    }
+
     async fn after_local_description(&self) {
-        if let Some(t) = self.pc.get_transceivers().await.first()
+        if let Some(t) = self.voice_transceiver().await
             && let Ok(Some(mid)) = t.mid().await
         {
             *self.mid.lock() = Some(mid);
@@ -1135,20 +1230,39 @@ impl Peer {
     }
 
     async fn after_negotiation(&self) {
-        // Payload type the remote agreed to (rtc's write_rtp requires the negotiated one).
-        let negotiated = |sender: Arc<dyn RtpSender>| async move { sender.get_parameters().await.ok().and_then(|p| p.rtp_parameters.codecs.first().map(|c| c.payload_type)) };
-        if let Some(sender) = &self.sender
-            && let Some(pt) = negotiated(sender.clone()).await
-        {
-            self.cfg.payload_type.store(pt, Ordering::Relaxed);
+        // Payload types the remote agreed to (rtc's write_rtp requires the negotiated ones):
+        // Opus's, and on the voice RED's if both sides do it. Screen video's is its first.
+        let negotiated = |sender: Arc<dyn RtpSender>, mime: Option<&'static str>| async move {
+            let codecs = sender.get_parameters().await.ok()?.rtp_parameters.codecs;
+            match mime {
+                Some(m) => codecs.iter().find(|c| is_mime(c, m)).map(|c| c.payload_type),
+                None => codecs.first().map(|c| c.payload_type),
+            }
+        };
+        if let Some(sender) = &self.sender {
+            if let Some(pt) = negotiated(sender.clone(), Some("audio/opus")).await {
+                self.cfg.payload_type.store(pt, Ordering::Relaxed);
+            }
+            let red = if red_enabled() { negotiated(sender.clone(), Some("audio/red")).await.unwrap_or(0) } else { 0 };
+            if self.cfg.red_pt.swap(red, Ordering::Relaxed) != red {
+                log::info!("peer {}: sending {}", self.sid(), if red > 0 { "red+opus (each packet also carries the frame before)" } else { "plain opus" });
+            }
+            self.ctx.info.send_red.store(red > 0, Ordering::Relaxed);
+        }
+        // What they may send us as RED: the payload type in our description and in theirs.
+        let local = self.pc.local_description().await.and_then(|d| sdp::red_pt(&d.sdp)).unwrap_or(0);
+        let remote = self.pc.remote_description().await.and_then(|d| sdp::red_pt(&d.sdp)).unwrap_or(0);
+        self.ctx.info.red_pts.store(((remote as u16) << 8) | local as u16, Ordering::Relaxed);
+        if let (Some(l), Some(r)) = (self.pc.local_description().await, self.pc.remote_description().await) {
+            log::info!("peer {}: voice codecs: ours {:?}, theirs {:?}", self.sid(), sdp::voice_codecs(&l.sdp), sdp::voice_codecs(&r.sdp));
         }
         // The same for our screen share's tracks: they start once it's known.
         if let Some(out) = &self.screen_out {
-            if let Some(pt) = negotiated(out.video.clone()).await {
+            if let Some(pt) = negotiated(out.video.clone(), None).await {
                 out.video_pt.store(pt, Ordering::Relaxed);
             }
             if let Some(sound) = &out.sound
-                && let Some(p) = negotiated(sound.sender.clone()).await
+                && let Some(p) = negotiated(sound.sender.clone(), Some("audio/opus")).await
             {
                 sound.pt.store(p, Ordering::Relaxed);
             }
@@ -1264,10 +1378,57 @@ impl Peer {
         self.make_offer().await;
     }
 
+    /// RED first on the voice, then Opus (PROTOCOL.md › Voice › Redundancy),
+    /// in every offer and answer: browsers send RED only when it leads. The
+    /// first offer lists both (ours); after that, what was negotiated, so an
+    /// app without RED never gets it in an answer. A screen share's sound the
+    /// other way round, Opus first (RED after it only where they listed it):
+    /// answering a browser's offer, webrtc-rs puts the codecs whose fmtp
+    /// matches ours exactly first, and for a share's sound that's RED.
+    async fn order_audio_codecs(&self) {
+        if !red_enabled() {
+            return;
+        }
+        let red = || RTCRtpCodecParameters { rtp_codec: red_codec(), payload_type: RED_PT };
+        let opus = || RTCRtpCodecParameters { rtp_codec: opus_codec(self.bitrate()), payload_type: OPUS_PT };
+        let remote = self.pc.remote_description().await;
+        // (A transceiver made from their offer has no sender or receiver to ask yet, so a
+        // screen's sound goes by what their description lists for its mid.)
+        let theirs = remote.as_ref().map(|d| sdp::audio_sections(&d.sdp)).unwrap_or_default();
+        for t in self.pc.get_transceivers().await {
+            let voice = t.id() == 0;
+            let want = if voice {
+                let Some(sender) = &self.sender else { continue };
+                if remote.is_none() {
+                    Some(vec![red(), opus()])
+                } else {
+                    let Ok(params) = sender.get_parameters().await else { continue };
+                    put_before(&params.rtp_parameters.codecs, "audio/red", "audio/opus")
+                }
+            } else {
+                let Ok(Some(mid)) = t.mid().await else { continue };
+                let Some((_, listed)) = theirs.iter().find(|(m, _)| m.as_deref() == Some(mid.as_str())) else { continue };
+                listed.iter().any(|c| c == "opus").then(|| {
+                    let mut codecs = vec![opus()];
+                    if listed.iter().any(|c| c == "red") {
+                        codecs.push(red());
+                    }
+                    codecs
+                })
+            };
+            if let Some(codecs) = want
+                && let Err(e) = t.set_codec_preferences(codecs).await
+            {
+                log::debug!("peer {}: {} first: {e}", self.sid(), if voice { "RED" } else { "Opus" });
+            }
+        }
+    }
+
     async fn make_offer(&mut self) {
         if !self.is_stable().await {
             return;
         }
+        self.order_audio_codecs().await;
         let offer = match self.pc.create_offer(None).await {
             Ok(o) => o,
             Err(e) => return log::warn!("peer {}: create_offer: {e}", self.sid()),
@@ -1335,6 +1496,7 @@ impl Peer {
                         Err(e) => log::warn!("peer {}: add_track: {e}", self.sid()),
                     }
                 }
+                self.order_audio_codecs().await;
                 let answer = match self.pc.create_answer(None).await {
                     Ok(a) => a,
                     Err(e) => return log::warn!("peer {}: create_answer: {e}", self.sid()),
@@ -1398,6 +1560,9 @@ async fn run_encoder(
     let mut loss = 0u8;
     let mut encoder: Option<ropus::Encoder> = None;
     let mut buf = vec![0u8; 4000];
+    // RED: the frame before (sent again with this one) and the packet being packed.
+    let mut prev: Vec<u8> = Vec::new();
+    let mut packed: Vec<u8> = Vec::with_capacity(red::MAX_PAYLOAD);
     loop {
         let frame = match frames.recv().await {
             Ok(f) => f,
@@ -1438,19 +1603,34 @@ async fn run_encoder(
                 continue;
             }
         };
+        let opus = cfg.payload_type.load(Ordering::Relaxed);
+        let red_pt = cfg.red_pt.load(Ordering::Relaxed);
+        // RED: this frame plus the one before (PROTOCOL.md › Voice › Redundancy). Each
+        // sample written moves the RTP timestamp on by one frame, so `prev` is exactly
+        // 960 back; after a stretch of plain Opus there's no frame before to repeat.
+        let (payload, pt) = if red_pt > 0 {
+            red::pack(&mut packed, opus, &buf[..len], &prev, FRAME as u32);
+            prev.clear();
+            prev.extend_from_slice(&buf[..len]);
+            (&packed[..], red_pt)
+        } else {
+            prev.clear();
+            (&buf[..len], opus)
+        };
         let sample = Sample {
-            data: bytes::Bytes::copy_from_slice(&buf[..len]),
+            data: bytes::Bytes::copy_from_slice(payload),
             duration: Duration::from_millis((FRAME as u64 * 1000) / crate::audio::RATE as u64),
             ..Sample::new(frame.at)
         };
-        let pt = cfg.payload_type.load(Ordering::Relaxed);
+        let wire = payload.len();
         let result = track
             .sample_writer(ssrc, pt)
             .with_audio_level(AudioLevelExtension { level: frame.level_dbov, voice: frame.voice })
             .write_sample(&sample)
             .await;
         if result.is_ok() {
-            info.bytes_sent.fetch_add(len as u64, Ordering::Relaxed);
+            info.bytes_sent.fetch_add(wire as u64, Ordering::Relaxed);
+            info.opus_bytes_sent.fetch_add(len as u64, Ordering::Relaxed);
             info.packets_sent.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1492,5 +1672,20 @@ mod tests {
         assert!(mode(0) >= 16, "CELT config when clean (toc config {})", mode(0));
         let lossy = mode(5);
         assert!((12..16).contains(&lossy), "Hybrid config when lossy (toc config {lossy})");
+    }
+
+    /// One codec moved just in front of another; nothing else moves.
+    #[test]
+    fn codec_order() {
+        let c = |rtp_codec: RTCRtpCodec, payload_type| RTCRtpCodecParameters { rtp_codec, payload_type };
+        let cn = RTCRtpCodec { mime_type: "audio/CN".into(), clock_rate: 8000, channels: 1, sdp_fmtp_line: String::new(), rtcp_feedback: vec![] };
+        let names = |l: &[RTCRtpCodecParameters]| l.iter().map(|c| c.payload_type).collect::<Vec<_>>();
+        let opus_red = [c(opus_codec(128_000), OPUS_PT), c(cn.clone(), 13), c(red_codec(), RED_PT)];
+        assert_eq!(names(&put_before(&opus_red, "audio/red", "audio/opus").unwrap()), [RED_PT, OPUS_PT, 13]);
+        assert_eq!(put_before(&opus_red, "audio/opus", "audio/red"), None, "Opus already leads");
+        let red_opus = [c(red_codec(), RED_PT), c(cn, 13), c(opus_codec(128_000), OPUS_PT)];
+        assert_eq!(names(&put_before(&red_opus, "audio/opus", "audio/red").unwrap()), [OPUS_PT, RED_PT, 13]);
+        assert_eq!(put_before(&red_opus, "audio/red", "audio/opus"), None, "RED already leads");
+        assert_eq!(put_before(&red_opus[2..], "audio/red", "audio/opus"), None, "no RED: plain Opus, as negotiated");
     }
 }

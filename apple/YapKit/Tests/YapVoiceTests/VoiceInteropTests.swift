@@ -12,10 +12,17 @@ import Testing
 /// (synthetic screens on both sides; H.264 decoded both ways).
 /// Run by Tools/run-voice-interop.sh, which starts the web peer first and
 /// passes these through TEST_RUNNER_*:
-///   YAP_TEST_URL, YAP_TEST_KEY, YAP_TEST_ADMIN, YAP_PEER_STATUS (the web peer's JSON)
+///   YAP_TEST_URL, YAP_TEST_KEY, YAP_TEST_ADMIN, YAP_PEER_STATUS (the web peer's JSON);
+///   YAP_RED=0 (redundancy off, to compare), YAP_IMPAIR (the proxy's profile, for the log),
+///   YAP_MEASURE_SECONDS (how long each RED measurement runs, default 6),
+///   YAP_INTEROP_SCENARIOS=voice (only the two voice scenarios).
 enum VoiceTestEnv {
     static let env = ProcessInfo.processInfo.environment
     static var configured: Bool { env["YAP_PEER_STATUS"] != nil && env["YAP_TEST_URL"] != nil }
+    static var redundancy: Bool { env["YAP_RED"] != "0" }
+    static var impair: String { env["YAP_IMPAIR"].flatMap { $0.isEmpty ? nil : $0 } ?? "none" }
+    static var measureSeconds: Double { env["YAP_MEASURE_SECONDS"].flatMap(Double.init) ?? 6 }
+    static var voiceOnly: Bool { env["YAP_INTEROP_SCENARIOS"] == "voice" }
     static var endpoint: ServerEndpoint { ServerEndpoint(baseURL: URL(string: env["YAP_TEST_URL"]!)!, key: env["YAP_TEST_KEY"] ?? "") }
     static var statusURL: URL { URL(fileURLWithPath: env["YAP_PEER_STATUS"]!) }
     static let label = "yap-voice-test"
@@ -55,8 +62,27 @@ enum VoiceTestEnv {
             var mutedFlag: Bool
             var speaking: Bool
             var bytesReceived: Double
+            // What RED shows up in (the voice's inbound and outbound stream).
+            var packetsReceived: Double?
+            var packetsLost: Double?
+            var packetsDiscarded: Double?
+            var bytesSent: Double?
+            var packetsSent: Double?
+            var concealedSamples: Double?
+            var silentConcealedSamples: Double?
+            var totalSamplesReceived: Double?
+            var fecPacketsReceived: Double?
+            var fecPacketsDiscarded: Double?
+            var jitterBufferDelay: Double?
+            var jitterBufferEmittedCount: Double?
+            var mime: String?
+            var outMime: String?
+            var targetBitrate: Double?
+            var localFirstCodec: String?
+            var remoteFirstCodec: String?
         }
         var phase: String
+        var at: Double?
         var sid: String?
         var uid: String?
         var name: String
@@ -126,6 +152,31 @@ final class PacketGaps {
     func stop() { task?.cancel() }
 }
 
+/// One direction of a call over a measurement window (PROTOCOL.md › Voice › Redundancy).
+struct CallDirection: CustomStringConvertible {
+    var kbps: Double
+    var bytesPerPacket: Double
+    /// At the receiver: packets lost (% of expected) and audio patched over (% of samples).
+    var lostPct: Double
+    var patchedPct: Double
+    /// Packets the receiver's jitter buffer threw away per packet received:
+    /// ~1 with RED (a copy of every frame that already came), ~0 without.
+    var copiesPerPacket: Double
+    /// libwebrtc's "secondary" packets used (FEC, RED where it counts them).
+    var secondaryUsed: Double
+    var jitterBufferMs: Double
+
+    var description: String {
+        String(format: "%.0f kbps, %.0f B/packet, lost %.2f %%, patched %.2f %%, copies/packet %.2f, secondary used %.0f, jitter buffer %.0f ms",
+               kbps, bytesPerPacket, lostPct, patchedPct, copiesPerPacket, secondaryUsed, jitterBufferMs)
+    }
+
+    /// RED is going this way: about twice the bytes of a 128 kbps Opus packet
+    /// (~320 B), and the copies arriving.
+    var carriesRed: Bool { bytesPerPacket > 480 && copiesPerPacket > 0.8 }
+    var plainOpus: Bool { bytesPerPacket < 480 && copiesPerPacket < 0.2 }
+}
+
 @MainActor
 @Suite("Voice interop with the web client", .serialized, .enabled(if: VoiceTestEnv.configured))
 final class VoiceInteropTests {
@@ -137,6 +188,7 @@ final class VoiceInteropTests {
         client = YapClient(credentials: MemoryCredentialStore(endpoint: VoiceTestEnv.endpoint), client: VoiceTestEnv.label)
         let defaults = UserDefaults(suiteName: "yap-voice-test-\(VoiceTestEnv.run)")!
         voice = VoiceController(client: client, engine: VoiceEngine(audioDevice: device), defaults: defaults, requestsMicPermission: false)
+        voice.engine.redundancy = VoiceTestEnv.redundancy
         voice.settings.mode = .openMic
         let name = "Sim \(VoiceTestEnv.run) \(Int.random(in: 100...999))"
         client.signUp(name: name, pin: "582039", color: "#0090ff")
@@ -151,8 +203,59 @@ final class VoiceInteropTests {
     @Test func nativeAndWebInterop() async throws {
         try await nativeOffersToWeb()
         try await webOffersToNative()
+        if VoiceTestEnv.voiceOnly { return }
         try await watchTheWebsScreen()
         try await shareOurScreenWithTheWeb()
+    }
+
+    /// Both directions of the call with the web over `YAP_MEASURE_SECONDS`:
+    /// what each side sends, and what arrives (RED shows as twice the bytes
+    /// per packet and a discarded copy per packet; libwebrtc's stats name
+    /// the codec inside, Opus, either way). Checks libwebrtc's rule: each
+    /// side sends RED exactly when the *other* side's description lists it first.
+    @discardableResult
+    func measureRed(_ label: String, scenario: String) async throws -> (toWeb: CallDirection, toNative: CallDirection) {
+        func web() -> (at: Double, latest: VoiceTestEnv.WebStatus.Latest)? {
+            guard let status = VoiceTestEnv.webStatus(), let latest = status.scenarios[scenario]?.latest, let at = status.at else { return nil }
+            return (at, latest)
+        }
+        let n1 = try #require(await voice.engine.peerStats().first)
+        let w1 = try #require(web())
+        try await Task.sleep(for: .seconds(VoiceTestEnv.measureSeconds))
+        let n2 = try #require(await voice.engine.peerStats().first)
+        let w2 = try #require(web())
+        let seconds = VoiceTestEnv.measureSeconds
+        let webSeconds = max(0.25, (w2.at - w1.at) / 1000)
+        func d(_ a: Double?, _ b: Double?) -> Double { (b ?? 0) - (a ?? 0) }
+        func pct(_ part: Double, _ whole: Double) -> Double { whole > 0 ? 100 * part / whole : 0 }
+
+        let webIn = (received: d(w1.latest.packetsReceived, w2.latest.packetsReceived), lost: d(w1.latest.packetsLost, w2.latest.packetsLost))
+        let toWeb = CallDirection(
+            kbps: (n2.bytesSent - n1.bytesSent) * 8 / 1000 / seconds,
+            bytesPerPacket: (n2.bytesSent - n1.bytesSent) / Double(max(1, n2.packetsSent - n1.packetsSent)),
+            lostPct: pct(webIn.lost, webIn.received + webIn.lost),
+            patchedPct: pct(d(w1.latest.concealedSamples, w2.latest.concealedSamples) - d(w1.latest.silentConcealedSamples, w2.latest.silentConcealedSamples),
+                            d(w1.latest.totalSamplesReceived, w2.latest.totalSamplesReceived)),
+            copiesPerPacket: d(w1.latest.packetsDiscarded, w2.latest.packetsDiscarded) / max(1, webIn.received),
+            secondaryUsed: d(w1.latest.fecPacketsReceived, w2.latest.fecPacketsReceived) - d(w1.latest.fecPacketsDiscarded, w2.latest.fecPacketsDiscarded),
+            jitterBufferMs: 1000 * d(w1.latest.jitterBufferDelay, w2.latest.jitterBufferDelay) / max(1, d(w1.latest.jitterBufferEmittedCount, w2.latest.jitterBufferEmittedCount)))
+        let nativeIn = (received: Double(n2.voicePacketsReceived - n1.voicePacketsReceived), lost: Double(n2.voicePacketsLost - n1.voicePacketsLost))
+        let toNative = CallDirection(
+            kbps: d(w1.latest.bytesSent, w2.latest.bytesSent) * 8 / 1000 / webSeconds,
+            bytesPerPacket: d(w1.latest.bytesSent, w2.latest.bytesSent) / max(1, d(w1.latest.packetsSent, w2.latest.packetsSent)),
+            lostPct: pct(nativeIn.lost, nativeIn.received + nativeIn.lost),
+            patchedPct: pct((n2.concealedSamples - n2.silentConcealedSamples) - (n1.concealedSamples - n1.silentConcealedSamples), n2.samplesReceived - n1.samplesReceived),
+            copiesPerPacket: Double(n2.voicePacketsDiscarded - n1.voicePacketsDiscarded) / max(1, nativeIn.received),
+            secondaryUsed: Double((n2.fecPacketsReceived - n1.fecPacketsReceived) - (n2.fecPacketsDiscarded - n1.fecPacketsDiscarded)),
+            jitterBufferMs: 1000 * (n2.jitterBufferDelay - n1.jitterBufferDelay) / max(1, n2.jitterBufferEmitted - n1.jitterBufferEmitted))
+        let webSendsRed = w2.latest.remoteFirstCodec?.lowercased() == "red"
+        print("RED \(label) [impair \(VoiceTestEnv.impair), redundancy \(VoiceTestEnv.redundancy ? "on" : "off"), \(Int(seconds)) s]: native's description first \(n2.asksRed ? "red" : "opus"), web's first \(w2.latest.localFirstCodec ?? "?"); native → web (\(n2.sendsRed ? "red+opus" : "opus")): \(toWeb); web → native (\(webSendsRed ? "red+opus" : "opus")): \(toNative); stats codec native in \(n2.inboundCodec ?? "?") out \(n2.outboundCodec ?? "?"), web in \(w2.latest.mime ?? "?") out \(w2.latest.outMime ?? "?"), web target \(Int(w2.latest.targetBitrate ?? -1))")
+        #expect(n2.asksRed == VoiceTestEnv.redundancy, "our description lists RED first exactly when redundancy is on")
+        #expect(n2.sendsRed == (w2.latest.localFirstCodec?.lowercased() == "red"), "we send RED when the web's description lists it first")
+        #expect(n2.sendsRed ? toWeb.carriesRed : toWeb.plainOpus, "native → web: \(toWeb)")
+        #expect(webSendsRed == n2.asksRed, "the web follows our description")
+        #expect(webSendsRed ? toNative.carriesRed : toNative.plainOpus, "web → native: \(toNative)")
+        return (toWeb, toNative)
     }
 
     /// PROTOCOL.md › Screen sharing, web → native: the web shares (its own
@@ -261,6 +364,7 @@ final class VoiceInteropTests {
         #expect(s2.outboundFmtp?.contains("maxaveragebitrate=128000") == true || s2.inboundFmtp?.contains("maxaveragebitrate=128000") == true)
         #expect(device.recentPlayoutRMS > 0.001, "decoded audio actually reaches the speaker")
         try await waitUntil("web speaking ring visible to native") { voice.engine.speaking.contains(webSid) }
+        try await measureRed("nativeOffersToWeb", scenario: "webFirst")
 
         let webSide = try #require(VoiceTestEnv.webStatus()?.scenarios["webFirst"])
         print("VOICE web side (webFirst): connected=\(webSide.connected ?? false) bytes=\(webSide.maxBytesReceived ?? 0) packets=\(webSide.maxPacketsReceived ?? 0) level=\(webSide.maxLevel ?? 0) \(webSide.mime ?? "?") fmtp=\(webSide.fmtp ?? "")")
@@ -319,6 +423,7 @@ final class VoiceInteropTests {
         print("VOICE web side (nativeFirst): connected=\(webSide.connected ?? false) packets=\(webSide.maxPacketsReceived ?? 0) level=\(webSide.maxLevel ?? 0) fmtp=\(webSide.fmtp ?? "")")
         #expect(webSide.connected == true)
         #expect((webSide.maxPacketsReceived ?? 0) > 100)
+        try await measureRed("webOffersToNative", scenario: "nativeFirst")
 
         try await callSurvivesDroppedSockets(webSid: webSid)
 
@@ -328,7 +433,23 @@ final class VoiceInteropTests {
         device.silent.withLock { $0 = false }
 
         voice.leave()
-        try await waitUntil("web sharing next", timeout: .seconds(20)) { VoiceTestEnv.webStatus()?.phase == "web-sharing" }
+        // The call report of this call (PROTOCOL.md › Voice › Call report): both drops, kept.
+        let report = try #require(voice.callReportText())
+        print("CALLREPORT-BEGIN\n\(report)CALLREPORT-END")
+        let webName = client.user(VoiceTestEnv.webStatus()?.uid ?? "")?.name ?? "Webby"
+        #expect(report.hasPrefix("Yap call report\n"))
+        #expect(report.contains("Joined Lounge; nobody else here yet"))
+        #expect(report.contains("\(webName) joined"))
+        #expect(report.contains("Your connection to the server dropped; the call keeps going meanwhile"))
+        #expect(report.contains("Back in the call: it was kept, nothing to reconnect"))
+        #expect(report.contains("\(webName) reconnected; the call kept going"))
+        #expect(report.contains("reconnects kept: 1"))
+        #expect(report.contains(VoiceTestEnv.redundancy ? "red+opus in" : "opus in"))
+        #expect(report.contains("Ended: You left."))
+        #expect(report.range(of: #"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"#, options: .regularExpression) == nil, "no IP addresses")
+        try await waitUntil("web sharing next", timeout: .seconds(20)) {
+            VoiceTestEnv.webStatus()?.phase == (VoiceTestEnv.voiceOnly ? "done" : "web-sharing")
+        }
     }
 
     /// PROTOCOL.md › Voice › Keeping calls across reconnects: our socket
@@ -354,7 +475,8 @@ final class VoiceInteropTests {
         }
         let webNow = try #require(VoiceTestEnv.webStatus()?.sid)
         #expect(voice.engine.peerCount == 1 && voice.engine.connectionState(of: webSid) == nil, "moved to their new session")
-        #expect(voice.hint(for: webNow) == nil, "not reconnecting any more")
+        // (Behind the impairment proxy "weak connection" may well show; "reconnecting…" mustn't.)
+        #expect(VoiceTestEnv.impair == "none" ? voice.hint(for: webNow) == nil : voice.hint(for: webNow) != .reconnecting, "not reconnecting any more")
         try await Task.sleep(for: .seconds(2))
         gaps.stop()
         let web = try #require(VoiceTestEnv.webStatus()?.scenarios["nativeFirst"])

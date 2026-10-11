@@ -190,6 +190,10 @@ struct VoicePanel: View {
                             // The channel's sound quality, out of the way (the web's ⋯).
                             Menu {
                                 CallQualityMenuItems(channel: channel)
+                                if voice.isInVoice {
+                                    Divider()
+                                    Button(CallReportWords.copy, systemImage: "doc.on.clipboard") { model.copyCallReport() }
+                                }
                             } label: {
                                 Image(systemName: "ellipsis").font(.system(size: 13, weight: .bold))
                             }

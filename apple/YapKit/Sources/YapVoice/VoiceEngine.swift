@@ -59,6 +59,18 @@ public final class VoiceEngine {
         public var rttMs: Int?
     }
 
+    /// What happened to one connection (the call report's timeline).
+    public enum PeerEvent: Sendable, Equatable {
+        /// The path died and we restarted ICE (the nth time since it was last up).
+        case iceRestart(Int)
+        /// We threw the connection away and offered a new one.
+        case rebuilt
+        /// They started a new connection (a new DTLS fingerprint), so we did too.
+        case freshStart
+        /// "weak connection" shown / gone.
+        case weak(Bool)
+    }
+
     // MARK: Observable state
 
     /// Sessions (sids) currently speaking, including our own when transmitting.
@@ -82,6 +94,10 @@ public final class VoiceEngine {
     public var mode: InputMode = .voiceActivity { didSet { applyGate() } }
     /// Opus target, bps (64k–510k; default 128k).
     public var bitrate: Int = 128_000
+    /// Redundancy (RED) on the voice: each packet also carries the 20 ms
+    /// before it, so a lost one is rebuilt word for word (PROTOCOL.md ›
+    /// Voice › Redundancy). Off only to measure what it does.
+    public var redundancy = true
     /// Voice-activity threshold, dBFS RMS (the web's and desktop's scale).
     public var vadThreshold: Double = -50
     /// Only through the TURN relay (hides your IP from the people you talk
@@ -142,6 +158,10 @@ public final class VoiceEngine {
     @ObservationIgnored public var fetchIce: (@MainActor () async -> [IceServerConfig])?
     /// A connection's state changed (nil = it's gone).
     @ObservationIgnored public var onPeerState: ((String, PeerState?) -> Void)?
+    /// ICE restarts, rebuilds, "weak connection" (the call report).
+    @ObservationIgnored public var onPeerEvent: ((String, PeerEvent) -> Void)?
+    /// Every connection's stats, every 2 s (the call report).
+    @ObservationIgnored public var onStats: (([PeerStats]) -> Void)?
     /// uid → gain (1 = normal, up to 2).
     @ObservationIgnored public var volumes: [String: Double] = [:]
     /// uid → their screen's sound (0…1), separate from their voice.
@@ -291,6 +311,7 @@ public final class VoiceEngine {
             log.info("fresh start from \(sid, privacy: .public)")
             replace(sid)
             peer = nil
+            onPeerEvent?(sid, .freshStart)
         }
         if peer == nil {
             // Only an offer may open a new connection.
@@ -416,6 +437,12 @@ public final class VoiceEngine {
         guard replace(sid) else { return }
         createPeer(sid, initiator: true)
         onPeerState?(sid, .new)
+        onPeerEvent?(sid, .rebuilt)
+    }
+
+    func peerEvent(_ peer: Peer, _ event: PeerEvent) {
+        guard peers[peer.sid] === peer else { return }
+        onPeerEvent?(peer.sid, event)
     }
 
     public func peerUid(_ sid: String) -> String? { peers[sid]?.uid }
@@ -444,7 +471,7 @@ public final class VoiceEngine {
         guard peers[peer.sid] === peer else { return }
         peerStates[peer.sid] = peer.state
         if peer.failed, peer.state != .connected { failed.insert(peer.sid) } else { failed.remove(peer.sid) }
-        if peer.state != .connected { weak.removeValue(forKey: peer.sid) }
+        if peer.state != .connected, weak.removeValue(forKey: peer.sid) != nil { onPeerEvent?(peer.sid, .weak(false)) }
         onPeerState?(peer.sid, peer.state)
     }
 
@@ -551,6 +578,9 @@ public final class VoiceEngine {
 
     /// A connection's current local SDP (tests).
     func peerLocalDescription(_ sid: String) -> String? { peers[sid]?.pc.localDescription?.sdp }
+
+    /// A connection's RTCPeerConnection (tests).
+    func peerConnection(_ sid: String) -> RTCPeerConnection? { peers[sid]?.pc }
 
     // MARK: Transmit gate (mute / deafen / voice activity / push-to-talk)
 
@@ -713,18 +743,23 @@ public final class VoiceEngine {
 
     private func pollStats() async {
         var rtt: [Double] = []
+        var all: [PeerStats] = []
         let now = Date()
         for peer in peers.values {
             let stats = await peer.stats()
             log.debug("peer \(peer.sid, privacy: .public): in \(Int(stats.bytesReceived)) B, inbound level \(stats.inboundAudioLevel), sources \(peer.sourceCount)")
             if peer.state == .connected, let r = stats.rttMs { rtt.append(r) }
             guard peers[peer.sid] === peer else { continue }
+            all.append(stats)
+            let wasWeak = weak[peer.sid] != nil
             if peer.judgeQuality(stats, at: now) {
                 if let w = peer.quality.weak { weak[peer.sid] = w } else { weak.removeValue(forKey: peer.sid) }
             } else if let w = peer.quality.weak, weak[peer.sid] != w {
                 weak[peer.sid] = w
             }
+            if (weak[peer.sid] != nil) != wasWeak { onPeerEvent?(peer.sid, .weak(!wasWeak)) }
         }
+        if !all.isEmpty { onStats?(all) }
         guard !peers.isEmpty else {
             summary = nil
             return

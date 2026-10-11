@@ -141,7 +141,7 @@ final class Peer {
         do {
             let offer = try await pc.offer(for: Self.constraints)
             guard pc.signalingState == .stable, !closed else { return }
-            let tuned = RTCSessionDescription(type: .offer, sdp: SDPTuner.tuneOpus(offer.sdp, bitrate: engine.bitrate))
+            let tuned = RTCSessionDescription(type: .offer, sdp: SDPTuner.tuneOpus(offer.sdp, bitrate: engine.bitrate, redundancy: engine.redundancy))
             try await pc.setLocalDescription(tuned)
             send(.sdp(SessionDescriptionPayload(type: "offer", sdp: pc.localDescription?.sdp ?? tuned.sdp)))
         } catch {
@@ -184,7 +184,7 @@ final class Peer {
                     }
                     let answer = try await pc.answer(for: Self.constraints)
                     guard !closed else { return }
-                    let tuned = RTCSessionDescription(type: .answer, sdp: SDPTuner.tuneOpus(answer.sdp, bitrate: engine.bitrate))
+                    let tuned = RTCSessionDescription(type: .answer, sdp: SDPTuner.tuneOpus(answer.sdp, bitrate: engine.bitrate, redundancy: engine.redundancy))
                     try await pc.setLocalDescription(tuned)
                     send(.sdp(SessionDescriptionPayload(type: "answer", sdp: pc.localDescription?.sdp ?? tuned.sdp)))
                 }
@@ -272,6 +272,7 @@ final class Peer {
             log.info("ICE restart \(self.path.restarts) to \(self.sid, privacy: .public) (\(self.polite ? "polite" : "impolite", privacy: .public))")
             pc.restartIce() // → should negotiate → an offer with new ICE credentials
             engine.peerStateChanged(self)
+            engine.peerEvent(self, .iceRestart(path.restarts))
             scheduleRecovery(after: PathWatch.retryEvery)
         }
     }
@@ -448,77 +449,16 @@ final class Peer {
             connectedFor: now.timeIntervalSince(connectedAt)))
     }
 
-    /// This peer's `getStats()`, boiled down.
+    /// This peer's `getStats()`, boiled down (no addresses: `PeerStats.read`).
     func stats() async -> PeerStats {
         let report = await pc.statistics()
-        var stats = PeerStats(sid: sid)
-        var inboundCodecId: String?
-        var outboundCodecId: String?
-        var inboundVideoCodecId: String?
-        var outboundVideoCodecId: String?
         let voiceMid = pc.transceivers.first { $0.mediaType == .audio }?.mid
-        var sawInbound = false
-        for s in report.statistics.values {
-            let v = s.values
-            switch s.type {
-            case "candidate-pair":
-                if (v["nominated"] as? NSNumber)?.boolValue == true, v["state"] as? String == "succeeded",
-                   let rtt = v["currentRoundTripTime"] as? NSNumber {
-                    stats.rttMs = rtt.doubleValue * 1000
-                }
-            case "inbound-rtp" where v["kind"] as? String == "video":
-                stats.videoFramesDecoded += (v["framesDecoded"] as? NSNumber)?.intValue ?? 0
-                stats.videoBytesReceived += (v["bytesReceived"] as? NSNumber)?.doubleValue ?? 0
-                if let width = (v["frameWidth"] as? NSNumber)?.intValue, width > 0 { stats.videoFrameWidth = width }
-                if let height = (v["frameHeight"] as? NSNumber)?.intValue, height > 0 { stats.videoFrameHeight = height }
-                inboundVideoCodecId = v["codecId"] as? String ?? inboundVideoCodecId
-            case "outbound-rtp" where v["kind"] as? String == "video":
-                stats.videoFramesEncoded += (v["framesEncoded"] as? NSNumber)?.intValue ?? 0
-                stats.videoBytesSent += (v["bytesSent"] as? NSNumber)?.doubleValue ?? 0
-                outboundVideoCodecId = v["codecId"] as? String ?? outboundVideoCodecId
-                if let encoder = v["encoderImplementation"] as? String { stats.videoEncoder = encoder }
-            case "outbound-rtp" where v["kind"] as? String == "audio":
-                stats.bytesSent += (v["bytesSent"] as? NSNumber)?.doubleValue ?? 0
-                stats.packetsSent += (v["packetsSent"] as? NSNumber)?.intValue ?? 0
-                outboundCodecId = v["codecId"] as? String
-            case "inbound-rtp" where v["kind"] as? String == "audio":
-                stats.bytesReceived += (v["bytesReceived"] as? NSNumber)?.doubleValue ?? 0
-                stats.packetsReceived += (v["packetsReceived"] as? NSNumber)?.intValue ?? 0
-                stats.packetsLost += (v["packetsLost"] as? NSNumber)?.intValue ?? 0
-                // Concealment: the voice's stream (the first audio section).
-                if let mid = v["mid"] as? String, let voiceMid, mid != voiceMid {
-                    stats.screenAudioBytesReceived += (v["bytesReceived"] as? NSNumber)?.doubleValue ?? 0
-                }
-                if !sawInbound || v["mid"] as? String == voiceMid {
-                    sawInbound = true
-                    stats.samplesReceived = (v["totalSamplesReceived"] as? NSNumber)?.doubleValue ?? 0
-                    stats.concealedSamples = (v["concealedSamples"] as? NSNumber)?.doubleValue ?? 0
-                    stats.silentConcealedSamples = (v["silentConcealedSamples"] as? NSNumber)?.doubleValue ?? 0
-                }
-                stats.inboundAudioLevel = (v["audioLevel"] as? NSNumber)?.doubleValue ?? stats.inboundAudioLevel
-                inboundCodecId = v["codecId"] as? String
-            case "media-source" where v["kind"] as? String == "audio":
-                stats.localAudioLevel = (v["audioLevel"] as? NSNumber)?.doubleValue ?? 0
-            default:
-                break
-            }
-        }
-        if let id = inboundCodecId, let codec = report.statistics[id] {
-            stats.inboundCodec = codec.values["mimeType"] as? String
-            stats.inboundFmtp = codec.values["sdpFmtpLine"] as? String
-        }
-        if let id = outboundCodecId, let codec = report.statistics[id] {
-            stats.outboundCodec = codec.values["mimeType"] as? String
-            stats.outboundFmtp = codec.values["sdpFmtpLine"] as? String
-        }
-        if let id = inboundVideoCodecId, let codec = report.statistics[id] {
-            stats.inboundVideoCodec = codec.values["mimeType"] as? String
-            stats.inboundVideoFmtp = codec.values["sdpFmtpLine"] as? String
-        }
-        if let id = outboundVideoCodecId, let codec = report.statistics[id] {
-            stats.outboundVideoCodec = codec.values["mimeType"] as? String
-            stats.outboundVideoFmtp = codec.values["sdpFmtpLine"] as? String
-        }
+        var stats = PeerStats.read(report.statistics.mapValues { StatsRow(type: $0.type, values: $0.values) }, sid: sid, voiceMid: voiceMid)
+        // libwebrtc sends with the first codec of the far side's description,
+        // and the far side (if it's libwebrtc too) with the first of ours.
+        stats.sendsRed = SDPTuner.audioCodecOrder(in: pc.remoteDescription?.sdp ?? "").first?.first?.lowercased() == "red"
+        stats.asksRed = SDPTuner.audioCodecOrder(in: pc.localDescription?.sdp ?? "").first?.first?.lowercased() == "red"
+        stats.opusFmtpAsked = pc.localDescription.map { SDPTuner.opusFmtpLine(in: $0.sdp) } ?? nil
         return stats
     }
 
@@ -531,42 +471,6 @@ final class Peer {
         observer.peer = nil
         pc.close()
     }
-}
-
-/// What `getStats()` says about one peer (also what the interop test asserts on).
-public struct PeerStats: Sendable, Equatable {
-    public var sid: String
-    public var rttMs: Double?
-    public var bytesSent: Double = 0
-    public var bytesReceived: Double = 0
-    public var packetsSent = 0
-    public var packetsReceived = 0
-    public var packetsLost = 0
-    /// The voice's received samples, and how many were patched over (concealed).
-    public var samplesReceived: Double = 0
-    public var concealedSamples: Double = 0
-    public var silentConcealedSamples: Double = 0
-    public var inboundAudioLevel: Double = 0
-    public var localAudioLevel: Double = 0
-    public var inboundCodec: String?
-    public var inboundFmtp: String?
-    public var outboundCodec: String?
-    public var outboundFmtp: String?
-    /// A screen we watch: frames decoded, its size and codec.
-    public var videoFramesDecoded = 0
-    public var videoBytesReceived: Double = 0
-    public var videoFrameWidth = 0
-    public var videoFrameHeight = 0
-    public var inboundVideoCodec: String?
-    public var inboundVideoFmtp: String?
-    /// Our screen to them.
-    public var videoFramesEncoded = 0
-    public var videoBytesSent: Double = 0
-    public var outboundVideoCodec: String?
-    public var outboundVideoFmtp: String?
-    public var videoEncoder: String?
-    /// A screen's sound (any audio after the voice).
-    public var screenAudioBytesReceived: Double = 0
 }
 
 /// WebRTC calls its delegate on its own signaling thread. Under Swift 6 a

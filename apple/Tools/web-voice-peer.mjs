@@ -23,11 +23,19 @@
 //      clicks its LIVE badge (the real UI), counts the frames it decodes
 //      (codec, size), then clicks Stop watching.
 // Every 250 ms it writes what the web side sees (connection state, inbound
-// Opus bytes/packets/level, fmtp) to a JSON status file the native test reads.
+// Opus bytes/packets/level, fmtp, and the counters RED shows up in) to a
+// JSON status file the native test reads.
+//
+// YAP_IMPAIR=wifi|cell|loss5|loss2 puts the calls behind an impairment proxy
+// (RTP only, both ways; the voice audit's profiles, the same as
+// desktop/tests/interop.mjs): the web routes the native client's candidates
+// through a local UDP proxy and never tells it its own, so everything goes
+// through it. YAP_PEER_SCENARIOS=voice plays only the two voice scenarios.
 //
 //   YAP_URL=http://127.0.0.1:8789 YAP_KEY=testkey YAP_ADMIN_KEY=testadmin \
 //     node apple/Tools/web-voice-peer.mjs <status.json>
 // Needs the repo's node_modules (playwright + its Chromium).
+import dgram from 'node:dgram';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -42,6 +50,43 @@ const TIMEOUT_MS = Number(process.env.YAP_PEER_TIMEOUT_MS ?? 240_000);
 const RUN = Math.random().toString(36).slice(2, 6);
 const NAME = `Webby ${RUN}`;
 const PIN = '582039';
+const VOICE_ONLY = process.env.YAP_PEER_SCENARIOS === 'voice';
+
+const IMPAIR = process.env.YAP_IMPAIR || null;
+const PROFILES = {
+  loss2: { base: 0, jit: 0, spikeP: 0, spike: [0, 0], loss: 0.02 },
+  loss5: { base: 0, jit: 0, spikeP: 0, spike: [0, 0], loss: 0.05 },
+  wifi: { base: 15, jit: 10, spikeP: 0.02, spike: [60, 200], loss: 0.01 },
+  cell: { base: 40, jit: 20, spikeP: 0.03, spike: [100, 300], loss: 0.02 },
+};
+if (IMPAIR && !PROFILES[IMPAIR]) throw new Error(`YAP_IMPAIR: one of ${Object.keys(PROFILES).join(', ')}`);
+const impairStats = { rtp: 0, dropped: 0 };
+const proxies = [];
+/** A UDP proxy in front of one of the native client's candidates; RTP through it (both ways) gets the profile. */
+function mkProxy(host, port) {
+  const prof = PROFILES[IMPAIR];
+  const sock = dgram.createSocket('udp4');
+  proxies.push(sock);
+  let client = null;
+  sock.on('message', (msg, r) => {
+    const fromTarget = r.address === host && r.port === port;
+    if (!fromTarget) client = { address: r.address, port: r.port };
+    const to = fromTarget ? client : { address: host, port };
+    if (!to) return;
+    // RTP: version 2, and not RTCP (RFC 5761: 64–95 in the payload-type bits). Not "96–127":
+    // RED's payload type is usually 63, and it would slip through unimpaired.
+    const pt = msg[1] & 0x7f;
+    const isRtp = msg.length > 12 && (msg[0] & 0xc0) === 0x80 && !(pt >= 64 && pt <= 95);
+    if (!isRtp) return sock.send(msg, to.port, to.address);
+    impairStats.rtp++;
+    if (Math.random() < prof.loss) return impairStats.dropped++;
+    let d = prof.base + (prof.jit ? -prof.jit * Math.log(1 - Math.random()) : 0);
+    if (Math.random() < prof.spikeP) d += prof.spike[0] + Math.random() * (prof.spike[1] - prof.spike[0]);
+    if (d < 1) return sock.send(msg, to.port, to.address);
+    setTimeout(() => sock.send(msg, to.port, to.address), d);
+  });
+  return new Promise((res) => sock.bind(0, '0.0.0.0', () => res(sock.address().port)));
+}
 
 const browser = await chromium.launch({
   args: [
@@ -54,12 +99,49 @@ const browser = await chromium.launch({
 const status = { name: NAME, phase: 'starting', sid: null, uid: null, scenarios: {}, error: null, at: Date.now() };
 const write = () => {
   status.at = Date.now();
+  if (status.impair) Object.assign(status.impair, impairStats);
   fs.writeFileSync(`${STATUS}.tmp`, JSON.stringify(status, null, 2));
   fs.renameSync(`${STATUS}.tmp`, STATUS);
 };
 
 try {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, permissions: ['microphone'] });
+  if (IMPAIR) {
+    status.impair = { profile: IMPAIR, ...impairStats };
+    await context.exposeFunction('__mkProxy', (host, port) => mkProxy(host, port));
+    await context.addInitScript(() => {
+      const stripCandidates = (sdp) => sdp.split('\r\n').filter((l) => !l.startsWith('a=candidate:') && l !== 'a=end-of-candidates').join('\r\n');
+      const add = RTCPeerConnection.prototype.addIceCandidate;
+      RTCPeerConnection.prototype.addIceCandidate = async function (c, ...rest) {
+        const line = c?.candidate ?? '';
+        const p = line.split(' ');
+        if (!line) return add.call(this, c, ...rest);
+        if (p[2]?.toLowerCase() !== 'udp' || p[4].includes(':') || p[4].endsWith('.local')) return; // TCP, IPv6, mDNS: not through the proxy
+        p[5] = String(await globalThis.__mkProxy(p[4], Number(p[5])));
+        return add.call(this, { ...c, candidate: p.join(' ') }, ...rest);
+      };
+      // Candidates inside a description would skip the proxy: none either way.
+      const setRemote = RTCPeerConnection.prototype.setRemoteDescription;
+      RTCPeerConnection.prototype.setRemoteDescription = function (d, ...rest) {
+        return setRemote.call(this, d?.sdp ? { type: d.type, sdp: stripCandidates(d.sdp) } : d, ...rest);
+      };
+      const local = Object.getOwnPropertyDescriptor(RTCPeerConnection.prototype, 'localDescription');
+      Object.defineProperty(RTCPeerConnection.prototype, 'localDescription', {
+        get() {
+          const d = local.get.call(this);
+          if (!d) return d;
+          const out = { type: d.type, sdp: stripCandidates(d.sdp) };
+          return { ...out, toJSON: () => out };
+        },
+      });
+      // Never tell the native client our own candidates: it must find us through the proxy (peer-reflexive).
+      const desc = Object.getOwnPropertyDescriptor(RTCPeerConnection.prototype, 'onicecandidate');
+      Object.defineProperty(RTCPeerConnection.prototype, 'onicecandidate', {
+        set(fn) { desc.set.call(this, fn && ((e) => { if (e.candidate) return; fn(e); })); },
+        get() { return desc.get.call(this); },
+      });
+    });
+  }
   await context.addInitScript(() => {
     // The mic: a 12 s chord with noise, looped (Opus spends its bits on it).
     const realGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
@@ -195,6 +277,13 @@ try {
       if (inbound) codec = report.get(inbound.codecId);
       if (outbound) outCodec = report.get(outbound.codecId);
       const session = yap.state.sessions.get(sid);
+      // The voice section's codecs, first one first (libwebrtc sends the first of the remote description's).
+      const firstCodec = (sdp) => {
+        const lines = (sdp ?? '').split('\r\n');
+        const m = lines.find((l) => l.startsWith('m=audio'));
+        const pt = m?.split(' ')[3];
+        return lines.find((l) => l.startsWith(`a=rtpmap:${pt} `))?.split(' ')[1]?.split('/')[0] ?? null;
+      };
       peers.push({
         sid,
         uid: peer.uid ?? session?.uid ?? null,
@@ -208,7 +297,20 @@ try {
         mime: codec?.mimeType ?? null,
         fmtp: codec?.sdpFmtpLine ?? null,
         bytesSent: outbound?.bytesSent ?? 0,
+        packetsSent: outbound?.packetsSent ?? 0,
+        outMime: outCodec?.mimeType ?? null,
         outFmtp: outCodec?.sdpFmtpLine ?? null,
+        targetBitrate: outbound?.targetBitrate ?? null,
+        packetsDiscarded: inbound?.packetsDiscarded ?? 0,
+        concealedSamples: inbound?.concealedSamples ?? 0,
+        silentConcealedSamples: inbound?.silentConcealedSamples ?? 0,
+        totalSamplesReceived: inbound?.totalSamplesReceived ?? 0,
+        fecPacketsReceived: inbound?.fecPacketsReceived ?? 0,
+        fecPacketsDiscarded: inbound?.fecPacketsDiscarded ?? 0,
+        jitterBufferDelay: inbound?.jitterBufferDelay ?? 0,
+        jitterBufferEmittedCount: inbound?.jitterBufferEmittedCount ?? 0,
+        localFirstCodec: firstCodec(peer.pc.localDescription?.sdp),
+        remoteFirstCodec: firstCodec(peer.pc.remoteDescription?.sdp),
         remoteDescriptionHasTunedOpus: /maxaveragebitrate=\d+/.test(peer.pc.remoteDescription?.sdp ?? ''),
         speaking: document.querySelector(`[data-voice-sid="${CSS.escape(sid)}"]`)?.classList.contains('speaking') ?? false,
         mutedFlag: !!session?.voice?.muted,
@@ -402,10 +504,12 @@ try {
   await page.click('[data-action="leave-voice"]').catch(() => {});
   await page.waitForFunction(() => !yap.state.voiceChannel, null, { timeout: 5000 }).catch(() => {});
 
-  // Scenario 3: the web shares, the native watches.
-  await webShares();
-  // Scenario 4: the native shares, the web watches (its LIVE badge).
-  await nativeShares();
+  if (!VOICE_ONLY) {
+    // Scenario 3: the web shares, the native watches.
+    await webShares();
+    // Scenario 4: the native shares, the web watches (its LIVE badge).
+    await nativeShares();
+  }
   status.phase = 'done';
 } catch (err) {
   status.error = String(err?.stack ?? err);
@@ -414,6 +518,8 @@ try {
 } finally {
   write();
   await browser.close();
+  for (const sock of proxies) sock.close();
+  if (IMPAIR) console.log(`[web] impairment ${IMPAIR}: ${impairStats.rtp} RTP packets through the proxy, ${impairStats.dropped} dropped`);
   for (const [key, r] of Object.entries(status.scenarios)) {
     if (r.maxLevel === undefined) console.log(`[web] ${key}: ${JSON.stringify(r)}`);
     else console.log(`[web] ${key}: connected=${r.connected} received ${r.maxBytesReceived} B / ${r.maxPacketsReceived} packets from native, max level ${r.maxLevel.toFixed(3)}, ${r.mime} fmtp: ${r.fmtp}`);

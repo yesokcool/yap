@@ -24,6 +24,41 @@ pub fn opus_fmtp(sdp: &str) -> Option<String> {
     sdp.lines().find_map(|l| l.trim_end_matches('\r').strip_prefix(&prefix).map(str::to_string))
 }
 
+/// Payload type of `red/48000` in the voice section (the first audio
+/// section) of this SDP, if it offers RED there.
+pub fn red_pt(sdp: &str) -> Option<u8> {
+    let voice = sdp.split("\nm=").find(|s| s.starts_with("audio") || s.starts_with("m=audio"))?;
+    voice.lines().find_map(|l| {
+        let (pt, codec) = l.trim_end_matches('\r').strip_prefix("a=rtpmap:")?.split_once(' ')?;
+        codec.to_ascii_lowercase().starts_with("red/48000").then(|| pt.parse().ok()).flatten()
+    })
+}
+
+/// The codec names of the voice section's `m=` line, in its order (e.g. `["red", "opus"]`).
+pub fn voice_codecs(sdp: &str) -> Vec<String> {
+    audio_sections(sdp).into_iter().next().map(|(_, codecs)| codecs).unwrap_or_default()
+}
+
+/// Every audio section's mid and the codec names of its `m=` line, in order
+/// (the first section is the voice; any later one a screen share's sound).
+pub fn audio_sections(sdp: &str) -> Vec<(Option<String>, Vec<String>)> {
+    sdp.split("\nm=")
+        .filter(|s| s.starts_with("audio") || s.starts_with("m=audio"))
+        .map(|section| {
+            let mid = section.lines().find_map(|l| l.trim_end_matches('\r').strip_prefix("a=mid:").map(str::to_string));
+            let order: Vec<&str> = section.lines().next().map(|l| l.split_whitespace().skip(3).collect()).unwrap_or_default();
+            let codecs = order
+                .iter()
+                .filter_map(|pt| {
+                    let prefix = format!("a=rtpmap:{pt} ");
+                    section.lines().find_map(|l| l.trim_end_matches('\r').strip_prefix(&prefix).and_then(|c| c.split('/').next()).map(str::to_ascii_lowercase))
+                })
+                .collect();
+            (mid, codecs)
+        })
+        .collect()
+}
+
 pub fn fmtp_param(fmtp: &str, key: &str) -> Option<String> {
     fmtp.split(';').find_map(|kv| {
         let (k, v) = kv.trim().split_once('=')?;
@@ -290,6 +325,22 @@ mod tests {
     fn no_opus_untouched() {
         let sdp = "v=0\r\nm=audio 9 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
         assert_eq!(tune_opus(sdp, 64_000, false), sdp);
+    }
+
+    #[test]
+    fn finds_red_in_the_voice_section_only() {
+        assert_eq!(red_pt(&offer()), Some(63));
+        assert_eq!(voice_codecs(&offer()), ["opus", "red"]);
+        let first = offer().replace("SAVPF 111 63 9 0 8 13 110 126", "SAVPF 63 111");
+        assert_eq!(voice_codecs(&first), ["red", "opus"]);
+        // RED only in a later (screen audio) section: not the voice's.
+        let later = offer().replace("a=rtpmap:63 red/48000/2\r\na=fmtp:63 111/111\r\n", "").replace("SAVPF 111 63\r\n", "SAVPF 111 63\r\na=rtpmap:63 red/48000/2\r\n");
+        assert_eq!(red_pt(&later), None);
+        assert_eq!(red_pt(SDP), None);
+        // Each audio section by mid (the video's left out).
+        let both = offer().replace("a=mid:1\r\na=sendrecv\r\n", "a=mid:1\r\na=sendrecv\r\na=rtpmap:63 red/48000/2\r\n");
+        assert_eq!(audio_sections(&both), [(Some("0".to_string()), vec!["opus".to_string(), "red".to_string()]), (Some("1".to_string()), vec!["opus".to_string(), "red".to_string()])]);
+        assert_eq!(audio_sections(&offer())[1].1, ["opus"], "a payload type without an rtpmap is left out");
     }
 
     #[test]

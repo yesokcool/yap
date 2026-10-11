@@ -1,6 +1,23 @@
 {
-  "current": "0.41.0",
+  "current": "0.42.0",
   "releases": [
+    {
+      "version": "0.42.0",
+      "date": "2026-10-11",
+      "title": "Calls that hold up",
+      "items": [
+        "Calls hold up better on choppy Wi‑Fi and cellular, in every app: each bit of voice now travels twice, so a short dropout is filled with the real sound instead of a robotic blip.",
+        "Copy call report (in a call's ⋯ menu, or Settings › Voice afterwards) copies what Yap noticed about a call, so one that sounded off can be looked into. It stays on your device.",
+        "Sending lots of messages at once no longer leaves one stuck as \"sending\", in every app: it goes out a moment later.",
+        "Desktop app: echo cancellation, so friends no longer hear themselves when you use speakers instead of headphones.",
+        "Desktop app: on a Mac (macOS 14 or newer), Share screen uses Apple's own picker, so macOS stops asking again and again whether Yap may record your screen.",
+        "iPhone and Mac: calls no longer drop when your iPhone's screen is off: the call's sound keeps running the whole time, even when people come and go or the connection hiccups.",
+        "iPhone and Mac: if something still ends a call while Yap is in the background (a phone call takes the sound, the connection is gone for a minute), Yap tells you, \"You left Lounge\" and why, and one tap puts you back in.",
+        "iPhone and Mac: switching between Wi‑Fi and cellular reconnects right away.",
+        "iPhone and iPad: share your screen: Share screen in the call, then Start Broadcast. Friends click your LIVE badge to watch; stop it in Yap, in Control Center or with the red pill.",
+        "iPhone: Mic mode in Settings › Voice opens Apple's Voice Isolation, which cuts the noise around you."
+      ]
+    },
     {
       "version": "0.41.0",
       "date": "2026-10-11",

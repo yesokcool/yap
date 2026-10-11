@@ -50,6 +50,16 @@ enum AppIdentity {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
     }
 
+    /// How a call report names the app: "Yap for iPhone", "Yap for iPad", "Yap for Mac" (and "Yap Dev …").
+    @MainActor static var reportName: String {
+        let name = isDevBuild ? "Yap Dev" : "Yap"
+        #if os(macOS)
+        return "\(name) for Mac"
+        #else
+        return "\(name) for \(UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone")"
+        #endif
+    }
+
     nonisolated static var version: String {
         let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
         let b = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"

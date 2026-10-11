@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*
  * Publishes the desktop app's binaries (from desktop/target/dist/, where
- * desktop/scripts/build-cross.sh leaves them; else dist/; or --from <dir>) for download and for the
+ * desktop/scripts/build-cross.sh leaves them; or --from <dir>) for download and for the
  * apps' click-to-update (PROTOCOL.md › Updates):
  *   web/downloads/yap-<version>-<platform>[.exe]   the files, signed
  *   web/downloads/latest.json                      what the apps check
@@ -38,11 +38,9 @@ const PLATFORMS = {
   'macos-aarch64': { file: 'yap-macos-aarch64', ext: '' },
 };
 const local = process.argv.includes('--local');
-// The build's own output first, so a stale copy in dist/ can't be published by mistake.
+// Only the build's own output (or --from): an old copy elsewhere can never be published by mistake.
 const fromArg = process.argv[process.argv.indexOf('--from') + 1];
-const dist = process.argv.includes('--from') && fromArg
-  ? resolve(fromArg)
-  : [join(root, 'desktop/target/dist'), join(root, 'dist')].find((d) => existsSync(d)) ?? join(root, 'desktop/target/dist');
+const dist = process.argv.includes('--from') && fromArg ? resolve(fromArg) : join(root, 'desktop/target/dist');
 const shown = relative(root, dist) || dist;
 const MAX_ASSET = 25 * 1024 * 1024; // Workers static assets: 25 MiB per file
 const KEEP_VERSIONS = 2; // the previous one stays, so a download in flight never 404s

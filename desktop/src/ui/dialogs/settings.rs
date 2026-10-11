@@ -201,7 +201,7 @@ pub(super) fn profile_tab(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<
 
 /// Settings › Voice in the web's groups: Mic & output, How you talk,
 /// Sounds, then Advanced (folded each time Settings opens). Only what this
-/// app has: no echo cancellation, music mode or OBS here yet.
+/// app has: no music mode or OBS here yet.
 pub(super) fn voice_tab(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>, st: &mut SettingsState) {
     let gate = app.shared.audio.gate.clone();
     let devices = st.devices.lock().clone();
@@ -220,6 +220,7 @@ pub(super) fn voice_tab(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
             acts.push(Act::Cmd(Cmd::AudioSettings { restart_input: false, restart_output: true, renegotiate: false }));
         });
         hear_yourself(ui, m, p, acts, st);
+        super::super::call_report_field(ui, &app.shared, p, acts);
     });
     theme::group(ui, "How you talk", p, |ui| {
         field_label(ui, "Input mode:", p);
@@ -296,12 +297,18 @@ pub(super) fn voice_tab(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
             acts.push(Act::Config(Box::new(move |c| c.noise_suppression = ns)));
             acts.push(Act::ApplyGate);
         }
+        // Applies at once, in a call too (the mic's thread reads it every 10 ms).
+        let mut aec = m.config.echo_cancellation;
+        if theme::tip(theme::checkbox(ui, &mut aec, "Echo cancellation", p), "Takes what your speakers play back out of your mic").changed() {
+            acts.push(Act::Config(Box::new(move |c| c.echo_cancellation = aec)));
+            acts.push(Act::ApplyGate);
+        }
         let mut agc = m.config.auto_gain;
         if theme::checkbox(ui, &mut agc, "Automatic gain", p).changed() {
             acts.push(Act::Config(Box::new(move |c| c.auto_gain = agc)));
             acts.push(Act::ApplyGate);
         }
-        note(ui, "Automatic gain evens out how loud you come across while you talk; quiet stays quiet. No echo cancellation yet — use headphones.", p);
+        note(ui, "Echo cancellation keeps your speakers out of your mic, so friends don't hear themselves. Automatic gain evens out how loud you come across while you talk; quiet stays quiet.", p);
     });
     super::super::extras::sound_group(ui, m, p, acts);
     let mut open = st.advanced;

@@ -192,15 +192,18 @@ final class AppModel {
         let credentials: any CredentialStore = launch.usesMemoryStore ? MemoryCredentialStore() : DeviceCredentialStore(service: AppIdentity.keychainService)
         if let marks = launch.lastRead, let memory = credentials as? MemoryCredentialStore { memory.lastRead = marks }
         client = YapClient(credentials: credentials, client: launch.clientLabel ?? AppIdentity.clientLabel)
+        // The last three call reports stay in the app's own data folder (screenshots: in memory).
+        let reports = launch.usesMemoryStore ? nil : CallReportStore.standard
         #if os(iOS)
         if launch.syntheticAudio {
-            voice = VoiceController(client: client, engine: VoiceEngine(audioDevice: SyntheticAudioDevice()), requestsMicPermission: false)
+            voice = VoiceController(client: client, engine: VoiceEngine(audioDevice: SyntheticAudioDevice()), requestsMicPermission: false, callReports: reports)
         } else {
-            voice = VoiceController(client: client)
+            voice = VoiceController(client: client, callReports: reports)
         }
         #else
-        voice = VoiceController(client: client)
+        voice = VoiceController(client: client, callReports: reports)
         #endif
+        voice.appDescription = "\(AppIdentity.reportName) \(AppIdentity.version)"
         micCheck = MicCheck(source: launch.syntheticAudio ? .synthetic : .microphone)
         client.onMention = { [weak self] message in self?.mentioned(message) }
         client.emojiTone = EmojiToneSetting.current
@@ -308,6 +311,13 @@ final class AppModel {
             await micCheck.run(bitrate: voice.callBitrate, mode: settings.mode, threshold: settings.vadThreshold,
                                highQualityBluetooth: settings.highQualityBluetooth)
         }
+    }
+
+    /// Copy call report (the call's ⋯) / Copy last call report (Settings › Voice).
+    func copyCallReport() {
+        guard let text = voice.callReportText() else { return }
+        copyToPasteboard(text)
+        client.notice = YapClient.Notice(text: CallReportWords.copied)
     }
 
     /// Quitting: a goodbye to the call, so nobody keeps it waiting for us.

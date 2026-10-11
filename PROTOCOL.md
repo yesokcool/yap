@@ -885,11 +885,27 @@ lost in a row). Rules:
 - Opus keeps your quality setting; the copy rides on top, so a 128 kbps voice
   takes about 256 kbps on the wire per person you talk to. Where a stack counts
   the copy against `maxBitrate`, raise the cap so the Opus target itself stays
-  at the setting (measure it).
+  at the setting (measure it). Neither Chrome nor libwebrtc counts it; the
+  desktop doesn't either.
+- A 20 ms frame and its copy fit 1200 bytes only up to ~230 kbps, so at 256
+  and 510 kbps every packet carries its primary alone: no protection there.
+- Stats name the codec inside (`audio/opus`) even when RED is in use; check
+  the descriptions, the bytes per packet (~647 vs ~321 at 128 kbps) or the
+  receiver's `packetsDiscarded` (one unused copy per packet in libwebrtc).
+- Each side sends with the first codec of the *other* side's description,
+  so a RED-first app already receives RED from any libwebrtc peer.
+
+Measured through the impairment proxy (128 kbps, 30–60 s, the same drops
+with and without, audio patched over off → on): web ↔ web 2 % loss 2.0 →
+0.07 %, 5 % 4.0–5.4 → 0.16–0.39 %, Wi‑Fi-like 2.6–2.8 → 0.07–0.19 %,
+cellular-like 4.6 → 0.31 %; iPhone ↔ web cellular-like 4.3–4.9 → 0.3–0.44 %;
+desktop ↔ web (what Chrome patched) Wi‑Fi-like 2.45 → 0.21 %, cellular-like
+4.08 → 0.53 %, 5 % 5.30 → 0.27 %. About 130 → 260 kbps on the wire.
 *(Web: browsers send RED only when it's first in the negotiated list, so the
 web puts it first with `setCodecPreferences`. Apple: libwebrtc packs and
-unpacks it once negotiated. Desktop: webrtc-rs only carries the packets; the
-app packs and unpacks them itself.)*
+unpacks it once negotiated (no field trial). Desktop: webrtc-rs only carries
+the packets; the app packs and unpacks them itself, finds the voice by
+transceiver id 0 and sets a share's sound sections Opus-first explicitly.)*
 
 **Transmit gate** (mute, voice activity, push-to-talk) = stop sending audio
 frames / disable the track, *not* renegotiation. Mute + deafen state is
@@ -957,7 +973,8 @@ the apps in their own data folder (the last three). Contents, in this order:
    `opus`) and the Opus fmtp you sent; kbps sent and received (median); round
    trip (median, and the worst 2 s reading); lost packets (% of expected);
    audio patched over (`concealedSamples − silentConcealedSamples` as a % of
-   `totalSamplesReceived`); how many packets RED rebuilt, where the stack says;
+   `totalSamplesReceived`); how many packets RED rebuilt, where the stack says (the desktop does;
+   Chrome and libwebrtc don't, so the web and Apple apps show copies received);
    jitter buffer delay (median); ICE restarts, connection rebuilds and
    reconnects kept; how long *weak connection* showed.
 3. **Timeline**, as `+mm:ss` since you joined (`+h:mm:ss` past an hour):
@@ -1072,8 +1089,8 @@ a resuming one behaves exactly as it always has.
 
 **Web.** `tools/stamp.mjs` (run by `npm install`, `npm run dev`, `dev:test`,
 `check` and `deploy`; the files aren't committed) hashes the web client into
-`web/js/build.js` and `worker/build.ts`: `style` = the three skins'
-stylesheets (`style.css`, `apple.css`, `arch.css`), `app` = every other file
+`web/js/build.js` and `worker/build.ts`: `style` = the stylesheet
+(`style.css`), `app` = every other file
 under `web/`, folders included (`js/app/*` too), except `_headers` and
 `downloads/`. A deploy restarts the Durable Object, which drops
 every socket; pages reconnect and get the new `build` in `ready`. Sockets that

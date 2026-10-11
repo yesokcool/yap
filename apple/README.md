@@ -19,7 +19,7 @@ app and a native macOS app from the same code. The wire protocol is
 | `Yap/Views/`, `Yap/Components/` | The screens and their **Windows 98** building blocks. |
 | `YapKit/` | Local Swift package, everything that isn't a view. |
 | `YapKit/Sources/YapCore` | Protocol models and frames, `YapConnection` (WebSocket + heartbeat + backoff + network changes), `SendLine` (sends the server turns away), `YapClient` (identity and all the state screens read; `YapClient+Account/Events/Messages/People/Search/Vault/Extras.swift` by topic), `Mentions` (the server's mention rule), emoji codec and catalog, message formatter, KLIPY client, Keychain. No WebRTC. |
-| `YapKit/Sources/YapVoice` | WebRTC mesh: `VoiceEngine` + `Peer` (perfect negotiation, Opus tuning, transmit gate, speaking levels, ICE restarts, link quality), `VoiceGate` (the transmit gate table), `VoiceHealth` (`PathWatch` ICE restart timing, `LinkQuality` "weak connection", `BoostLimiter`), `CallKeeper` (keeping calls across reconnects), `LevelMonitor` (the mic level while you're alone), `VoiceController` (join → own echo → offer, hints, the audio session, watching and sharing a screen), `MicCheck` (Hear yourself), `SyntheticAudioDevice` (fake mic for tests); screen sharing: `ScreenShare` (`ScreenQuality` presets, the `ScreenWatch` viewer states, `ScreenAudience` "Watching: …", H.264-first `ScreenCodecs`), `ScreenRenderer` (decoded frames → `AVSampleBufferDisplayLayer`), `ScreenFeeder` (+ `FrameRelay`, `SyntheticScreenFeeder`), `MacScreenFeeder` (ScreenCaptureKit + the system picker), `BroadcastScreenFeeder` (iPhone/iPad: the extension's pictures); `BackgroundCall` (the rules for a call off screen on iPhone). |
+| `YapKit/Sources/YapVoice` | WebRTC mesh: `VoiceEngine` + `Peer` (perfect negotiation, Opus tuning, transmit gate, speaking levels, ICE restarts, link quality), `VoiceGate` (the transmit gate table), `VoiceHealth` (`PathWatch` ICE restart timing, `LinkQuality` "weak connection", `BoostLimiter`), `CallKeeper` (keeping calls across reconnects), `LevelMonitor` (the mic level while you're alone), `VoiceController` (join → own echo → offer, hints, the audio session, watching and sharing a screen), `MicCheck` (Hear yourself), `SyntheticAudioDevice` (fake mic for tests), `PeerStats` (one connection's `getStats()`, boiled down; never an address); the call report: `CallReport` (the notes and their text), `CallNotes` (takes them during a call) and `CallReportStore` (the last three), `CallSurroundings` (device, audio route, network kind, `MicModes`); screen sharing: `ScreenShare` (`ScreenQuality` presets, the `ScreenWatch` viewer states, `ScreenAudience` "Watching: …", H.264-first `ScreenCodecs`), `ScreenRenderer` (decoded frames → `AVSampleBufferDisplayLayer`), `ScreenFeeder` (+ `FrameRelay`, `SyntheticScreenFeeder`), `MacScreenFeeder` (ScreenCaptureKit + the system picker), `BroadcastScreenFeeder` (iPhone/iPad: the extension's pictures); `BackgroundCall` (the rules for a call off screen on iPhone). |
 | `YapKit/Sources/YapScreenLink` | The extension ↔ app link: a Unix domain socket in the App Group's container, the framing (`ScreenLinkWire`), both ends, and `FrameScaler` (VideoToolbox). No WebRTC. |
 | `Tools/` | `web-voice-peer.mjs` + `run-voice-interop.sh` (voice interop test), `seed-demo.mjs` (screenshot data), `make-icons.swift` (app icons, Win98 window + speech bubble). |
 
@@ -98,8 +98,9 @@ Connect refuses an alpha channel; `Tools/make-icons.swift` draws it opaque)
 plus every Mac size, the microphone usage string, the `audio` background
 mode, and a privacy manifest (`Yap/PrivacyInfo.xcprivacy`: no tracking;
 name, messages, pictures and user id for app functionality; UserDefaults
-`CA92.1`, boot time `35F9.1`). Both Info.plists set
-`ITSAppUsesNonExemptEncryption` to NO: HTTPS and CryptoKit are the system's
+`CA92.1`, boot time `35F9.1`). The app declares
+`ITSAppUsesNonExemptEncryption` NO (the iPhone's Info.plist, and the
+`INFOPLIST_KEY_ITSAppUsesNonExemptEncryption` build setting for the Mac): HTTPS and CryptoKit are the system's
 encryption, and WebRTC's DTLS-SRTP is standard. The Personal space uses
 AES-GCM end-to-end encryption, so check that answer for where you publish.
 
@@ -251,6 +252,18 @@ nothing goes out until the web clicks the real LIVE badge, "Watching:
 <web user>" shows, the web decodes H.264 (VideoToolbox encodes it), Sharp
 applies without stopping, and the web's Stop watching takes it off the list
 and stops our encoding for it (measured: first frames ~1.2 s after asking).
+Both voice scenarios also measure RED both ways (`RED …` lines: what each
+side's description lists first, kbps and bytes per packet each way, lost and
+patched-over %, the copies arriving) and check libwebrtc's rule that each
+side sends RED exactly when the *other* side's description lists it first;
+the second one prints its call report (`CALLREPORT-BEGIN`) and checks it.
+`YAP_IMPAIR=wifi|cell|loss5|loss2` runs the calls behind the voice audit's
+impairment proxy (RTP both ways, as in `desktop/tests/interop.mjs`; the web
+routes the native client's candidates through it and keeps its own to
+itself), `YAP_RED=0` turns redundancy off to compare,
+`YAP_MEASURE_SECONDS=30` measures longer, `YAP_PEER_SCENARIOS=voice` skips
+the screen scenarios and `YAP_TESTS=YapVoiceTests/VoiceInteropTests` the
+other suites.
 `YapVoiceTests` also cover the transmit gate's table (hysteresis, the
 450 ms hold, the noise floor, the push-to-talk tail, digital silence), the
 reconnect state machine (`CallKeeperTests`: a fake mesh and a hand-cranked
@@ -277,6 +290,16 @@ healthy socket; frames answered in the order sent), `BackgroundCallTests`
 and go), `BroadcastFeederTests` and `YapScreenLinkTests` (the extension ↔ app
 link: framing, sizes, rotation, the scaler, a real socket both ways, either
 side hanging up). ReplayKit itself can't run in a test.
+
+Round 5 added: `RedTests` (RED first in the voice only, the RED fmtp, a
+screen share's audio plain Opus, no RED without an offer of it, off taking
+it out), `RedLoopbackTests` (iOS simulator: two engines in one process with
+RED both ways: twice the bytes per packet, a copy of every packet arriving,
+the Opus target still 128 kbps; at 256 and 510 kbps the copy doesn't fit
+and goes), `CallReportTests` (stats and free text carrying IPv4, IPv6, mDNS
+and TURN addresses: none come out; the 2,000-line timeline cap; a line per
+person every 10 s, then every minute; the last three kept; a call cut
+short says so).
 
 **App target:** `xcodebuild test -project Yap.xcodeproj -scheme Yap -destination 'platform=iOS Simulator,id=<UDID>'`
 (identity, bundled font, a stored Apple/Arch skin loading as Windows 98 with light/dark kept, the status bar, edit drafts, skin tone,
@@ -335,7 +358,8 @@ marks to start from — a scripted launch has none, so it would start caught up;
 `0` makes everything unread, as before; `YAP_DEMO_EDIT=text` starts editing my
 newest message containing it; `YAP_ASK=ping|archive` asks the open channel's
 question in its Win98 box; `YAP_SETTINGS_PAGE=voice-advanced` opens Voice ›
-Advanced (its page on iPhone, unfolded on the Mac); `YAP_SNAPSHOT_HEIGHT=900`
+Advanced (its page on iPhone, unfolded on the Mac); `YAP_SETTINGS_SCROLL=bottom`
+scrolls an iPhone Settings page to its end (Voice's Call report); `YAP_SNAPSHOT_HEIGHT=900`
 makes the Mac's Settings window that tall before the snapshot;
 `YAP_UNREAD_LAST=N` pretends the open channel's last N messages are
 new (the "New since" line, and the Jump to first unread pill when it's off
@@ -693,9 +717,10 @@ not counting as company in the call sheet.
   About (`SettingsPage`). Mac: one tab each. iPhone: a list of the pages,
   each pushed (`AppModel.showSettings(_:)`); Account shows five devices,
   then "Show all". Voice is grouped like the web's: **Mic & output** (Hear
-  yourself; iPhone: high-quality headphone audio) · **How you talk** (input
+  yourself; iPhone: high-quality headphone audio and Mic mode) · **How you talk** (input
   mode, sensitivity) · **Sounds** (join & mute sounds, your chime,
   soundboard volume and mute; the app also lists the soundboard's clips) ·
+  **Call report** (Copy last call report) ·
   **Advanced** (quality, Hide my IP address) — on iPhone a row that opens
   its own page (`Destination.voiceAdvanced`), on the Mac a disclosure
   folded again each time Settings opens. No device pickers, music mode,
@@ -845,6 +870,27 @@ music: ≥ 160 kbps, stereo where we send it), `maxBitrate` on the sender.
 Audio m-lines drop `transport-cc` (`SDPTuner`): with it, WebRTC's bandwidth
 estimator sends probe padding through an audio-only call. Video keeps it.
 
+- **Redundancy (RED)** (PROTOCOL.md › Voice › Redundancy; `SDPTuner`): the
+  voice section of every description we set lists `red/48000/2` first
+  (fmtp `<opus>/<opus>`: one earlier frame), Opus right after; a screen
+  share's audio stays Opus first, and an app that doesn't offer RED gets
+  plain Opus. libwebrtc (stasel 154) needs no field trial (RED is in its
+  codec list), packs and unpacks RED itself, and sends with the first codec
+  of the *other* side's description: we ask everyone for RED and send it to
+  whoever asks for it (Chrome does the same). `maxBitrate` doesn't count the
+  copy: Opus stays at the quality setting (outbound `targetBitrate` 128000)
+  and the wire carries about twice (at 128 kbps 321 → 647 bytes a packet,
+  ~259 kbps). At 256 and 510 kbps a frame and its copy don't fit in 1,200
+  bytes, so libwebrtc sends the frame alone: no protection there.
+  libwebrtc's stats name the codec inside (`audio/opus`) either way; RED
+  shows as the bytes per packet and, at the receiver, as one discarded copy
+  per packet (`packetsDiscarded`). Measured against the web behind the
+  impairment proxy (30 s each way; audio patched over, worst direction, off
+  → on): loss2 2.4 → 0.14 %, loss5 4.5 → 0.14 %, wifi 3.6 → 0.28 %, cell
+  4.9 → 0.44 %, with packet loss unchanged (that's the network). The web on
+  this branch still offers Opus first, so web → native is RED in both
+  scenarios but native → web only when the native offers.
+
 - **Calls survive reconnects** (PROTOCOL.md › Keeping calls across
   reconnects; `CallKeeper`): `voice.join` says `resume: true`. When our
   socket drops mid-call nothing hangs up: every connection stays, its
@@ -956,6 +1002,45 @@ estimator sends probe padding through an audio-only call. Video keeps it.
   your own from the send-side stats.
 - **Swift 6:** WebRTC delegates are nonisolated and hop to the main queue
   in order; nothing hands a main-actor closure to a framework callback.
+- **Call report** (PROTOCOL.md › Voice › Call report; `CallNotes`,
+  `CallReport`): while you're in a call the app keeps notes from WebRTC's
+  stats (every 2 s) and from what happens: who was there and who joins and
+  leaves, connection states, ICE restarts and rebuilt connections, your
+  socket dropping and coming back (and whether the call was kept), someone
+  else's reconnect kept, "weak connection" on and off, the audio route
+  (iPhone: route changes with the reason, interruptions, a media-server
+  reset), the network kind (Wi‑Fi ↔ cellular, from `NWPathMonitor`), the
+  mic mode, "Your mic is sending silence", settings changed mid-call, and
+  why the call ended (You left / signed out / the channel was archived /
+  Yap was quit, and on iPhone the round 4 "You left Lounge" reasons). A
+  line per person every 10 s for the first minute, then every minute
+  (`Ana: rtt 38 ms, lost 0.4 %, patched 0.1 %, 129 kbps in, 131 out`), at
+  most 2,000 lines. **Copy call report** (the call sheet's ⋯) and **Copy
+  last call report** (Settings › Voice › Call report; "No call yet." until
+  there's one) put it on the clipboard as plain text: "Call report copied."
+  The last three stay as JSON in `Application Support/<bundle id>/Call
+  reports` (`CallReportStore`), saved as the call goes (at least every
+  10 s), so a call iOS cut short still has its notes ("Ended: unknown…").
+  No addresses: candidates are read by *type* only (host, srflx, prflx,
+  relay), and every piece of text (names, device and route names) goes
+  through `CallReport.scrub`, which turns anything shaped like an IPv4/IPv6
+  address, an mDNS name or a STUN/TURN URL into `[address]`/`[server]`.
+  Never sent anywhere by the app. "RED rebuilt" can't be counted:
+  libwebrtc's stats don't say which copies it used (they say how many
+  arrived, and lost vs patched over tells the rest).
+- **Mic mode** (iPhone, iPad; Settings › Voice › Mic & output): "Mic mode:
+  Standard" (or Voice Isolation / Wide Spectrum: `AVCaptureDevice`'s
+  `activeMicrophoneMode` in a call, `preferredMicrophoneMode` outside one,
+  "Standard (you chose Voice Isolation)" when the route can't do the
+  choice) and **Change…**, which opens Apple's own picker
+  (`showSystemUserInterface(.microphoneModes)`). Apps can't set it. Apple
+  ties mic modes to its voice-processing I/O unit (AUVoiceIO, WWDC21
+  "What's new in camera capture"), which WebRTC's iOS audio unit is in both
+  session modes (`.voiceChat`, and `.default` with high-quality headphone
+  audio), so Change… is enabled in any call and the row shows whatever iOS
+  reports. Not on the Mac: calls there run through WebRTC's Core Audio
+  device, not Apple's voice processing, so macOS offers Yap no mic modes.
+  The mode is in the call report.
 
 ## Known gaps
 
@@ -974,6 +1059,8 @@ estimator sends probe padding through an audio-only call. Video keeps it.
   and needs the App Group set up once (TestFlight above).
 - No mic/speaker device picker on the Mac (system default devices), no
   global push-to-talk key; a call doesn't follow a new default device.
+- No mic modes on the Mac (WebRTC's Core Audio device isn't Apple's voice
+  processing, which mic modes need).
 - Voice activity has no 40 ms pre-roll and libwebrtc's ~3 ms switch ramp
   instead of 5/15 ms fades (no audio-path hook in the SDK); Hear yourself
   works outside calls only. No music mode yet (so no "music + voice

@@ -11,6 +11,7 @@ import { applyTheme } from './look.js';
 import { postImage } from './uploads.js';
 import { currentPushSubscription, disableBrowserPush, enableBrowserPush } from './push.js';
 import { fetchIce, hasRelay, renderVoicePanel, screenView, voice } from './voice-ui.js';
+import { renderCallReportButton } from './call-report-ui.js';
 import { renderUserPanel } from './sidebar.js';
 import { canAddToHome } from './account.js';
 import { sendQuiet } from './extras.js';
@@ -146,6 +147,7 @@ export function openSettings(tab) {
   $('ptt-key').textContent = keyLabel(settings.pttKey);
   syncSettingsVisibility();
   renderMeter(voice.rawStream ? voice.localDb : -100);
+  renderCallReportButton();
   fillDevices();
   // Invites, activity and (owner/mods) storage load fresh each time.
   $('invite-made').hidden = true;

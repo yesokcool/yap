@@ -13,7 +13,7 @@
     "postinstall": "wrangler types -c wrangler.example.jsonc && node tools/stamp.mjs",
     "test:e2e": "node test/e2e.test.mjs",
     "release": "node tools/release.mjs",
-    "test:unit": "node test/unit.test.mjs && node test/voice.test.mjs",
+    "test:unit": "node test/unit.test.mjs && node test/voice.test.mjs && node test/call-report.test.mjs",
     "test:gif": "node test/gif.test.mjs",
     "stamp": "node tools/stamp.mjs",
     "test:webpush": "node --experimental-strip-types --no-warnings test/webpush.test.mjs",
@@ -33,5 +33,5 @@
     "typescript": "^7.0.2",
     "wrangler": "^4.147.0"
   },
-  "version": "0.41.0"
+  "version": "0.42.0"
 }

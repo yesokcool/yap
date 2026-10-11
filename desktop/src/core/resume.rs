@@ -48,6 +48,7 @@ impl Core {
         };
         let (Some(channel), Some(sid), Some(key)) = (channel, sid, self.resume_key.take()) else { return false };
         log::info!("socket dropped mid-call: keeping the call (up to {} s)", RESUME_FOR.as_secs());
+        self.call_note("Your connection to Yap dropped; keeping the call (audio goes straight between you)");
         self.old_sids.insert(sid.clone());
         self.resume = Some(Resume { sid, key, at: Instant::now(), channel });
         self.voice.suspend();
@@ -193,6 +194,9 @@ impl Core {
 
     /// They didn't come back: hang up on the kept connection (and chime, unless `quiet`).
     pub(super) fn drop_ghost(&mut self, sid: &str, quiet: bool) {
+        if self.shared.model.lock().ghosts.contains_key(sid) {
+            self.call_person(sid, "left", if quiet { "their old connection, closed" } else { "they didn't come back" });
+        }
         let uid = {
             let mut m = self.shared.model.lock();
             if m.ghosts.remove(sid).is_none() {
@@ -229,6 +233,7 @@ impl Core {
     pub(super) fn tick_resume(&mut self) {
         if self.resume.as_ref().is_some_and(|r| r.at.elapsed() > RESUME_FOR) {
             log::info!("not back in voice within {} s: hanging up", RESUME_FOR.as_secs());
+            self.call_note(format!("Gave up keeping the call: no connection to Yap for {} s", RESUME_FOR.as_secs()));
             self.end_resume();
             let ghosts: Vec<String> = self.shared.model.lock().ghosts.keys().cloned().collect();
             for sid in ghosts {
@@ -265,6 +270,7 @@ impl Core {
                 let Some(p) = self.voice.peer(&sid) else { continue };
                 if *p.state.lock() != "connected" && p.resumable.load(Ordering::Relaxed) {
                     log::info!("peer {sid}: not back 4 s after the handover; starting over");
+                    self.call_peer(&sid, None, Some((report::Count::Rebuilds, "connection rebuilt (not back 4 s after our reconnect)".into())));
                     let v = self.shared.model.lock().session_volume(&sid);
                     self.voice.restart(&sid, v);
                 }

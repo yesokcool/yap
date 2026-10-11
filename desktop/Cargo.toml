@@ -35,6 +35,9 @@ async-trait = "0.1"
 cpal = "0.18"
 ropus = "0.12"
 nnnoiseless = { version = "0.5", default-features = false }
+# Echo cancellation: WebRTC's AEC3 (what browsers use), as a pure-Rust port (BSD-3-Clause), so
+# every target builds it the way it builds the rest: no C++ toolchain, no meson, nothing at runtime.
+sonora = { version = "0.2", default-features = false }
 parking_lot = "0.12"
 
 # Soundboard uploads: decode what people pick (WAV, MP3, M4A/AAC, OGG Vorbis, FLAC…), pure Rust.
@@ -242,6 +245,42 @@ opt-level = "s"
 [profile.release.package.winit]
 opt-level = "s"
 [profile.release.package.accesskit]
+opt-level = "s"
+# WebRTC's once-per-call parts: the DTLS handshake and its certificate, the SDP, mDNS, and SCTP for
+# data channels (Yap opens none). RTP, SRTP, ICE and the jitter buffer keep opt-level 3.
+[profile.release.package.rtc-dtls]
+opt-level = "s"
+[profile.release.package.rtc-sctp]
+opt-level = "s"
+[profile.release.package.rtc-datachannel]
+opt-level = "s"
+[profile.release.package.rtc-sdp]
+opt-level = "s"
+[profile.release.package.rtc-mdns]
+opt-level = "s"
+[profile.release.package.rcgen]
+opt-level = "s"
+[profile.release.package.x509-parser]
+opt-level = "s"
+[profile.release.package.der-parser]
+opt-level = "s"
+[profile.release.package.asn1-rs]
+opt-level = "s"
+[profile.release.package.yasna]
+opt-level = "s"
+[profile.release.package.http]
+opt-level = "s"
+[profile.release.package.url]
+opt-level = "s"
+[profile.release.package.idna]
+opt-level = "s"
+[profile.release.package.regex-lite]
+opt-level = "s"
+# sonora's gain control and noise suppression never run (Yap uses only its echo canceller, AEC3,
+# which keeps opt-level 3), but they're linked in.
+[profile.release.package.sonora-agc2]
+opt-level = "s"
+[profile.release.package.sonora-ns]
 opt-level = "s"
 
 [profile.dev]
