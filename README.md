@@ -5,7 +5,7 @@
   <img alt="Yap in its Windows 98 look: channels and a voice call on the left, a conversation with a poll and dice rolls on the right" src="docs/screenshot-dark.png">
 </picture>
 
-A small, calm Discord for one group of friends: **text channels and voice
+A small, calm chat app for one group of friends: **text channels and voice
 channels**, plus a few extras. You run it yourself, for free, on Cloudflare.
 Voice goes straight between friends as high-quality Opus, so it sounds better
 than most chat apps and costs nothing to run.
