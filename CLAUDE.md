@@ -159,6 +159,7 @@ default 8790), `--var TEST_HANGS:1` (a hang can start a second from now, so the 
 
 ## Docs map
 - `README.md` — what Yap is; `SELF_HOSTING.md` — run your own server.
+- `examples/tiny-client.mjs` — a ~90-line Node client (sign in or `--signup`, one text channel, send lines) for people building on Yap; README › Build on Yap. Keep it working when `hello`/`ready`/`history`/`message`/`send` change.
 - `PROTOCOL.md` — wire protocol + voice connection rules.
 - `PHILOSOPHY.md` — what Yap is and refuses to become.
 - `PATTERNS.md` — techniques + gotchas (Workers, WebRTC, audio).

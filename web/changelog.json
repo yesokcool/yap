@@ -1,6 +1,14 @@
 {
-  "current": "0.47.1",
+  "current": "0.47.2",
   "releases": [
+    {
+      "version": "0.47.2",
+      "date": "2026-10-12",
+      "title": "Build on Yap",
+      "items": [
+        "For people building on Yap: a \"Build on Yap\" guide and a tiny example client."
+      ]
+    },
     {
       "version": "0.47.1",
       "date": "2026-10-12",

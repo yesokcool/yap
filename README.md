@@ -82,6 +82,28 @@ one call suits up to about eight people.
 [SECURITY.md](SECURITY.md) explains what protects what, in plain words.
 [PHILOSOPHY.md](PHILOSOPHY.md) explains what Yap is and refuses to become.
 
+## Build on Yap
+
+The server is a complete chat-and-voice backend on its own, so you can keep it
+and write your own client, bot or bridge on top:
+
+- **The server** is `worker/`. [SELF_HOSTING.md](SELF_HOSTING.md) sets one up.
+- **The protocol** is [PROTOCOL.md](PROTOCOL.md): every message a client sends
+  and receives, signing in, history, uploads, and how voice connects (WebRTC,
+  person to person).
+- **A tiny example client** is [`examples/tiny-client.mjs`](examples/tiny-client.mjs).
+  It's under 100 lines, needs Node 22 and nothing else, signs in, shows a text
+  channel live and sends what you type:
+
+  ```sh
+  node examples/tiny-client.mjs https://chat.example.com <invite key> <name> <password>
+  ```
+
+  Add `--signup` to make the account first (the first account on a new server
+  is the owner) and `--channel <name>` to pick a channel.
+- **Full clients** to borrow from: the web app (`web/`, plain JavaScript), the
+  desktop app (`desktop/`, Rust) and the iPhone/Mac app (`apple/`, SwiftUI).
+
 ## Developing
 
 ```sh
