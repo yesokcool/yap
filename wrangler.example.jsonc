@@ -47,7 +47,7 @@
   "vars": {
     // Your server's address, for links in phone pushes. Default: wherever people connect.
     // "PUBLIC_URL": "https://chat.example.com",
-    // Yap is AGPL-3.0: if you run a changed copy for others, link your changed source here.
+    // Optional: where the sidebar's Source link points (your copy of the code).
     // "SOURCE_URL": "https://github.com/you/yap",
     // A Minecraft server's status in the sidebar.
     // "MINECRAFT_SERVER": "mc.example.com:25565",

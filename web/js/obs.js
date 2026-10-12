@@ -13,8 +13,8 @@
  * it says "Paused: waiting for <name> to join <channel>." and joins again by
  * itself as soon as its account is back.
  *
- * It plays the call the way VDO.Ninja's OBS view does (AGPL-3.0-only, like
- * Yap; source: https://github.com/steveseguin/vdo.ninja, read at commit
+ * It plays the call the way VDO.Ninja's OBS view does (VDO.Ninja is
+ * AGPL-3.0-only; source: https://github.com/steveseguin/vdo.ninja, read at commit
  * 0ac8228: lib.js › setupIncomingVideoTracking, updateIncomingAudioElement,
  * playoutdelay; main.js › the window.obsstudio defaults). No code is copied,
  * the approach is: each person's track straight into a media element of its

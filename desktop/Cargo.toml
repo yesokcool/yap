@@ -3,7 +3,7 @@ name = "yap"
 version = "0.15.0"
 edition = "2024"
 description = "Native desktop client for Yap (text + voice)"
-license = "AGPL-3.0-only"
+license = "MIT"
 publish = false
 
 [[bin]]

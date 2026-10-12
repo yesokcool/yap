@@ -1,7 +1,7 @@
 {
   "name": "yap",
   "private": true,
-  "license": "AGPL-3.0-only",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "node tools/stamp.mjs && wrangler dev",
@@ -33,5 +33,5 @@
     "typescript": "^7.0.2",
     "wrangler": "^4.147.0"
   },
-  "version": "0.47.0"
+  "version": "0.47.1"
 }

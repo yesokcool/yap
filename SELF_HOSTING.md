@@ -126,7 +126,6 @@ A group of friends won't come close; `GET /api/admin/stats` shows the numbers.
 
 ## The license
 
-Yap is AGPL-3.0. Run it for anyone you like. If you change the code and other
-people use your changed version, offer them your changed source: put it
-somewhere public and set `"SOURCE_URL"` under `"vars"`. The Source link in
-the app's sidebar then points there.
+Yap is under the MIT License. Run it for anyone you like and change whatever
+you want; keep the license notice with the code. If you'd like the Source link
+in the app's sidebar to point at your copy, set `"SOURCE_URL"` under `"vars"`.

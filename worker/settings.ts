@@ -4,9 +4,8 @@
 // config (with or without these vars, as literal strings) still fit.
 
 /**
- * Where Yap's source code lives (set when it's published). Yap is AGPL-3.0:
- * if you run a changed copy for other people, point SOURCE_URL at your changed
- * source (section 13).
+ * Where Yap's source code lives (set when it's published). Yap is MIT-licensed;
+ * a server running its own copy can point SOURCE_URL at that code instead.
  */
 export const UPSTREAM_SOURCE = '';
 
