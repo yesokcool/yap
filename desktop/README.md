@@ -65,6 +65,8 @@ Wayland (+ libxkbcommon) and an OpenGL driver (Mesa), which every desktop has.
 yap                                  # the app; first run asks for the invite link
 yap --server 'https://chat.example.com/#key=K'   # pre-fill your server
 yap --config /tmp/other.json         # a second identity / test profile
+yap --remote mute                    # tell the running app: mute, unmute, toggle-mute,
+                                     # deafen, undeafen, toggle-deafen, status (macOS, Linux)
 yap --list-devices
 RUST_LOG=yap=debug yap               # more logging
 ```
@@ -95,7 +97,8 @@ keychain, and unlock with it once connected; `-` = stay locked),
 hidden ones, 1–3, e.g. `3:1`), `YAP_DEBUG_DRAW_CONFIRM=1` (Clear's choices
 open), `YAP_DEBUG_DRAW_SAVE=1` (archive the board to the gallery once),
 `YAP_DEBUG_AUDIO=silence` + `YAP_DEBUG_OPEN=voice` (join the first voice
-channel with no real mic or speakers; `soundboard` does that too and opens
+channel with no real mic or speakers; `YAP_DEBUG_AUDIO=wav:<file>` has that
+WAV, looped, as the mic instead — talking while muted, a clipping mic; `soundboard` does that too and opens
 it; `watch` watches the first person sharing their screen; `share` shares
 and `share-dialog` opens Share Screen, both with `YAP_DEBUG_SCREEN=pattern`:
 the only thing offered is then a synthetic test pattern, never the real
@@ -104,9 +107,13 @@ Apple's picker, which only opens on a click), `YAP_DEBUG_OPEN=doodle|sound[:chim
 `YAP_DEBUG_RESET_MAIN=ask` with `YAP_DEBUG_OPEN=settings:6` (Invite with the
 "Reset main link?" popup open; `press` also presses Reset link once
 connected as the owner, so only ever against a test server),
-`YAP_DEBUG_HINT=weak|relay|cant|reconnecting` (in voice, show that
+`YAP_DEBUG_HINT=weak|relay|cant|reconnecting|own` (in voice, show that
 connection hint on everyone else; `reconnecting` also says your own call is
-reconnecting), `YAP_DEBUG_HEAR=1` with `YAP_DEBUG_AUDIO=silence` +
+reconnecting; `own` shows "Your connection is dropping some of your audio"),
+`YAP_DEBUG_PTT=latched` (in a push-to-talk call, the voice panel's "Live —
+tap to stop" as if double-tapped), `YAP_DEBUG_MIC_TEST=1` with
+`YAP_DEBUG_AUDIO` + `YAP_DEBUG_OPEN=settings:2` (start Test mic once: the
+meter and "Too loud (clipping)"), `YAP_DEBUG_HEAR=1` with `YAP_DEBUG_AUDIO=silence` +
 `YAP_DEBUG_OPEN=settings:2` (start Hear yourself once),
 `YAP_DEBUG_AUDIO_FAIL=mic|speakers[@secs]` (fake a stream error once, 5 s
 in by default: the recovery path without real devices),
@@ -375,9 +382,12 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   each time Settings opens). Settings' tabs follow the web's order: Look,
   Profile, Voice, Notifications, Account, Owner & mods, Invite, then About.
 - **Settings › Voice and Notifications in the web's groups:** Voice is
-  *Mic & output* (microphone, output, Hear yourself, Call report), *How you talk*
+  *Mic & output* (microphone, output, Lower shared media while friends
+  talk, Hear yourself, Call report), *How you talk*
   (input mode; the sensitivity meter, slider and Test mic in voice
-  activity only; the push-to-talk key in push-to-talk only; noise
+  activity only; the push-to-talk key, Push-to-talk click and "double-tap
+  to stay live" in push-to-talk only; the Mute, Deafen and Push-to-mute
+  keys; Remind me when I talk while muted; noise
   suppression, echo cancellation, automatic gain), *Sounds* (join & mute blips — and the
   @mention / ping chimes —, your join chime, soundboard volume and mute),
   then *Advanced*, folded each time Settings opens (quality, Hide my IP
@@ -465,7 +475,11 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   your zone at 100 %, the rest of Space at 0 %), "Nearby is louder",
   "Everyone" — eased over ~0.4 s so doorways crossfade, applied as per-person
   factors on top of your own volume settings (people in the call but not on
-  Space are left alone). The "your room" panel shows the zone, who's here (in
+  Space are left alone). In "Nearby is louder", and for the people in your
+  own room, voices also come from the **left or right**, where people stand
+  on screen (pan = dx / 400, the middle within 60 units; the near ear stays
+  full and the far one never under a quarter; eased with the volume; the
+  mixer pans each voice, `audio/space_sound.rs` › `voice_pan`, `pan_gains`). The "your room" panel shows the zone, who's here (in
   the call? 🔥 / 💧?), the voice picker and a hint. **Games over
   `space.game`:** `sync` on every `space.state` (we also announce our own
   effects and best lap then); the **ball** (walk into it to kick; the last
@@ -527,19 +541,53 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   share, and the owner/mod actions: make or remove mod, Reset password…, Ban…,
   asking first; nothing for your own row), voice
   activity with a threshold (the web's gate: it opens a little *before* you
-  speak and ignores a steady fan), push-to-talk (global, with a 200 ms tail),
+  speak and ignores a steady fan), push-to-talk (global, with a 200 ms tail;
+  a quiet click when it opens and closes, for your ears only — Settings ›
+  Voice › Push-to-talk click, on; double-tap the key within 400 ms to stay
+  live, "Live — tap to stop" in the voice panel, the next press lets go),
   always on, input/output device pickers (the system default is followed
   when it changes), a level meter (the mic only opens in a call or while
-  **Test mic** is on, and the test stops when you leave Settings › Voice),
+  **Test mic** is on, and the test stops when you leave Settings › Voice;
+  red with "Too loud (clipping)" when the mic's own peaks hit −1 dBFS three
+  times within 2 s, shown 3 s — the web's numbers),
+  **global Mute, Deafen and Push-to-mute keys** next to push-to-talk's
+  (Settings › Voice, none by default; bound the same way, and a key can come
+  with Ctrl / Alt / Shift / ⌘ held, "Ctrl+Shift+M"; they work in a call, also
+  outside the window; push-to-mute holds you muted whatever the mode, a
+  "cough button", and the Mute button shows Muted while it's held; a key
+  that's already another one's is refused; polled only
+  once one is set, so nobody who never sets one meets the Mac's Input
+  Monitoring prompt; a quick tap seen by both the poller and the window
+  toggles once), and in the window **Ctrl+Shift+M** mutes and
+  **Ctrl+Shift+D** deafens (⌘ on a Mac), like the web — unless a global
+  key is that same combination, which then does it; the buttons' tooltips
+  say so, **"You're muted"** (talking while muted — the gate
+  measures your level before the mute: 30 ms over where voice activity
+  opens, or push-to-talk pressed — plays a soft blip, two low notes, and
+  shows "You're muted" in a balloon under the Mute button, at most every 5 s,
+  never while deafened or holding push-to-mute; the first time on a
+  computer the balloon also says "That sound means you're muted. Turn it off
+  in Settings › Voice."; Settings › Voice › Remind me when I talk while
+  muted, on), **your volume on the row** (next to someone in a voice channel
+  when you've changed it for you: "60 %" / "150 %", or a muted speaker at 0;
+  their ring dimmed while someone you've turned to 0 talks; Ctrl + scroll,
+  ⌘ + scroll on a Mac, over their row changes it in 5 % steps),
   **Hear yourself** (Settings › Voice › Mic check: 4 s of exactly what a call
   sends — noise removal, gain, voice activity, Opus at the call's quality —
   played back; in a push-to-talk call, hold the key), quality
-  64/96/128/256/510 kbps (default 128), RNNoise noise suppression (default on),
+  64/96/128/256/510 kbps (default 128; 256 and 510 say what they cost, in
+  the spec's words: no dropout protection — RED's copy no longer fits a
+  packet — and several times the upload for each friend), RNNoise noise suppression (default on),
   **Echo cancellation** (default on; it applies at once, in a call too, and
   Hear yourself includes it), **Automatic gain** (default on), calls that survive reconnects and server
   restarts (no gap, no chimes), a quiet word next to someone when their
   connection is off (*weak connection*, *needs the voice relay* /
-  *can't connect*, *reconnecting…*), "Your mic is sending silence" in the
+  *can't connect*, *reconnecting…*), and one about your own: "Your
+  connection is dropping some of your audio" in the voice panel when most
+  people in the call (or the only one) report losing more than 3 % of
+  yours, three 2 s readings running (gone after three good ones; their RTCP
+  report blocks, `voice/loss.rs`; the web's rules), "Your mic is sending
+  silence" in the
   voice panel,
   **Hide my IP address in calls** (`"relay_only"` in config.json, like the
   web's `relayOnly`: every peer connection gathers TURN relay candidates only,
@@ -589,7 +637,10 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   *types* only), codec each way, the Opus fmtp, kbps, round trip, lost
   packets, audio patched over, frames RED rebuilt, the jitter buffer,
   ICE restarts / rebuilds / reconnects kept, how long *weak connection*
-  showed; then a timeline (`+mm:ss`, ≤ 2,000 lines: joins and leaves,
+  showed, and what they report losing of yours ("From you: they lost 0.4 %
+  of yours (their round trip 23 ms median)": their cumulative count against
+  the voice packets sent, from their first report on; "no reports from
+  them" before one); then a timeline (`+mm:ss`, ≤ 2,000 lines: joins and leaves,
   connection states, socket drops and the call kept, mute, settings and
   device changes, weak connection, a line per person every 10 s for the
   first minute then every minute, why it ended). Never an IP address
@@ -609,7 +660,11 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
     **Full screen** (or double-click the picture; Esc leaves), **Stop
     watching** (`"stop"`), and **Sound**: the share's sound volume, 0–100 %,
     per person, remembered (`"screen_volumes"` in config.json), apart from
-    their voice volume. Opening another channel or Draw/Space stops watching
+    their voice volume; with Settings › Voice › **Lower shared media while
+    friends talk** on (off by default), it eases to half of that while
+    someone in the call you'd hear is speaking (~150 ms) and back once nobody
+    has for 1 s (~600 ms) — the web's `Ducker` in the mixer
+    (`audio/duck.rs`), never changing the volume you set. Opening another channel or Draw/Space stops watching
     unless it's popped out (like the web). Their video is H.264 only
     (`profile-level-id=42e01f;packetization-mode=1`, which every client
     offers), reordered and decoded by OpenH264 on a thread of its own while
@@ -885,12 +940,19 @@ out of the codec), `--share-screen [smooth|sharp|max]` (once in voice, share a
 synthetic test pattern — 1280 × 720, colour bars, a moving square, a frame
 counter; never the real screen), `--share-sound` (with a stereo test tone as
 its sound), `--watch-screen` (watch the first person sharing in our channel;
-`SCREEN frames <n> <w>x<h> sound <bytes>B` each second, and `screenFrames`,
-`screenSize`, `screenSoundBytes`, `screenEncoded` in the SUMMARY). It logs `MENTION`, `REACTION`, `PING` lines, and for voice
+`SCREEN frames <n> <w>x<h> sound <bytes>B duck=<x>` each second, and `screenFrames`,
+`screenSize`, `screenSoundBytes`, `screenEncoded` in the SUMMARY),
+`--lower-media` (Lower shared media while friends talk: `duck=` drops to
+0.50 while someone else talks; the SUMMARY's `minDuck`), `--listen-remote`
+(answer `yap --remote`: `REMOTE listening`, `REMOTE Mute -> muted, in a
+call`; `YAP_REMOTE=<path>` puts the socket somewhere short, for both ends).
+It logs `MENTION`, `REACTION`, `PING` lines, and for voice
 `CHIME` (every join/leave chime it would play, sounds on or off),
 `OBSLISTEN Lounge: Ada` / `OBSLISTEN none` (the greyed "<name>'s OBS is
 still listening" rows, when they change), `RESUME` /
-`GHOST` (calls kept across reconnects), `HINT` (connection hints), `MIC`
+`GHOST` (calls kept across reconnects), `HINT` (connection hints; `HINT
+self dropping|ok` for your own), `NUDGE` (talking while muted: "you're
+muted", at most every 5 s), `MIC`
 (sending silence), `AUDIO` (a stream reopened), `ICE`, `HEAR`; the stats line
 each second has the jitter buffer (`jb=held/target ms`, `ins`/`drop`), the
 frames RED rebuilt (`red=`), `red+opus` where a direction uses RED, the
@@ -970,7 +1032,15 @@ description lists it first; native unpacks RED from the web and the web
 receives about twice the Opus rate; through the proxy, payload type 63 on
 every packet each way: Chrome's stats name Opus as the codec even then), and
 native's call report (`--call-report`: the header, the web user's block with
-the connection type and `red+opus` each way, the timeline, no IP address);
+the connection type and `red+opus` each way and "From you: they lost X % of
+yours", the timeline, no IP address); native muting itself while its WAV
+mic keeps talking gets "You're muted" (`NUDGE`) at once and at most every
+5 s; its own connection is never called the problem on a clean network,
+and with `YAP_IMPAIR=loss5` it says so (`HINT self dropping`);
+`yap --remote` (macOS, Linux; `--listen-remote`, the socket at a short
+`YAP_REMOTE` path): mute, status, deafen and unmute answer in words and the
+web's row shows each flag, talking while muted gets the nudge, an unknown
+command is refused and nothing answers once the app quits;
 an OBS link (the web's `/obs` page, listen-only) in native's call with its
 account (the web user) in it too: native connects to it and it hears native,
 with no join or leave chime for it (the `CHIME` lines are the web user's:
@@ -984,8 +1054,9 @@ in voice and its `watch.join` / `watch.leave` reach native, on and off);
 screen sharing both ways with synthetic pictures (a web page of its own: its
 getDisplayMedia is a moving 1280 × 720 canvas with a stereo tone): native
 watches the web's share (it arrives as H.264 although the web's Sharp preset
-prefers VP9, decodes at 1280 × 720, its sound on its own track; the web
-stopping ends it on native) and the web watches native's test pattern from
+prefers VP9, decodes at 1280 × 720, its sound on its own track, dipped to
+half while the web user talks with `--lower-media`; the web stopping ends
+it on native) and the web watches native's test pattern from
 the LIVE badge (H.264 at 1280 × 720 in the web's player, the share's sound
 on its own track; Stop watching stops native's encoder); in both, RED
 leads only native's voice section, the share's sound stays Opus-first; and
@@ -1062,7 +1133,7 @@ its own, `vault.js` opens those (`node desktop/tests/vault-crosscheck.mjs`).
 | Noise suppression | `nnnoiseless` (RNNoise) | Pure Rust. |
 | Echo cancellation | `sonora` (WebRTC's AEC3, the canceller browsers use) | A pure-Rust port, BSD-3-Clause, checked against WebRTC's own C++ tests; builds for all three targets like everything else. The C++ original (`webrtc-audio-processing`) needs meson, ninja and abseil at build time, which `build-cross.sh` can't give cargo-xwin or zig; SpeexDSP's canceller is weaker, and the OS's (macOS voice processing) would cover one platform. |
 | Audio I/O | `cpal` (WASAPI / ALSA / CoreAudio) + own sinc resampler | Prefers 48 kHz; resamples when a device can't. |
-| Push-to-talk | own poller: `GetAsyncKeyState`, evdev `EVIOCGKEY`, X11 `XQueryKeymap` (dlopen), `CGEventSourceKeyState` | Sees key down *and* up globally without grabbing the key from games. |
+| Push-to-talk and the other global keys | own poller: `GetAsyncKeyState`, evdev `EVIOCGKEY`, X11 `XQueryKeymap` (dlopen), `CGEventSourceKeyState` | Sees key down *and* up globally without grabbing the key from games. |
 | Screen video | H.264 constrained baseline: VideoToolbox's hardware encoder on a Mac (`objc2-video-toolbox`), else `openh264` (OpenH264 from its bundled source), which also decodes | Every client takes H.264; OpenH264 builds from C++ source for all three targets. |
 | Screen capture | ScreenCaptureKit (`objc2-screen-capture-kit`, weakly linked: `build.rs`), Windows.Graphics.Capture + WASAPI process loopback (`windows`), X11 with MIT-SHM (`x11-dl`, dlopen) | Native APIs, no extra libraries to ship. |
 
@@ -1098,7 +1169,9 @@ test pattern), `headless.rs`.
   are webrtc-rs's defaults minus transport-wide congestion control, which
   only makes libwebrtc pad audio-only calls with bandwidth probes
   (PROTOCOL.md › Voice › No transport-cc on audio).
-- The encoder runs per peer at min(your setting, their `maxaveragebitrate`),
+- The encoder runs per peer at min(your setting, their `maxaveragebitrate`)
+  (browsers don't hold themselves to ours, so what they send runs at their
+  own setting: PROTOCOL.md › Voice),
   DTX off, 20 ms frames, mono (`sprop-stereo=0`), and every packet carries
   the RFC 6464 audio level so browsers show our speaking ring. Its
   packet-loss hint follows the far side's receiver reports (libwebrtc's
@@ -1130,7 +1203,11 @@ test pattern), `headless.rs`.
   ~3 dB/s, never clips; optional), then the transmit gate — a port of the
   web's `gate-worklet.js` (PROTOCOL.md › Voice › Transmit gate): hysteresis,
   a 450 ms hold, a 40 ms pre-roll in voice-activity mode only, a 200 ms
-  push-to-talk tail, 5/15 ms fades, an adaptive noise floor. Mute/deafen
+  push-to-talk tail (and its click, read off the gate on the capture thread:
+  opening, and closing after the tail), 5/15 ms fades, an adaptive noise
+  floor. The level is measured before the mute, so talking while muted is
+  noticed there ("You're muted"); the raw mic's peaks feed "Too loud
+  (clipping)". Mute/deafen and push-to-mute
   are a hard switch after it; a muted mic sends silence rather than
   stopping packets, like a disabled browser track. If processing falls
   behind, noise removal is skipped until it catches up (fail open).
@@ -1196,15 +1273,39 @@ test pattern), `headless.rs`.
   web's).
 - Speaking rings come from decoded audio levels (yours from the mic gate).
 
-### Push-to-talk by platform
+### Push-to-talk (and the other global keys) by platform
+
+The push-to-talk, Mute, Deafen and Push-to-mute keys all go through the same
+poller (`ptt.rs`), so they work the same way:
 
 - **Windows:** works everywhere, keyboard and mouse buttons 3–5.
 - **Linux X11:** works everywhere (keyboard; middle mouse).
-- **Linux Wayland:** global PTT reads `/dev/input` — add yourself to the `input`
-  group (`sudo usermod -aG input $USER`, log out/in). Without that it only works
+- **Linux Wayland:** global keys read `/dev/input` — add yourself to the `input`
+  group (`sudo usermod -aG input $USER`, log out/in). Without that they only work
   while the Yap window is focused. (The XDG GlobalShortcuts portal is the
-  future, permission-free route.)
-- **macOS:** needs Input Monitoring permission for use outside the window.
+  future, permission-free route.) Meanwhile `yap --remote mute` (or
+  `toggle-mute`, `deafen`…) from the compositor's own shortcuts does it
+  without any permission.
+- **macOS:** needs Input Monitoring permission for use outside the window
+  (asked only once a key needs it: push-to-talk mode, or a Mute / Deafen /
+  Push-to-mute key set).
+
+### `yap --remote` (macOS, Linux)
+
+`yap --remote mute|unmute|toggle-mute|deafen|undeafen|toggle-deafen|status`
+tells the app that's running with the same settings file (`--config` picks
+another) and prints its answer, `muted, in a call`; exit 1 when no app is
+listening. For Stream Decks (a "run a command" button) and Wayland
+shortcuts. The rules are the buttons' (unmuting undeafens; toggle-mute while
+deafened turns both off). The app listens on a Unix socket,
+`yap-remote-<8 hex of the settings path's SHA-256>.sock`, in
+`$XDG_RUNTIME_DIR` on Linux or next to the settings file, only while its
+window is open: owner-only (0600; connecting needs write permission), each
+connection's peer user id checked against ours, one short line read with a
+timeout. It never replaces a live socket or anything that isn't a dead
+socket of yours. Nothing listens on the network. `YAP_REMOTE=<path>` moves
+it (both ends must agree; Unix socket paths stop at ~103 bytes). Not on
+Windows yet (a named pipe would do; its global keys see everything there).
 
 ## Not done yet
 
@@ -1221,9 +1322,31 @@ test pattern), `headless.rs`.
   ones have no glyph).
 - Screen-reader support (accesskit is compiled out to keep the binary small).
 - Scroll-bar arrow buttons (egui's scroll area has no hook for them).
+- `yap --remote` on Windows (a named pipe, owner-only, remote clients
+  refused, would do it; the global keys already see everything there), and
+  Space panning for the floor piano and drums (only voices are panned, like
+  the web).
 
 ## Please test by hand
 
+- **Round 10's voice controls on real keyboards, mice and mics:** the
+  Mute / Deafen / Push-to-mute keys as global keys on Windows, Linux X11,
+  Linux Wayland (with and without the `input` group, and `yap --remote` from
+  a compositor shortcut) and macOS (the Input Monitoring prompt only once a
+  key is set), a combination (Ctrl+Shift+M) while another app has the focus,
+  a mouse button as push-to-mute, typing in the composer with a bare-letter
+  key set (it toggles: that's why combinations exist); **push-to-talk feel**
+  — the click opening and closing (and not twice), double-tap to stay live
+  and tap to stop, nothing latching by accident in quick back-and-forth;
+  **"You're muted"** on a real mic (a cough or a keyboard shouldn't set it
+  off, talking should, and no more than every 5 s; not while deafened or
+  holding push-to-mute); **"Too loud (clipping)"** with a mic turned all the
+  way up; **Ctrl / ⌘ + scroll** over a voice row with a real mouse wheel and a
+  trackpad; **Space panning** with headphones (someone walking past moves
+  across; the far ear never goes silent); **Lower shared media** with a real
+  screen share's sound and friends talking; **"Your connection is dropping
+  some of your audio"** on a really lossy uplink (a phone hotspot, busy
+  Wi‑Fi) — and that it stays quiet on a good one.
 - **Voice on real hardware and networks** (the tests run on localhost with
   WAV mics): the gate and its pre-roll on a real mic (soft starts, a fan, a
   keyboard), Automatic gain with a quiet and a loud mic (and with RNNoise

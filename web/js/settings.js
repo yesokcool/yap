@@ -20,6 +20,8 @@ const DEFAULTS = {
   mode: 'vad', // vad | ptt | open
   vadThreshold: -50, // dBFS
   pttKey: 'Backquote',
+  pttClick: true, // a quiet click (your ears only) when push-to-talk opens and closes
+  pushToMuteKey: '', // held = muted for a moment (a "cough button"), in any mode; '' = none
   bitrate: 128000,
   music: false,
   noiseSuppression: true, // RNNoise wherever it runs, else the browser's own (voice.js)
@@ -36,8 +38,11 @@ const DEFAULTS = {
   desktopNotify: '', // all | mentions | off; '' = derive from `notifications`
   muted: false,
   deafened: false,
+  mutedReminder: true, // a soft blip and "You're muted" when you talk while muted (PROTOCOL.md › Transmit gate)
+  mutedReminderExplained: false, // the first reminder on this device said what the sound means
   volumes: {}, // uid -> 0..2 (their voice)
   screenVolumes: {}, // uid -> 0..1 (the sound of their screen share)
+  duckMedia: false, // Watch together and screen-share sound go to half while friends talk (PROTOCOL.md › Shared media, for yourself)
   channel: 'general',
   lastRead: {}, // channelId -> ts
   theme: 'dark', // dark | light | system

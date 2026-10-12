@@ -19,7 +19,11 @@ struct VoiceBar: View {
                         .foregroundStyle(voice.isConnected ? Theme.ok : Theme.warn)
                     VStack(alignment: .leading, spacing: 0) {
                         Text(channel?.name ?? "Voice").font(Theme.chromeBold).foregroundStyle(Theme.text).lineLimit(1)
-                        Text(statusLine).font(Theme.small).foregroundStyle(Theme.hint).lineLimit(1)
+                        Text(statusLine)
+                            .font(Theme.small)
+                            .foregroundStyle(statusIsWarning ? Theme.warn : Theme.hint)
+                            .lineLimit(statusIsWarning ? 2 : 1)
+                            .help(voice.ownConnectionWeak ? TalkWords.ownConnectionDetail(lost: voice.engine.ownLinkLost) : statusLine)
                     }
                 }
                 .contentShape(.rect)
@@ -45,10 +49,18 @@ struct VoiceBar: View {
         #endif
     }
 
+    /// "You're muted", "Your connection is dropping some of your audio": in the warning color.
+    private var statusIsWarning: Bool {
+        let voice = model.voice
+        return !voice.isResuming && !voice.micSendsSilence && (voice.mutedNudgeShown || voice.ownConnectionWeak)
+    }
+
     private var statusLine: String {
         let voice = model.voice
         if voice.isResuming { return VoiceHintText.resuming }
         if voice.micSendsSilence { return VoiceHintText.silence }
+        if let cue = CallCue.line(voice) { return cue }
+        if voice.ownConnectionWeak { return TalkWords.ownConnection }
         if let quality = voice.sharing { return ScreenText.sharing(quality) }
         if !voice.isConnected { return voice.micDenied ? "Listening only — no mic" : "Connecting…" }
         var parts: [String] = []
@@ -93,6 +105,7 @@ struct MuteButton: View {
         }
         .buttonStyle(Win98ToggleButtonStyle(isOn: muted, compact: compact))
         .sensoryFeedback(.impact(weight: .light), trigger: settings.muted)
+        .help(muted ? "Unmute (⌘⇧M)" : "Mute (⌘⇧M)")
     }
 }
 
@@ -106,18 +119,23 @@ struct PushToTalkButton: View {
 
     var body: some View {
         let down = model.voice.engine.pushToTalkDown
+        let latched = model.voice.engine.pushToTalkLatched
         Group {
             if compact {
-                Image(systemName: "waveform")
+                Image(systemName: latched ? "waveform.badge.mic" : "waveform")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(down ? Theme.ok : Theme.text)
                     .frame(minWidth: 30, minHeight: 26)
                     .offset(x: down ? 1 : 0, y: down ? 1 : 0)
                     .bevel(down ? .pressed : .raised, fill: down ? Theme.light : Theme.face)
+                    .help(latched ? TalkWords.live : "Hold to talk; double-tap to stay live")
             } else {
                 VStack(spacing: 4) {
-                    Image(systemName: "waveform").font(.system(size: 26, weight: .bold))
-                    Text(down ? "Talking…" : "Hold to talk").font(Theme.chromeBold)
+                    Image(systemName: latched ? "waveform.badge.mic" : "waveform").font(.system(size: 26, weight: .bold))
+                    Text(latched ? TalkWords.live : down ? "Talking…" : "Hold to talk").font(Theme.chromeBold)
+                    if !down {
+                        Text("Double-tap to stay live").font(Theme.small).foregroundStyle(Theme.hint)
+                    }
                 }
                 .foregroundStyle(down ? Theme.ok : Theme.text)
                 .frame(maxWidth: .infinity)
@@ -134,7 +152,8 @@ struct PushToTalkButton: View {
         .onChange(of: pressed) { _, isPressed in model.voice.setPushToTalk(isPressed) }
         .sensoryFeedback(.impact(weight: .medium), trigger: pressed)
         .accessibilityLabel("Push to talk")
-        .accessibilityHint("Hold to talk")
+        .accessibilityValue(latched ? TalkWords.live : down ? "Talking" : "")
+        .accessibilityHint("Hold to talk. Double-tap to stay live; tap again to stop.")
         .accessibilityAddTraits(.isButton)
     }
 }
@@ -218,12 +237,23 @@ struct VoicePanel: View {
                     }
                     .labelStyle(.titleAndIcon)
 
+                    if voice.mutedNudgeShown {
+                        TooltipNote98(text: TalkWords.youreMuted, systemImage: "mic.slash.fill")
+                    }
+
                     // Said only when someone set one quality for the whole channel (⋯ changes it).
                     if let shared = CallQuality.shared(model.client.channelsById[channelId]) {
                         Text(shared)
                             .font(Theme.chrome)
                             .foregroundStyle(Theme.text)
                             .help("Set for everyone in this channel (⋯ changes it)")
+                        if let bitrate = model.client.channelsById[channelId]?.bitrate, let warning = VoiceSettings.qualityWarning(bitrate) {
+                            WarningLine98(text: warning)
+                        }
+                    }
+
+                    if voice.ownConnectionWeak {
+                        WarningLine98(text: TalkWords.ownConnection, detail: TalkWords.ownConnectionDetail(lost: voice.engine.ownLinkLost))
                     }
 
                     if voice.micDenied {
@@ -262,27 +292,36 @@ struct VoicePanel: View {
 
     private func person(_ session: Session) -> some View {
         let user = model.client.user(session.uid)
-        let speaking = model.voice.engine.speaking.contains(session.sid)
+        let speaking = model.voice.isSpeaking(session)
         let me = session.sid == model.voice.ownSid
         let hint = me ? nil : model.voice.hint(for: session.sid)
         let connecting = !me && hint == nil && model.voice.engine.peerStates[session.sid] != .connected
+        // Your volume for them, on the row; someone at 0 % speaks with a dimmed ring.
+        let volume = me ? 1 : model.voice.settings.volumes[session.uid] ?? 1
+        let silenced = PersonVolume.isMuted(volume)
         return HStack(spacing: 8) {
-            Avatar(user: user, size: 28, speaking: speaking)
+            Avatar(user: user, size: 28, speaking: speaking, speakingDimmed: silenced)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 5) {
                     Text(me ? "\(user?.name ?? "You") (you)" : (user?.name ?? "Someone"))
-                        .font(speaking ? Theme.chatBold : Theme.chat)
+                        .font(speaking && !silenced ? Theme.chatBold : Theme.chat)
                         .foregroundStyle(connecting ? Theme.grayText : Theme.text)
+                    if !me { VolumeBadge98(volume: volume) }
                     if session.voice?.screen == true {
                         LiveBadge98(session: session)
                     }
                 }
                 if let hint {
                     VoiceHint98(hint: hint)
-                } else {
-                    Text(connecting ? "Connecting…" : speaking ? "Speaking" : "")
+                } else if me, model.voice.ownConnectionWeak {
+                    Text("your connection is dropping audio")
                         .font(Theme.small)
-                        .foregroundStyle(speaking ? Theme.ok : Theme.grayText)
+                        .foregroundStyle(Theme.warn)
+                        .lineLimit(1)
+                } else {
+                    Text(connecting ? "Connecting…" : speaking ? (silenced ? "Speaking (muted for you)" : "Speaking") : "")
+                        .font(Theme.small)
+                        .foregroundStyle(speaking && !silenced ? Theme.ok : Theme.grayText)
                 }
             }
             Spacer()
@@ -295,6 +334,7 @@ struct VoicePanel: View {
         .padding(.horizontal, 6)
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
+        .accessibilityValue(me ? "" : PersonVolume.spoken(volume) ?? "")
         .voiceHintHelp(hint, name: user?.name ?? "They")
         .liveBadgeAction(session)
         .voicePersonMenu(session)

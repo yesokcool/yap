@@ -206,6 +206,18 @@ louder than that: every client plays at `gain × your volume` through a
 
 ## Gotchas & lessons
 
+- **stasel/WebRTC hands out new wrapper objects** from `pc.transceivers`,
+  `receiver.track` and `track.source` on every call: never compare them with
+  `===`, and never read `source.volume` back (a fresh wrapper says 0). Find the
+  voice by position and remember what you applied (the iPhone/Mac app's
+  per-person volume never worked until 2026-10-11 because of this).
+- **StereoPannerNode puts the middle at −3 dB:** pan with per-ear gains.
+  **Ctrl+wheel zooms the page** unless the listener is non-passive (a trackpad
+  pinch is a Ctrl+wheel too); egui turns it into `zoom_delta`, so read raw
+  `MouseWheel` events. **A volume you set on an embedded player comes back** as
+  if the person had set it: remember what you sent. **A test that changes
+  shared state** (mute, volumes) must restore it in `finally`.
+
 - **OBS's browser stops capturing a quiet page.** CEF 127 drops its capture
   2 s after Chromium marks the page silent (under −72.25 dBFS) and starts a new
   one at the next sound, cutting the first words. Fill only the silences with

@@ -1,6 +1,6 @@
 [package]
 name = "yap"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2024"
 description = "Native desktop client for Yap (text + voice)"
 license = "AGPL-3.0-only"
@@ -109,6 +109,8 @@ objc2-screen-capture-kit = { version = "0.3", default-features = false, features
 objc2-video-toolbox = { version = "0.3", default-features = false, features = ["std", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession", "objc2-core-media", "objc2-core-video"] }
 block2 = "0.6"
 dispatch2 = "0.3"
+# `yap --remote`: the socket's peer and our own user id (already in the build through other crates).
+libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11-dl = "2.21"

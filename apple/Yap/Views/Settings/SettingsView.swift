@@ -69,7 +69,7 @@ struct SettingsPageContent98: View {
             AwayGroup98()
         case .voice:
             MicOutputGroup98()
-            VoiceGroup()
+            VoiceGroup().id("talk")
             SoundsGroup98()
             SoundboardGroup98()
             CallReportGroup98()
@@ -100,10 +100,11 @@ struct SettingsPageView98: View {
                 .padding(10)
             }
             .task {
-                // Screenshots of a page's lower groups (YAP_SETTINGS_SCROLL=bottom).
-                guard DebugLaunch.current.settingsScroll == "bottom" else { return }
+                // Screenshots of a page's lower groups (YAP_SETTINGS_SCROLL=bottom, or
+                // talk: Voice › How you talk at the top).
+                guard let scroll = DebugLaunch.current.settingsScroll else { return }
                 try? await Task.sleep(for: .milliseconds(600))
-                proxy.scrollTo("end", anchor: .bottom)
+                if scroll == "bottom" { proxy.scrollTo("end", anchor: .bottom) } else { proxy.scrollTo(scroll, anchor: .top) }
             }
         }
         .background(Theme.face)
@@ -242,6 +243,11 @@ struct MicOutputGroup98: View {
             if MicModes.offered {
                 MicModeRow98()
             }
+            Check98(title: TalkWords.dip, isOn: $voice.settings.dipSharedMedia)
+            Text(TalkWords.dipNote)
+                .font(Theme.small)
+                .foregroundStyle(Theme.hint)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -330,7 +336,7 @@ struct VoiceGroup: View {
                 }
                 Slider(value: $voice.settings.vadThreshold, in: VoiceSettings.vadRange, step: 1)
                 if let level = VoiceOptions.meterLevel(model) {
-                    LevelMeter(level: level, threshold: voice.settings.vadThreshold)
+                    LevelMeter(level: level, threshold: voice.settings.vadThreshold, tooLoud: VoiceOptions.meterTooLoud(model))
                 } else {
                     Text(VoiceOptions.meterOffNote)
                         .font(Theme.small)
@@ -338,6 +344,16 @@ struct VoiceGroup: View {
                 }
             }
             Text(SettingsText.pushToTalkNote)
+                .font(Theme.small)
+                .foregroundStyle(Theme.hint)
+                .fixedSize(horizontal: false, vertical: true)
+            Check98(title: TalkWords.pushToTalkClick, isOn: $voice.settings.pushToTalkClick)
+            Text(TalkWords.pushToTalkClickNote)
+                .font(Theme.small)
+                .foregroundStyle(Theme.hint)
+                .fixedSize(horizontal: false, vertical: true)
+            Check98(title: TalkWords.reminder, isOn: $voice.settings.mutedReminder)
+            Text(TalkWords.reminderNote)
                 .font(Theme.small)
                 .foregroundStyle(Theme.hint)
                 .fixedSize(horizontal: false, vertical: true)
@@ -412,6 +428,9 @@ struct VoiceAdvancedGroup98: View {
                         }
                     }
                 }
+            }
+            if let warning = VoiceSettings.qualityWarning(voice.settings.bitrate) {
+                WarningLine98(text: warning)
             }
             Text(SettingsText.qualityNote)
                 .font(Theme.small)
@@ -504,7 +523,7 @@ struct MicCheck98: View {
                     .accessibilityAddTraits(.updatesFrequently)
             }
             if model.voice.settings.mode != .voiceActivity, model.micCheck.phase == .recording {
-                LevelMeter(level: model.micCheck.level, threshold: model.voice.settings.vadThreshold)
+                LevelMeter(level: model.micCheck.level, threshold: model.voice.settings.vadThreshold, tooLoud: model.micCheck.tooLoud)
             }
             Text(VoiceOptions.hearNote)
                 .font(Theme.small)
@@ -593,26 +612,33 @@ enum AvatarImage {
     }
 }
 
-/// Mic level vs. the voice-activity threshold: a sunken bar, green when over.
+/// Mic level vs. the voice-activity threshold: a sunken bar, green when
+/// over; "Too loud (clipping)" under it when the peaks keep hitting the top.
 struct LevelMeter: View {
     var level: Double
     var threshold: Double
+    var tooLoud = false
 
     var body: some View {
         let db = level > 0 ? 20 * log10(level) : -100
         let fraction = { (v: Double) in max(0, min(1, (v + 80) / 80)) }
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Theme.window
-                (db > threshold ? Theme.ok : Theme.grayText)
-                    .frame(width: geo.size.width * fraction(db))
-                Theme.text.frame(width: 1)
-                    .offset(x: geo.size.width * fraction(threshold))
+        VStack(alignment: .leading, spacing: 3) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Theme.window
+                    (tooLoud ? Theme.danger : db > threshold ? Theme.ok : Theme.grayText)
+                        .frame(width: geo.size.width * fraction(db))
+                    Theme.text.frame(width: 1)
+                        .offset(x: geo.size.width * fraction(threshold))
+                }
+            }
+            .frame(height: 10)
+            .overlay(Bevel(style: .status))
+            .accessibilityHidden(true)
+            if tooLoud {
+                WarningLine98(text: TalkWords.tooLoud, detail: TalkWords.tooLoudDetail)
             }
         }
-        .frame(height: 10)
-        .overlay(Bevel(style: .status))
-        .accessibilityHidden(true)
     }
 }
 

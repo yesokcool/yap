@@ -121,6 +121,59 @@ public struct LinkQuality: Sendable, Equatable {
     }
 }
 
+/// "Your connection is dropping some of your audio" (PROTOCOL.md › Voice ›
+/// Connection hints › Your own connection): what each person reports
+/// receiving from us (`remote-inbound-rtp`'s `fractionLost`), judged every
+/// 2 s while we're sending. More than 3 % lost for most people in the call
+/// (or the only one) is a bad reading; shown after three bad readings in a
+/// row, gone after three good ones. Nothing on the wire.
+public struct OwnLinkQuality: Sendable, Equatable {
+    public static let lossLimit = 0.03
+    public static let run = 3
+
+    public private(set) var weak = false
+    /// What most people lost of ours at the last bad reading (the median), 0…1.
+    public private(set) var lost = 0.0
+    /// Consecutive bad (+) or good (−) readings.
+    private var streak = 0
+
+    public init() {}
+
+    /// One reading: the share each person (connected, reporting, while we
+    /// send) says they lost of ours. Nobody to judge by (alone, no reports
+    /// yet) = no hint, and the count starts over. Returns whether `weak` changed.
+    @discardableResult
+    public mutating func update(losses: [Double]) -> Bool {
+        guard !losses.isEmpty else {
+            let was = weak
+            reset()
+            return was
+        }
+        let badCount = losses.filter { $0 > Self.lossLimit }.count
+        // "Most": more than half (one of two losing ours says more about them).
+        let bad = badCount * 2 > losses.count
+        streak = bad ? max(1, streak + 1) : min(-1, streak - 1)
+        if bad {
+            let sorted = losses.sorted()
+            lost = sorted[sorted.count / 2]
+        }
+        let was = weak
+        if streak >= Self.run {
+            weak = true
+        } else if streak <= -Self.run {
+            weak = false
+        }
+        return was != weak
+    }
+
+    /// Nobody left in the call: start afresh.
+    public mutating func reset() {
+        weak = false
+        lost = 0
+        streak = 0
+    }
+}
+
 /// Someone turned up past 100 %: keep the boost from clipping. The SDK has
 /// no per-track processing, and WebRTC applies the gain with plain
 /// saturation, so this sets the gain itself from how loud they are: their

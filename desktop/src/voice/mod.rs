@@ -125,6 +125,12 @@ pub struct PeerInfo {
     pub rtt_ms: AtomicU32,
     /// Share of our packets they report lost (RTCP receiver reports), smoothed, in ‰.
     pub loss_permille: AtomicU32,
+    /// What they report about our voice (remote-inbound-rtp; PROTOCOL.md ›
+    /// Connection hints › Your own connection): reports so far, the latest
+    /// one's fraction lost (‰), and how many of our packets they've lost in all.
+    pub their_reports: AtomicU32,
+    pub their_fraction: AtomicU32,
+    pub their_lost: AtomicU64,
     /// The encoder's packet-loss setting (%): 0 = clean (CELT), else Hybrid + FEC.
     pub loss_hint: AtomicU8,
     /// ICE restarts since it was last connected.
@@ -499,6 +505,9 @@ impl VoiceEngine {
             connected_at: Mutex::new(None),
             rtt_ms: AtomicU32::new(0),
             loss_permille: AtomicU32::new(0),
+            their_reports: AtomicU32::new(0),
+            their_fraction: AtomicU32::new(0),
+            their_lost: AtomicU64::new(0),
             loss_hint: AtomicU8::new(0),
             restarts: AtomicU32::new(0),
             path: Mutex::new(None),
@@ -1181,6 +1190,11 @@ impl Peer {
         let lost = (reports != self.reports).then_some(fraction);
         self.reports = reports;
         let info = &self.ctx.info;
+        if reports > 0 {
+            info.their_fraction.store((fraction * 1000.0).round() as u32, Ordering::Relaxed);
+            info.their_lost.store(self.ctx.loss.total_lost() as u64, Ordering::Relaxed);
+            info.their_reports.store(reports, Ordering::Relaxed);
+        }
         if let Some(r) = rtt {
             info.rtt_ms.store(r.round().max(1.0) as u32, Ordering::Relaxed);
         }
@@ -1572,7 +1586,9 @@ async fn run_encoder(
         if !cfg.connected.load(Ordering::Relaxed) {
             continue;
         }
-        // Each direction runs at the lower of the two people's settings.
+        // We send them at most what they asked to receive (their maxaveragebitrate).
+        // Browsers don't do the same, so what they send us runs at their own setting
+        // (PROTOCOL.md › Voice: the receiver's value is a request, not a cap).
         let local = settings.bitrate.load(Ordering::Relaxed);
         let cap = cfg.remote_cap.load(Ordering::Relaxed);
         let bitrate = if cap > 0 { local.min(cap) } else { local };

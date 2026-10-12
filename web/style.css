@@ -388,6 +388,11 @@ a.channel { text-decoration: none; }
 .voice-member:has(.vq) .name { flex: 1 1 auto; min-width: 2em; } /* the note gives way first */
 .voice-member .vq.away { color: var(--gray); font-style: italic; }
 .voice-member .vq.blocked { color: var(--danger); }
+/* Your volume for them, when you've changed it: "60 %", or a muted speaker. */
+.voice-member .vol-tag { flex: none; display: flex; font-size: 10px; color: var(--gray); white-space: nowrap; }
+.voice-member .vol-tag .icon { width: 12px; height: 12px; }
+/* Someone you turned all the way down, talking: their ring, dimmed (a dull green that reads on light and dark). */
+.voice-member.silenced.speaking .avatar { box-shadow: 0 0 0 1px var(--dk), 0 0 0 3px #5a8f5a; }
 .viewers .voice-member { cursor: default; }
 
 /* ── Buddy icons ──────────────────────────────────────────────────────── */
@@ -431,6 +436,7 @@ a.channel { text-decoration: none; }
 .vp-more { flex: none; width: 18px; height: 14px; }
 .vp-shared { font-size: 11px; color: var(--text); }
 .vp-warn { font-size: 11px; color: var(--danger); }
+.vp-warn.own-weak { color: var(--warn); } /* a quiet word, like "weak connection" next to someone */
 .voice-panel .btn .icon { width: 13px; height: 13px; }
 .voice-panel [data-action="leave-voice"] .icon { color: var(--danger); }
 
@@ -453,7 +459,9 @@ a.channel { text-decoration: none; }
 .me-text { display: flex; flex-direction: column; min-width: 0; }
 .me-text .name { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .me-text .sub { font-size: 11px; color: var(--gray); }
-.me-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.me-actions { position: relative; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+/* A word by the Mute button (you're talking while muted; push-to-talk is latched on): a Windows tooltip above it. */
+.me-bubble { position: absolute; bottom: calc(100% + 2px); left: 2px; z-index: 2; max-width: calc(100% - 4px); overflow: hidden; text-overflow: ellipsis; padding: 1px 5px; background: var(--info); color: #000; font-size: 11px; white-space: nowrap; box-shadow: 0 0 0 1px #000; pointer-events: none; }
 .big-toggle { min-width: 0; min-height: 36px; gap: 6px; font-weight: 700; }
 .big-toggle .icon { width: 18px; height: 18px; }
 .big-toggle.on { color: var(--danger); }
@@ -773,6 +781,9 @@ dialog.confirm-sheet { width: min(360px, calc(100vw - 16px)); }
 .meter { position: relative; height: 16px; padding: 2px; background: var(--window); box-shadow: var(--thin-in); overflow: hidden; }
 .meter-fill { height: 100%; width: 0; background: repeating-linear-gradient(90deg, var(--meter) 0 8px, transparent 8px 10px); transition: width 60ms linear; }
 .meter-fill.hot { background: repeating-linear-gradient(90deg, var(--ok) 0 8px, transparent 8px 10px); }
+.meter-fill.clip { background: repeating-linear-gradient(90deg, var(--danger) 0 8px, transparent 8px 10px); }
+.clip-warn { font-size: 11px; font-weight: 700; color: var(--danger); }
+.warn-note { display: block; font-size: 11px; color: var(--warn); }
 .meter-mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); }
 .field .btn.small { align-self: flex-start; }
 

@@ -20,6 +20,7 @@
 
 use super::{Act, App, theme, theme::Pal};
 use crate::core::{Cmd, Model};
+use crate::audio::space_sound::voice_pan;
 use crate::protocol::SavedDrawing;
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Shape, Stroke, pos2, vec2};
 use serde_json::{Value, json};
@@ -148,6 +149,8 @@ pub struct SpaceUi {
     /// Others, drawn where they are now (gliding toward the server's spot), and their voice level.
     shown: HashMap<String, (f32, f32)>,
     vol: HashMap<String, f32>,
+    /// …and where their voice comes from (−1 left … 1 right).
+    pan: HashMap<String, f32>,
     target: Option<Pos2>,
     vel: (f32, f32),
     last_sent: f64,
@@ -196,6 +199,7 @@ impl Default for SpaceUi {
             me: None,
             shown: HashMap::new(),
             vol: HashMap::new(),
+            pan: HashMap::new(),
             target: None,
             vel: (0.0, 0.0),
             last_sent: -1e9,
@@ -332,7 +336,10 @@ impl SpaceUi {
     // ── Gallery ──────────────────────────────────────────────────────────
     // Paging is yours alone: nothing is sent, the walls just show another twelve.
 
-    /// Per-person volume for Space voice; eased, so walking through a door crossfades.
+    /// Per-person volume for Space voice, and where it comes from: in "Nearby
+    /// is louder" and inside your own room, left or right by where they stand
+    /// on screen (`voice_pan`). Both eased, so walking through a door
+    /// crossfades and someone walking past moves across smoothly.
     fn step_voice(&mut self, c: &mut Ctx, dt: f32) {
         let Some((mx, my, _)) = self.me else { return };
         let my_zone = zone_of(mx, my);
@@ -340,23 +347,25 @@ impl SpaceUi {
         let mut changes = Vec::new();
         for (sid, pos) in &c.m.space.players {
             let (x, y) = self.shown.get(sid).copied().unwrap_or((pos.x, pos.y));
-            let target = match self.voice {
-                VoiceMode::Everyone => 1.0,
+            let (dx, dy) = (x - mx, y - my);
+            let (target, pan_to) = match self.voice {
+                VoiceMode::Everyone => (1.0, 0.0),
                 VoiceMode::Near => {
-                    let dist = (x - mx).hypot(y - my);
-                    if dist < 260.0 {
+                    let dist = dx.hypot(dy);
+                    let v = if dist < 260.0 {
                         1.0
                     } else if dist > 1100.0 {
                         0.12
                     } else {
                         1.0 - (dist - 260.0) / 840.0 * 0.88
-                    }
+                    };
+                    (v, voice_pan(dx, dy))
                 }
                 VoiceMode::Room => {
                     if zone_of(pos.x, pos.y) == my_zone {
-                        1.0
+                        (1.0, voice_pan(dx, dy))
                     } else {
-                        0.0
+                        (0.0, 0.0)
                     }
                 }
             };
@@ -369,8 +378,17 @@ impl SpaceUi {
                 v = target;
             }
             self.vol.insert(sid.clone(), v);
-            if prev.is_none_or(|p| (p - v).abs() > 0.004) {
-                changes.push((sid.clone(), v));
+            let prev_pan = self.pan.get(sid).copied();
+            let mut pan = match prev_pan {
+                None => pan_to,
+                Some(p) => p + (pan_to - p) * ease,
+            };
+            if (pan_to - pan).abs() < 0.02 {
+                pan = pan_to;
+            }
+            self.pan.insert(sid.clone(), pan);
+            if prev.is_none_or(|p| (p - v).abs() > 0.004) || prev_pan.is_none_or(|p| (p - pan).abs() > 0.004) {
+                changes.push((sid.clone(), v, pan));
             }
         }
         if !changes.is_empty() {

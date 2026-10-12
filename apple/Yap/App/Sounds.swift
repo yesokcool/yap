@@ -289,6 +289,13 @@ extension AppModel {
         case .quieted(let quiet):
             if quiet, voice.settings.deafened { sounds.stopClips() }
             blip(quiet ? .mute : .unmute)
+        case .talkingWhileMuted(let firstTime):
+            // Its own setting ("Remind me when I talk while muted"), not Sounds.
+            sounds.play(.mutedNudge)
+            if firstTime { client.notice = YapClient.Notice(text: TalkWords.explainNudge) }
+        case .pushToTalk(let live):
+            // Its own setting ("Push-to-talk click"), for my ears only.
+            sounds.play(live ? .pushToTalkOn : .pushToTalkOff)
         }
     }
 }

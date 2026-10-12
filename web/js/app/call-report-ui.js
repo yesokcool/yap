@@ -230,6 +230,7 @@ export function bindCallReport() {
     const p = person(sid);
     if (p) log.weak(p.key, p.name, voice.peers.get(sid)?.weak ?? null);
   });
+  voice.addEventListener('own-quality', ({ detail: { weak } }) => inCall() && log.ownWeak(weak));
   voice.addEventListener('restart', ({ detail: { sid, attempt } }) => {
     const p = person(sid);
     if (!p) return;

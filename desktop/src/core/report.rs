@@ -62,6 +62,10 @@ pub struct Reading {
     /// Audio the jitter buffer held (ms), and what it aimed at.
     pub jitter_ms: Option<f32>,
     pub jitter_target_ms: Option<f32>,
+    /// Our voice packets sent to them, and how many of them they report
+    /// losing in all (None until their first report; remote-inbound-rtp).
+    pub sent: u64,
+    pub their_lost: Option<u64>,
 }
 
 #[derive(Default)]
@@ -101,6 +105,11 @@ struct Person {
     kept: u32,
     weak_ms: u64,
     weak_since: Option<u64>,
+    /// What they report about our voice: packets sent since their first
+    /// report, how many of those they lost, their round trips.
+    yours_sent: u64,
+    yours_lost: u64,
+    yours_rtt: Vec<f32>,
     last: Option<(Reading, u64)>,
     span: Span,
 }
@@ -269,6 +278,9 @@ impl CallLog {
                     kept: 0,
                     weak_ms: 0,
                     weak_since: None,
+                    yours_sent: 0,
+                    yours_lost: 0,
+                    yours_rtt: Vec::new(),
                     last: None,
                     span: Span::default(),
                 });
@@ -369,6 +381,12 @@ impl CallLog {
             span.lost += lost;
             span.frames += frames;
             span.concealed += concealed;
+            // What they lose of ours, from their first report on.
+            if let (Some(before), Some(now)) = (b.their_lost, r.their_lost) {
+                p.yours_sent += r.sent.saturating_sub(b.sent);
+                p.yours_lost += now.saturating_sub(before);
+                p.yours_rtt.extend(r.rtt_ms.map(|v| v as f32));
+            }
             if elapsed > 0 {
                 let (din, dout) = (r.bytes_in.saturating_sub(b.bytes_in), r.bytes_out.saturating_sub(b.bytes_out));
                 p.inn.push(din as f32 * 8.0 / elapsed as f32);
@@ -491,6 +509,12 @@ impl CallLog {
             let _ = writeln!(o, "  Jitter buffer (median): {}{target}", ms_text(median(&p.jitter)));
             let _ = writeln!(o, "  ICE restarts: {}, connection rebuilds: {}, reconnects kept: {}", p.restarts, p.rebuilds, p.kept);
             let _ = writeln!(o, "  Weak connection shown: {}", if weak > 0 { duration(weak) } else { "never".into() });
+            let yours = if p.yours_sent > 0 {
+                format!("they lost {} of yours (their round trip {} median)", pct(p.yours_lost, p.yours_sent), ms_text(median(&p.yours_rtt)))
+            } else {
+                "no reports from them".into()
+            };
+            let _ = writeln!(o, "  From you: {yours}");
         }
         o.push_str("\nTimeline\n");
         if self.dropped > 0 {
@@ -861,6 +885,8 @@ impl Core {
                 red_packets: st.red_packets,
                 jitter_ms: st.playing.then_some(st.delay_ms),
                 jitter_target_ms: st.playing.then_some(st.target_ms),
+                sent: p.packets_sent.load(Ordering::Relaxed),
+                their_lost: (p.their_reports.load(Ordering::Relaxed) > 0).then(|| p.their_lost.load(Ordering::Relaxed)),
             };
             readings.push((key, name, reading));
         }
@@ -908,6 +934,9 @@ mod tests {
             red_packets: packets,
             jitter_ms: Some(45.0),
             jitter_target_ms: Some(40.0),
+            // They report from 4 s on, losing 1 in 25 of ours once it's lossy.
+            sent: packets,
+            their_lost: (secs >= 4).then_some(if lossy { packets / 25 } else { 0 }),
         }
     }
 
@@ -966,6 +995,13 @@ mod tests {
         let ticks = text.lines().filter(|l| l.contains("Ana: rtt")).count();
         assert_eq!(ticks, 6, "10, 20 … 60 s");
         assert!(text.contains("Lost packets: 2.1 % (70 of 3,400)"), "lossy from 40 s on");
+        // What they lost of ours (remote-inbound-rtp): from their first report (4 s) on,
+        // 140 of the 3,300 sent since.
+        assert!(text.contains("  Weak connection shown: 0:06\n  From you: they lost 4.2 % of yours (their round trip 31 ms median)\n"), "{text}");
+        let mut quiet = log();
+        quiet.sample(2000, "u-ben", "Ben", Reading { their_lost: None, ..reading(1, 2, false) });
+        quiet.sample(4000, "u-ben", "Ben", Reading { their_lost: None, ..reading(1, 4, false) });
+        assert!(quiet.format(5000).contains("  From you: no reports from them\n"));
     }
 
     /// No IP addresses, ever: candidate data with addresses goes in, only types come out;

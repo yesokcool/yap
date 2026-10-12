@@ -1,5 +1,6 @@
 import SwiftUI
 import YapCore
+import YapVoice
 #if os(iOS)
 import AVFoundation
 #endif
@@ -44,6 +45,16 @@ struct YapApp: App {
                 }
                 .keyboardShortcut("u", modifiers: [.command, .shift])
                 Button("Plan a hang…") { model.planningHang = true }
+            }
+            // ⌘⇧M / ⌘⇧D, like the web's Ctrl/⌘+Shift+M and D (Mac, and iPad
+            // with a keyboard; inside Yap only, no global keys).
+            CommandMenu("Voice") {
+                Toggle("Mute", isOn: Binding(get: { model.voice.settings.muted || model.voice.settings.deafened },
+                                             set: { _ in model.voice.toggleMute() }))
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
+                Toggle("Deafen", isOn: Binding(get: { model.voice.settings.deafened },
+                                               set: { _ in model.voice.toggleDeafen() }))
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
             }
         }
         #if os(macOS)

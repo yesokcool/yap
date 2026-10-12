@@ -2,6 +2,7 @@
 //! Notifications, Account, Owner & mods, Invite and About.
 
 use super::*;
+use crate::ptt::Action;
 use std::collections::HashSet;
 
 /// Audio devices (inputs, outputs), listed in the background.
@@ -248,6 +249,13 @@ pub(super) fn voice_tab(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
             acts.push(Act::Config(Box::new(move |c| c.output_device = name)));
             acts.push(Act::Cmd(Cmd::AudioSettings { restart_input: false, restart_output: true, renegotiate: false }));
         });
+        ui.add_space(4.0);
+        let mut lower = m.config.lower_media;
+        if theme::tip(theme::checkbox(ui, &mut lower, "Lower shared media while friends talk", p), "Never changes the volume you set for it").changed() {
+            acts.push(Act::Config(Box::new(move |c| c.lower_media = lower)));
+            acts.push(Act::ApplyGate);
+        }
+        note(ui, "A screen share's sound goes to half while someone in your call speaks, then back. (Watch together plays in your browser, which has the same switch.)", p);
         hear_yourself(ui, m, p, acts, st);
         super::super::call_report_field(ui, &app.shared, p, acts);
     });
@@ -272,8 +280,16 @@ pub(super) fn voice_tab(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
                 let pct = |v: f32| ((v + 80.0) / 80.0).clamp(0.0, 1.0);
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), egui::Sense::hover());
                 let hot = db > m.config.vad_threshold;
-                theme::meter(ui, r, pct(db), if hot { p.ok } else { p.meter }, p);
+                // The mic's peaks keep hitting the top: red, and say so (the web's words).
+                let clipping = live && mic_ok && gate.clipping.load(std::sync::atomic::Ordering::Relaxed);
+                theme::meter(ui, r, pct(db), if clipping { p.danger } else if hot { p.ok } else { p.meter }, p);
                 theme::meter_mark(ui, r, pct(m.config.vad_threshold), p);
+                if clipping {
+                    theme::tip(
+                        ui.label(theme::text("Too loud (clipping)", p.danger)),
+                        "The loudest moments hit the top and distort for everyone. Turn your mic's input level down (in your system's sound settings), or sit a little further from it.",
+                    );
+                }
                 if live {
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
                 }
@@ -285,6 +301,17 @@ pub(super) fn voice_tab(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
                     }
                     ui.label(theme::text(format!("{t:.0} dB"), p.text));
                 });
+                // Screenshot aid (debug builds): YAP_DEBUG_MIC_TEST=1 starts Test mic once (with YAP_DEBUG_AUDIO, never a real mic).
+                static DEBUG_TEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if cfg!(debug_assertions)
+                    && !in_call
+                    && std::env::var_os("YAP_DEBUG_MIC_TEST").is_some()
+                    && std::env::var_os("YAP_DEBUG_AUDIO").is_some()
+                    && !DEBUG_TEST.swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    st.mic_test = true;
+                    acts.push(Act::Cmd(Cmd::MicTest(true)));
+                }
                 ui.horizontal(|ui| {
                     if in_call {
                         note(ui, "Your mic is live: you're in a call.", p);
@@ -301,24 +328,31 @@ pub(super) fn voice_tab(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
                 }
             }
             InputMode::Ptt => {
-                let ptt = app.shared.ptt.clone();
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(theme::text("Push-to-talk key:", p.text));
-                    let label = if ptt.is_binding() { "Press a key or mouse button…".to_string() } else { crate::ptt::key_label(&m.config.ptt_key) };
-                    if theme::button_sized(ui, &label, Btn::Normal, true, vec2(140.0, 23.0), p).clicked() {
-                        ptt.start_binding();
-                    }
-                    if gate.ptt_down.load(std::sync::atomic::Ordering::Relaxed) {
-                        ui.label(theme::text("talking", p.ok));
-                    }
-                });
-                let status = ptt.describe();
-                if !status.is_empty() {
-                    note(ui, status, p);
+                key_row(app, ui, m, p, acts, Action::Talk);
+                let mut click = m.config.ptt_click;
+                if theme::tip(theme::checkbox(ui, &mut click, "Push-to-talk click", p), "A quiet click when it opens and when it closes; only you hear it").changed() {
+                    acts.push(Act::Config(Box::new(move |c| c.ptt_click = click)));
+                    acts.push(Act::ApplyGate);
                 }
+                note(ui, "Double-tap the key to stay live; tap it again to stop.", p);
             }
             InputMode::Open => {}
+        }
+        // The other global keys, next to push-to-talk's (all optional).
+        ui.add_space(4.0);
+        for a in [Action::Mute, Action::Deafen, Action::Cough] {
+            key_row(app, ui, m, p, acts, a);
+        }
+        note(ui, KEYS_NOTE, p);
+        let status = app.shared.ptt.describe();
+        if !status.is_empty() {
+            note(ui, status, p);
+        }
+        ui.add_space(4.0);
+        let mut remind = m.config.remind_muted;
+        if theme::tip(theme::checkbox(ui, &mut remind, "Remind me when I talk while muted", p), "A soft blip and \"You're muted\" by the Mute button, at most every 5 seconds").changed() {
+            acts.push(Act::Config(Box::new(move |c| c.remind_muted = remind)));
         }
         ui.add_space(4.0);
         let mut ns = m.config.noise_suppression;
@@ -364,10 +398,63 @@ pub(super) fn voice_tab(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
             acts.push(Act::Config(Box::new(move |c| c.bitrate = br)));
             acts.push(Act::Cmd(Cmd::AudioSettings { restart_input: false, restart_output: false, renegotiate: true }));
         }
-        note(ui, "Voice goes straight between you and your friends, so better quality costs nothing. A call uses the lower of the two people's settings.", p);
+        // 256 and 510: what they cost (PROTOCOL.md › Voice, the spec's words).
+        if br > 239_000 {
+            ui.label(egui::RichText::new(HIGH_BITRATE_WARNING).font(theme::font(theme::small())).color(p.warn));
+        }
+        note(ui, QUALITY_NOTE, p);
         relay_toggle(ui, m, p, acts, st);
     });
     st.advanced = open;
+}
+
+/// Next to 256 and 510 kbps (PROTOCOL.md › Voice: RED's copy no longer fits a packet above ~239 kbps).
+pub const HIGH_BITRATE_WARNING: &str = "No dropout protection at this quality (each bit of voice no longer fits twice in a packet), and several times the upload for each friend in the call.";
+/// Under Quality. (This app sends a friend who picked less at most what they
+/// asked for; browsers don't, so their voice comes at their own setting.)
+const QUALITY_NOTE: &str = "Voice goes straight between you and your friends, so better quality costs the server nothing. Your voice goes out at your setting (or a friend's, if they picked less), and each friend's at theirs.";
+
+/// Under the keys (the modifiers as this computer names them).
+const KEYS_NOTE: &str = if cfg!(target_os = "macos") {
+    "Global keys work while you're in a call, even when Yap isn't the front window. Hold Ctrl, Option, Shift or ⌘ while you press one to make a combination. Push-to-mute keeps you muted while it's held. In Yap's window, ⌘+Shift+M mutes and ⌘+Shift+D deafens."
+} else {
+    "Global keys work while you're in a call, even when Yap isn't the front window. Hold Ctrl, Alt or Shift while you press one to make a combination. Push-to-mute keeps you muted while it's held. In Yap's window, Ctrl+Shift+M mutes and Ctrl+Shift+D deafens."
+};
+
+/// One global key in Settings › Voice: its name, the key (click, then press
+/// one), Clear (not for push-to-talk, which always has one), and what it's
+/// doing now.
+fn key_row(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>, a: Action) {
+    let ptt = app.shared.ptt.clone();
+    let gate = &app.shared.audio.gate;
+    let current = crate::ptt::config_key(&m.config, a).to_string();
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(118.0, 23.0), egui::Sense::hover());
+        ui.painter().text(r.left_center(), egui::Align2::LEFT_CENTER, a.label(), theme::font(theme::ui()), p.text);
+        let label = if ptt.binding() == Some(a) { "Press a key or mouse button…".to_string() } else { crate::ptt::key_label(&current) };
+        if theme::tip(theme::button_sized(ui, &label, Btn::Normal, true, vec2(160.0, 23.0), p), "Click, then press the key (or a combination, or mouse button 3–5). Esc cancels.").clicked() {
+            ptt.start_binding(a);
+        }
+        if a != Action::Talk && !current.is_empty() && theme::button_sized(ui, "Clear", Btn::Normal, true, vec2(60.0, 23.0), p).clicked() {
+            acts.push(Act::Config(Box::new(move |c| {
+                let _ = crate::ptt::bind(c, a, "");
+            })));
+            acts.push(Act::ApplyGate);
+        }
+        let on = |f: &std::sync::atomic::AtomicBool| f.load(std::sync::atomic::Ordering::Relaxed);
+        match a {
+            Action::Talk if on(&gate.ptt_latched) => {
+                ui.label(theme::text("live", p.ok));
+            }
+            Action::Talk if on(&gate.ptt_down) => {
+                ui.label(theme::text("talking", p.ok));
+            }
+            Action::Cough if on(&gate.cough) => {
+                ui.label(theme::text("muted", p.danger));
+            }
+            _ => {}
+        }
+    });
 }
 
 /// Mic check: "Hear yourself" — 4 s of exactly what a call sends (noise

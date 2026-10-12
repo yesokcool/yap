@@ -43,12 +43,24 @@ struct UserPanel: View {
                 BigToggleButton(title: muted ? "Muted" : "Mute",
                                 systemImage: muted ? "mic.slash.fill" : "mic.fill",
                                 isOn: muted,
-                                help: muted ? "Unmute your mic" : "Mute your mic") { model.voice.toggleMute() }
+                                help: muted ? "Unmute your mic (⌘⇧M)" : "Mute your mic (⌘⇧M)") { model.voice.toggleMute() }
+                    // Talking while muted: "You're muted" hangs under the button for a moment.
+                    .overlay(alignment: .bottomLeading) {
+                        if model.voice.mutedNudgeShown {
+                            // Hangs from the button's bottom edge (a zero-height frame there).
+                            TooltipNote98(text: TalkWords.youreMuted, systemImage: "mic.slash.fill")
+                                .frame(height: 0, alignment: .top)
+                                .offset(x: 8, y: 3)
+                                .transition(.opacity)
+                                .allowsHitTesting(false)
+                        }
+                    }
                 BigToggleButton(title: settings.deafened ? "Deafened" : "Deafen",
                                 systemImage: settings.deafened ? "speaker.slash.fill" : "headphones",
                                 isOn: settings.deafened,
-                                help: settings.deafened ? "Undeafen" : "Deafen: hear nobody, and mute") { model.voice.toggleDeafen() }
+                                help: settings.deafened ? "Undeafen (⌘⇧D)" : "Deafen: hear nobody, and mute (⌘⇧D)") { model.voice.toggleDeafen() }
             }
+            .zIndex(1)
         }
         .padding(.horizontal, 2)
         .padding(.top, 2)
@@ -58,6 +70,9 @@ struct UserPanel: View {
             // Etched line below, between the panel and the list.
             Separator98()
         }
+        // The tooltip may hang over whatever's below the panel.
+        .zIndex(1)
+        .animation(.easeOut(duration: 0.15), value: model.voice.mutedNudgeShown)
     }
 
     private func openProfile() {

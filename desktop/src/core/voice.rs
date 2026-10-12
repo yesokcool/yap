@@ -212,6 +212,7 @@ impl Core {
                 m.speaking.clear();
                 m.peer_states.clear();
                 m.hints.clear();
+                m.own_weak = None;
                 drop(m);
                 self.voice.hangup_all();
                 if out_entirely {
@@ -436,6 +437,7 @@ impl Core {
             m.speaking.clear();
             m.peer_states.clear();
             m.hints.clear();
+            m.own_weak = None;
             m.voice_stats = None;
             m.config.sounds
         };

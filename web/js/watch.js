@@ -85,6 +85,11 @@ export class WatchParty {
     this.frame = null; // the one YouTube iframe
     this.player = freshPlayer();
     this.prefs = loadPrefs();
+    /** × your volume while friends talk (Settings › Voice › Lower shared media while friends talk; 1 = not lowered). */
+    this.duck = 1;
+    /** What we last told the player (its volume and mute come back to us like the person's own changes do). */
+    this.sentVolume = null;
+    this.sentMuted = null;
     this.blocked = 0; // 0 fine · 1 "Click to join the show" · 2 "press ▶ on the video"
     this.unblockTried = false;
     this.cmdAt = 0; // last play/pause/seek/load we sent our player (its echoes aren't the person's doing)
@@ -335,16 +340,39 @@ export class WatchParty {
     p.sampleState = p.state;
   }
 
-  /** Volume changed with YouTube's own controls: that's your volume now. */
+  /**
+   * Volume changed with YouTube's own controls: that's your volume now. What
+   * we set ourselves (your volume, or a dip while friends talk) comes back
+   * here too, and is never taken for yours.
+   */
   onPlayerVolume(info) {
     const now = performance.now();
+    const volume = Number.isFinite(info.volume) ? Math.round(info.volume) : (this.sentVolume ?? this.prefs.volume);
+    const muted = typeof info.muted === 'boolean' ? info.muted : (this.sentMuted ?? this.prefs.muted);
+    if (volume === this.sentVolume && muted === this.sentMuted) return; // our own
     if (now - this.volAt < 1500 || !(document.activeElement === this.frame || now - this.touchedAt < 5000)) return;
-    const volume = Number.isFinite(info.volume) ? Math.round(info.volume) : this.prefs.volume;
-    const muted = typeof info.muted === 'boolean' ? info.muted : this.prefs.muted;
-    if (volume === this.prefs.volume && muted === this.prefs.muted) return;
-    this.prefs = { volume, muted };
+    this.sentVolume = volume;
+    this.sentMuted = muted;
+    // During a dip the player is at a share of your volume: what you set there is that share.
+    const saved = this.duck < 1 ? Math.min(100, Math.round(volume / this.duck)) : volume;
+    if (saved === this.prefs.volume && muted === this.prefs.muted) return;
+    this.prefs = { volume: saved, muted };
     this.savePrefs();
     this.renderTransport();
+  }
+
+  /** Your volume as the player plays it: lowered while friends talk, if you asked for that. */
+  get playerVolume() {
+    return Math.round(this.prefs.volume * this.duck);
+  }
+
+  /** Lower (or raise back) the video while friends talk: a factor on your volume, never saved. */
+  setDuck(factor) {
+    this.duck = Math.min(1, Math.max(0, factor));
+    if (!this.player.ready || this.playerVolume === this.sentVolume) return;
+    this.volAt = performance.now();
+    this.sentVolume = this.playerVolume;
+    this.cmd('setVolume', [this.sentVolume]);
   }
 
   onPlayerError(code) {
@@ -469,7 +497,9 @@ export class WatchParty {
 
   applyVolume() {
     this.volAt = performance.now();
-    this.cmd('setVolume', [this.prefs.volume]);
+    this.sentVolume = this.playerVolume;
+    this.sentMuted = this.prefs.muted;
+    this.cmd('setVolume', [this.sentVolume]);
     this.cmd(this.prefs.muted ? 'mute' : 'unMute');
   }
 

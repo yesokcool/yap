@@ -196,6 +196,17 @@ public final class CallNotes {
             p.secondaryUsed += max(0, (s.fecPacketsReceived - b.fecPacketsReceived) - (s.fecPacketsDiscarded - b.fecPacketsDiscarded))
             p.samples += samples
             p.patched += patched
+            // What they say they lost of ours (their RTCP reports, counted so far).
+            let sent = max(0, s.packetsSent - b.packetsSent)
+            if sent > 0 || s.remoteReports > 0 {
+                p.sentToThem = (p.sentToThem ?? 0) + sent
+                p.theyLost = (p.theyLost ?? 0) + max(0, s.remotePacketsLost - b.remotePacketsLost)
+            }
+            if reading.connected, let rtt = s.remoteRttMs, s.remoteReports != b.remoteReports {
+                var series = p.theirRttMs ?? []
+                CallReport.append(rtt, to: &series)
+                p.theirRttMs = series
+            }
             last[s.sid] = (at, s)
 
             var span = interval[reading.uid] ?? Interval()

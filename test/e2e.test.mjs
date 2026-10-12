@@ -213,6 +213,23 @@ async function test(name, fn) {
 const a = await user('Ada', '#5b6cff');
 const b = await user('Ben', '#30a46c');
 globalThis.pageA = a;
+
+/**
+ * Back to how the voice tests expect someone (unmuted, undeafened, always-on, no push-to-mute key,
+ * reminders on), so one failure in a test that changes these doesn't silence every test after it.
+ */
+const voiceReset = (page) => page.evaluate(() => {
+  const click = (action) => document.querySelector(`[data-action="${action}"]`)?.click();
+  if (yap.settings.deafened) click('toggle-deafen');
+  if (yap.settings.muted) click('toggle-mute');
+  Object.assign(yap.settings, { mutedReminder: true, pttClick: true, pushToMuteKey: '' });
+  yap.voice.setPushToMute(false);
+  if (yap.settings.mode !== 'open') {
+    yap.settings.mode = 'open';
+    yap.voice.releasePtt();
+  }
+  document.querySelector('#settings-dialog')?.open && document.querySelector('#settings-dialog').close();
+}).catch(() => {});
 globalThis.pageB = b;
 
 await test('same person on a new device: sign in with name + password', async () => {
@@ -1379,6 +1396,62 @@ await test('Settings › Voice › Test mic: the button shows it\'s testing, the
   await a.click('#settings-form .settings-actions .btn');
 });
 
+await test('Settings › Voice › Advanced › Quality: 256 and 510 kbps say what they cost; the note says each voice goes out at its own setting', async () => {
+  await a.click('[data-action="open-settings"]');
+  await a.click('#settings-tabs [role=tab]:text-is("Voice")');
+  await a.click('#voice-advanced summary');
+  const quality = '#voice-advanced label.field:has(select[name=bitrate])';
+  assert.equal(await a.isHidden('#bitrate-warn'), true, `${BITRATE / 1000} kbps: nothing to warn about`);
+  assert.equal(await a.textContent(`${quality} small.muted`), "Voice goes straight between you and your friends, so better quality costs the server nothing. Your voice goes out at your setting, and each friend's at theirs.");
+  for (const value of ['256000', '510000']) {
+    await a.selectOption('#settings-form select[name=bitrate]', value);
+    assert.equal(await a.textContent('#bitrate-warn:visible'), 'No dropout protection at this quality (each bit of voice no longer fits twice in a packet), and several times the upload for each friend in the call.', value);
+  }
+  await a.locator(quality).screenshot({ path: path.join(OUT, 'TW9-quality.png') });
+  await a.selectOption('#settings-form select[name=bitrate]', String(BITRATE));
+  assert.equal(await a.isHidden('#bitrate-warn'), BITRATE < 256000);
+  await a.click('#settings-form .settings-actions .btn');
+});
+
+await test('Settings › Voice › Test mic: a mic whose peaks keep hitting the top says "Too loud (clipping)"; a normal one never does', async () => {
+  try {
+    await a.click('[data-action="open-settings"]');
+    await a.click('#settings-tabs [role=tab]:text-is("Voice")');
+    await a.click('#mic-test-btn');
+    await until(() => a.evaluate(() => parseFloat(document.querySelector('#meter-fill').style.width) > 20), 5000, 'the bar to move');
+    await a.waitForTimeout(2500);
+    assert.equal(await a.isHidden('#mic-clip'), true, 'the test mic peaks around −4 dBFS: fine');
+    await a.click('#mic-test-btn');
+    // The same mic turned up four times: it clips.
+    await a.evaluate(() => {
+      const md = navigator.mediaDevices;
+      globalThis.__plainMic = md.getUserMedia;
+      md.getUserMedia = async (c) => {
+        const s = await globalThis.__plainMic.call(md, c);
+        const ctx = new AudioContext({ sampleRate: 48000 });
+        const gain = ctx.createGain();
+        gain.gain.value = 4;
+        const dest = ctx.createMediaStreamDestination();
+        dest.channelCount = 1;
+        ctx.createMediaStreamSource(s).connect(gain).connect(dest);
+        return dest.stream;
+      };
+    });
+    await a.click('#mic-test-btn');
+    await a.waitForSelector('#mic-clip:visible:text-is("Too loud (clipping)")', { timeout: 6000 });
+    assert.equal(await a.evaluate(() => document.querySelector('#meter-fill').classList.contains('clip')), true, 'the bar goes red');
+    await a.locator('#settings-form .mic-level').screenshot({ path: path.join(OUT, 'TW8-clipping.png') });
+    await a.click('#mic-test-btn');
+    assert.equal(await a.isHidden('#mic-clip'), true, 'gone with the test');
+    await a.evaluate(() => (navigator.mediaDevices.getUserMedia = globalThis.__plainMic));
+    await a.click('#settings-form .settings-actions .btn');
+  } finally {
+    await a.evaluate(() => {
+      if (globalThis.__plainMic) navigator.mediaDevices.getUserMedia = globalThis.__plainMic;
+    }).catch(() => {});
+  }
+});
+
 await test('both join Lounge and connect peer to peer', async () => {
   await a.click('button.channel.voice:has-text("Lounge")');
   await a.waitForSelector('.vp-status.ok', { timeout: 10000 });
@@ -1512,11 +1585,66 @@ await test('push-to-talk keeps sending ~200 ms after the key is let go', async (
   assert.ok(tail >= 150 && tail < 450, `still sending ${tail.toFixed(0)} ms after release`);
 });
 
+await test('push-to-talk clicks (for you) when it opens and when it closes after the tail; a double-tap stays live ("Live — tap to stop") until the next press', async () => {
+  try {
+    await a.evaluate(() => {
+      yap.settings.mode = 'ptt';
+      document.activeElement?.blur();
+      yap.state.pttClicks = [];
+      addEventListener('keyup', (e) => e.code === 'Backquote' && (globalThis.__upAt = performance.now()), { capture: true });
+    });
+    const clicks = () => a.evaluate(() => yap.state.pttClicks.map((c) => ({ ...c, afterUp: c.at - (globalThis.__upAt ?? 0) })));
+    const heard = async () => {
+      await b.waitForTimeout(1200);
+      return (await inbound(b)).level > 0.001;
+    };
+    await a.keyboard.down('Backquote');
+    await a.waitForTimeout(400);
+    await a.keyboard.up('Backquote');
+    await a.waitForTimeout(700);
+    let c = await clicks();
+    assert.deepEqual(c.map((x) => x.open), [true, false], 'a click opening, a click closing');
+    assert.ok(c[1].afterUp >= 150 && c[1].afterUp < 450, `the closing click after the tail: ${c[1].afterUp.toFixed(0)} ms after the key`);
+    assert.equal(await heard(), false, 'closed again');
+    // Double-tap: it stays open with the key up.
+    await a.evaluate(() => (yap.state.pttClicks = []));
+    await a.keyboard.press('Backquote');
+    await a.waitForTimeout(120);
+    await a.keyboard.press('Backquote');
+    await a.waitForSelector('#user-panel .me-bubble:text-is("Live — tap to stop")', { timeout: 2000 });
+    assert.equal(await heard(), true, 'live with the key up');
+    assert.deepEqual((await clicks()).map((x) => x.open), [true], 'one click: it opened and stayed open');
+    await a.locator('#user-panel').screenshot({ path: path.join(OUT, 'TW3-latched.png') });
+    // One more tap: it closes (after the tail), with its click.
+    await a.keyboard.press('Backquote');
+    await a.waitForSelector('#user-panel .me-bubble', { state: 'detached', timeout: 2000 });
+    assert.equal(await heard(), false, 'closed by the next tap');
+    assert.deepEqual((await clicks()).map((x) => x.open), [true, false]);
+    // Push-to-talk click off: no clicks (the latch still works).
+    await a.evaluate(() => {
+      yap.settings.pttClick = false;
+      yap.state.pttClicks = [];
+    });
+    await a.keyboard.press('Backquote');
+    await a.waitForTimeout(700);
+    assert.deepEqual(await clicks(), [], 'switched off: silent');
+    await a.evaluate(() => {
+      yap.settings.pttClick = true;
+      yap.settings.mode = 'open';
+    });
+  } finally {
+    await voiceReset(a);
+  }
+});
+
 await test('voice quality for the whole channel: picked by one, used by both', async () => {
   // It's under the voice panel's ⋯ (the panel only says so once it's set for everyone).
   assert.equal(await a.locator('#voice-panel .vp-shared').count(), 0);
   await a.click('#voice-panel [data-action="voice-more"]');
+  assert.equal(await a.isHidden('#popover .vp-quality-warn'), true, 'no warning at each person\'s own');
   await a.selectOption('#popover .vp-quality', '256000');
+  // Next to 256 and 510: what it costs (PROTOCOL.md › Voice).
+  assert.equal(await a.textContent('#popover .vp-quality-warn:visible'), 'No dropout protection at this quality (each bit of voice no longer fits twice in a packet), and several times the upload for each friend in the call.');
   await b.waitForFunction(() => yap.state.channels.get('lounge')?.bitrate === 256000, null, { timeout: 5000 });
   await b.waitForSelector('#voice-panel .vp-shared:text-is("Sound: 256k for everyone")', { timeout: 5000 });
   await a.screenshot({ path: path.join(OUT, 'desktop-voice-quality.png') });
@@ -1539,6 +1667,108 @@ await test('mute shows on the other side and silences audio', async () => {
   const level = (await inbound(b)).level;
   assert.ok(level < 0.001, `level while muted: ${level}`);
   await a.click('[data-action="toggle-mute"]');
+});
+
+await test("talking while muted: a soft blip and \"You're muted\" by the Mute button, at most every 5 s; the first time says what it means; the setting turns it off", async () => {
+  try {
+    await a.evaluate(() => {
+      globalThis.__reminders = [];
+      yap.voice.addEventListener('muted-talk', () => __reminders.push(performance.now()));
+      yap.state.remindedMuted = 0;
+      yap.settings.mutedReminderExplained = false; // as on a device that never heard it
+    });
+    await b.evaluate(() => (yap.state.remindedMuted = 0));
+    // Ada mutes and keeps talking (the test mic never stops).
+    await a.click('[data-action="toggle-mute"]');
+    // (Within 5 s of an earlier reminder — the mute test before this one talks while muted too — it waits its turn.)
+    await a.waitForSelector('#user-panel .me-bubble:text-is("You\'re muted")', { timeout: 8000 });
+    assert.equal(await a.textContent('#toast'), "That sound means you're muted. Turn it off in Settings › Voice.");
+    assert.equal(await a.evaluate(() => yap.state.remindedMuted), 1, 'the blip played once');
+    await a.locator('#user-panel').screenshot({ path: path.join(OUT, 'TW1-muted-reminder.png') });
+    await until(() => a.evaluate(() => yap.state.remindedMuted >= 2), 8000, 'a second reminder');
+    const gaps = await a.evaluate(() => __reminders.slice(1).map((t, i) => t - __reminders[i]));
+    assert.ok(gaps.every((g) => g >= 4990 && g < 6000), `5 s apart: ${gaps.map(Math.round).join(', ')} ms`);
+    assert.equal(await a.evaluate(() => yap.settings.mutedReminderExplained), true, 'explained once on this device');
+    assert.ok(await a.isHidden('#toast'), 'the explanation is not shown again (the first one went after 4 s)');
+    // Off in Settings › Voice: nothing.
+    await a.click('[data-action="open-settings"]');
+    await a.click('#settings-tabs [role=tab]:text-is("Voice")');
+    assert.equal(await a.isChecked('#settings-form [name=mutedReminder]'), true, 'on by default');
+    await a.uncheck('#settings-form [name=mutedReminder]');
+    await a.click('#settings-form .settings-actions .btn');
+    const before = await a.evaluate(() => yap.state.remindedMuted);
+    await a.waitForTimeout(6000);
+    assert.equal(await a.evaluate(() => yap.state.remindedMuted), before, 'switched off: no blip');
+    assert.equal(await a.locator('#user-panel .me-bubble').count(), 0);
+    await a.evaluate(() => yap.settings.mutedReminder = true);
+    // Unmuted: the word goes at once; Ben (talking, never muted) never got one.
+    await a.click('[data-action="toggle-mute"]');
+    assert.equal(await a.locator('#user-panel .me-bubble').count(), 0);
+    assert.equal(await b.evaluate(() => yap.state.remindedMuted), 0);
+  } finally {
+    await voiceReset(a);
+  }
+});
+
+await test('mute and deafen from the keyboard (Ctrl/⌘+Shift+M and +D, even while typing), listed on the buttons; push-to-mute mutes only while held, in any mode', async () => {
+  try {
+    const adaUid = await a.evaluate(() => yap.settings.uid);
+    const adaOnBen = () => b.evaluate((uid) => {
+      const v = [...yap.state.sessions.values()].find((s) => s.uid === uid && s.voice)?.voice;
+      return v ? { muted: v.muted, deafened: v.deafened } : null;
+    }, adaUid);
+    assert.match(await a.getAttribute('[data-action="toggle-mute"]', 'title'), /^Mute your mic \(Ctrl\/⌘\+Shift\+M\)$/);
+    assert.match(await a.getAttribute('[data-action="toggle-deafen"]', 'title'), /\(Ctrl\/⌘\+Shift\+D\)$/);
+    await a.click('#input');
+    await a.keyboard.type('half a thought');
+    await a.keyboard.press('Control+Shift+M');
+    await until(async () => (await adaOnBen())?.muted === true, 5000, 'Ben to see Ada muted');
+    assert.equal(await a.evaluate(() => yap.settings.muted), true);
+    assert.equal(await a.inputValue('#input'), 'half a thought', 'nothing typed into the message');
+    await a.keyboard.press('Meta+Shift+M'); // ⌘ on a Mac
+    await until(async () => (await adaOnBen())?.muted === false, 5000, 'unmuted');
+    await a.keyboard.press('Control+Shift+D');
+    await until(async () => (await adaOnBen())?.deafened === true, 5000, 'Ben to see Ada deafened');
+    assert.equal(await a.evaluate(() => [...yap.voice.peers.values()][0].audio.muted), true, 'deafened: she hears nobody');
+    await a.keyboard.press('Control+Shift+D');
+    await until(async () => (await adaOnBen())?.deafened === false, 5000, 'undeafened');
+    await a.fill('#input', '');
+    // Push-to-mute: pick a key in Settings › Voice (not the push-to-talk one), then hold it.
+    await a.click('[data-action="open-settings"]');
+    await a.click('#settings-tabs [role=tab]:text-is("Voice")');
+    assert.equal(await a.textContent('#ptm-key'), 'None (click to pick one)');
+    await a.click('#ptm-key');
+    await a.keyboard.press('Backquote');
+    await a.waitForSelector('#toast:text-is("` is already your push-to-talk key.")', { timeout: 3000 });
+    assert.equal(await a.evaluate(() => yap.settings.pushToMuteKey), '');
+    await a.click('#ptm-key');
+    await a.keyboard.press('F8');
+    assert.equal(await a.textContent('#ptm-key'), 'F8');
+    await a.locator('#settings-form fieldset.settings-group:has(legend:text-is("How you talk"))').screenshot({ path: path.join(OUT, 'TW2-settings.png') });
+    await a.click('#settings-form .settings-actions .btn');
+    await a.evaluate(() => {
+      document.activeElement?.blur();
+      yap.state.remindedMuted = 0;
+    });
+    await a.keyboard.down('F8');
+    await b.waitForTimeout(1200);
+    assert.ok((await inbound(b)).level < 0.001, 'silent while held');
+    assert.equal(await a.textContent('[data-action="toggle-mute"] span'), 'Muted');
+    assert.match(await a.getAttribute('[data-action="toggle-mute"]', 'title'), /^Muted while you hold F8/);
+    assert.equal(await a.evaluate(() => yap.settings.muted), false, 'nothing saved');
+    assert.equal(await a.evaluate(() => yap.state.remindedMuted), 0, 'a cough is no reason to remind');
+    await a.keyboard.up('F8');
+    await b.waitForTimeout(1200);
+    assert.ok((await inbound(b)).level > 0.001, 'heard again once it is let go');
+    assert.equal(await a.textContent('[data-action="toggle-mute"] span'), 'Mute');
+    await a.click('[data-action="open-settings"]');
+    await a.click('#settings-tabs [role=tab]:text-is("Voice")');
+    await a.click('#ptm-clear');
+    assert.equal(await a.evaluate(() => yap.settings.pushToMuteKey), '');
+    await a.click('#settings-form .settings-actions .btn');
+  } finally {
+    await voiceReset(a);
+  }
 });
 
 await test('the mic reopens by itself when it stops; a stalled audio graph fails open (mute still holds)', async () => {
@@ -1713,6 +1943,7 @@ await test("call report: Copy call report (the call's ⋯): header, Ada with red
   assert.match(ada, /^ {2}Lost packets: \d+\.\d % \([\d,]+ of [\d,]+\)$/m);
   assert.match(ada, /^ {2}Audio patched over: \d+\.\d %$/m);
   assert.match(ada, /^ {2}ICE restarts: \d+, connection rebuilds: \d+, reconnects kept: [1-9]\d*$/m, 'Ada dropped her socket twice and the call was kept');
+  assert.match(ada, /^ {2}From you: they lost \d+\.\d % of yours \(their round trip \d+ ms median\)$/m, 'what Ada reports getting from Ben (remote-inbound-rtp)');
   const timeline = lines.slice(at('Timeline') + 1);
   assert.equal(timeline[0], '+00:00 You joined Lounge; Ada was there');
   assert.ok(timeline.some((l) => /^\+\d\d:\d\d Ada: connected$/.test(l)), 'connection states');
@@ -1726,6 +1957,41 @@ await test("call report: Copy call report (the call's ⋯): header, Ada with red
   assert.doesNotMatch(text, /candidate|typ host|\.local\b/);
   // The same report is kept on this device while the call goes on.
   assert.match(await b.evaluate(() => JSON.parse(localStorage.getItem('yap.callReport')).text), /^Yap call report\n/);
+});
+
+await test('your own connection: when the others lose > 3 % of your audio (their reports), "Your connection is dropping some of your audio"; gone when they stop; in the call report', async () => {
+  try {
+    // Ben's receiver reports say he loses 8 % of Ada's voice (a stand-in for a bad uplink: localhost loses nothing).
+    await a.evaluate(() => {
+      const real = RTCPeerConnection.prototype.getStats;
+      globalThis.__realGetStats = real;
+      RTCPeerConnection.prototype.getStats = async function (...args) {
+        const report = await real.apply(this, args);
+        const out = new Map();
+        report.forEach((s, id) => out.set(id, s.type === 'remote-inbound-rtp' && s.kind === 'audio' && !globalThis.__lossDone ? { ...s, fractionLost: 0.08 } : s));
+        return out;
+      };
+    });
+    assert.equal(await a.locator('#voice-panel .own-weak').count(), 0, 'not before');
+    await a.waitForSelector('#voice-panel .own-weak:text-is("Your connection is dropping some of your audio")', { timeout: 10000 });
+    assert.match(await a.getAttribute('#voice-panel .own-weak', 'title'), /^The others say about 8% of what you send never reaches them/);
+    assert.equal(await b.locator('#voice-panel .own-weak').count(), 0, 'Ben, who loses nothing of Ada\'s… is fine');
+    await a.locator('#voice-panel').screenshot({ path: path.join(OUT, 'TW4-own-connection.png') });
+    await a.evaluate(() => (globalThis.__lossDone = true));
+    await a.waitForSelector('#voice-panel .own-weak', { state: 'detached', timeout: 10000 });
+    await a.evaluate(() => (RTCPeerConnection.prototype.getStats = globalThis.__realGetStats));
+    await catchCopies(a);
+    await a.click('#voice-panel [data-action="voice-more"]');
+    await a.click('#popover [data-action="copy-call-report"]');
+    const text = await a.evaluate(() => globalThis.__copied);
+    assert.match(text, /^\+\d\d:\d\d Your connection is dropping some of your audio \(they lose about 8 % of yours\)$/m);
+    assert.match(text, /^\+\d\d:\d\d Your connection is fine again$/m);
+  } finally {
+    await a.evaluate(() => {
+      if (globalThis.__realGetStats) RTCPeerConnection.prototype.getStats = globalThis.__realGetStats;
+      document.querySelector('#popover').hidden = true;
+    }).catch(() => {});
+  }
 });
 
 await test('soundboard: add a clip (decoded + trimmed in the browser), play it, the other person gets it', async () => {
@@ -1755,6 +2021,14 @@ await test('soundboard: add a clip (decoded + trimmed in the browser), play it, 
 
 // ── Screen sharing (PROTOCOL.md › Screen sharing) ──────────────────────────
 /** Ada starts sharing (Smooth, with sound) unless she already is; Ben isn't watching (an earlier test may have failed midway). */
+/** Settings › Voice › Lower shared media while friends talk, on or off. */
+async function setDuckMedia(page, on) {
+  await page.click('[data-action="open-settings"]');
+  await page.click('#settings-tabs [role=tab]:text-is("Voice")');
+  await page.setChecked('#settings-form [name=duckMedia]', on);
+  await page.click('#settings-form .settings-actions .btn');
+}
+
 async function startSharing(page) {
   await b.evaluate(() => yap.state.screenSid && document.querySelector('#screen-view [data-screen="stop"]').click());
   if (await page.evaluate(() => Boolean(yap.voice.screenStream))) return;
@@ -1977,6 +2251,17 @@ await test('screen sharing: the viewer has its own volume for the share\'s sound
   assert.equal(await b.evaluate(() => document.querySelector('.screen-video').muted), true, 'deafened: the share is silent too');
   await b.click('[data-action="toggle-deafen"]');
   assert.equal(await b.evaluate(() => document.querySelector('.screen-video').muted), false);
+  // Lower shared media while friends talk (Ada never stops talking): half of the 40 %, and the slider still says 40 %.
+  try {
+    await setDuckMedia(b, true);
+    await until(() => b.evaluate(() => Math.abs(document.querySelector('.screen-video').volume - 0.2) < 0.001), 3000, 'the share at half while Ada talks');
+    assert.deepEqual(await b.evaluate((uid) => [document.querySelector('.screen-volume output').textContent, yap.settings.screenVolumes[uid]], adaUid), ['40%', 0.4], 'your volume stays yours');
+    await a.click('[data-action="toggle-mute"]');
+    await until(() => b.evaluate(() => Math.abs(document.querySelector('.screen-video').volume - 0.4) < 0.001), 4000, 'back to 40 % once she stops');
+  } finally {
+    await voiceReset(a);
+    await b.evaluate(() => (yap.settings.duckMedia = false));
+  }
   // Double-click: full screen (and back).
   await b.dblclick('.screen-stage');
   await until(() => b.evaluate(() => document.fullscreenElement?.classList.contains('screen-stage')), 3000, 'full screen');
@@ -2092,33 +2377,82 @@ await test('screen sharing: watching a native app\'s share — H.264 constrained
   assert.equal(await a.evaluate((sid) => yap.voice.peers.get(sid).pc.connectionState, benSid), 'connected', 'voice still up');
 });
 
-await test('voice popover: someone\'s volume (0–200 %, step 5) changes how loud they are; your own row has none', async () => {
-  const [adaSid, adaUid] = await a.evaluate(() => [yap.state.sid, yap.settings.uid]);
-  const benSid = await b.evaluate(() => yap.state.sid);
-  await b.click(`.voice-member[data-voice-sid="${adaSid}"] .name`);
-  const slider = '#popover:not([hidden]) input[type=range][data-volume-uid]';
-  await b.waitForSelector(slider);
-  assert.deepEqual(await b.$eval(slider, (el) => [el.min, el.max, el.step, el.title, el.closest('label').textContent.trim().startsWith('Volume')]), ['0', '200', '5', 'Past 100% boosts quiet people', true]);
-  const set = (v) => b.$eval(slider, (el, value) => {
-    el.value = String(value);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-  }, v);
-  await set(150);
-  assert.deepEqual(await b.evaluate(([sid, uid]) => {
-    const peer = yap.voice.peers.get(sid);
-    return [yap.settings.volumes[uid], peer.boost?.gain.gain.value ?? null, peer.audio.muted];
-  }, [adaSid, adaUid]), [1.5, 1.5, true], '150 %: boosted through WebAudio (the element plays muted)');
-  assert.equal(await b.textContent('#popover output'), '150%');
-  await set(50);
-  assert.deepEqual(await b.evaluate(([sid, uid]) => {
-    const peer = yap.voice.peers.get(sid);
-    return [yap.settings.volumes[uid], peer.boost ?? null, peer.audio.volume];
-  }, [adaSid, adaUid]), [0.5, null, 0.5], '50 %: the element plays it quieter');
-  await set(100);
-  await b.keyboard.press('Escape');
-  await b.click('.chat-header');
-  // Your own row isn't a button.
-  assert.equal(await b.locator(`.voice-member[data-voice-sid="${benSid}"][data-action]`).count(), 0);
+await test('voice popover: someone\'s volume (0–200 %, step 5) changes how loud they are and shows on their row ("50 %", a muted speaker and a dimmed ring at 0), Ctrl/⌘ + scroll too; your own row has none', async () => {
+  try {
+    const [adaSid, adaUid] = await a.evaluate(() => [yap.state.sid, yap.settings.uid]);
+    const benSid = await b.evaluate(() => yap.state.sid);
+    await b.click(`.voice-member[data-voice-sid="${adaSid}"] .name`);
+    const slider = '#popover:not([hidden]) input[type=range][data-volume-uid]';
+    await b.waitForSelector(slider);
+    assert.deepEqual(await b.$eval(slider, (el) => [el.min, el.max, el.step, el.title, el.closest('label').textContent.trim().startsWith('Volume')]), ['0', '200', '5', 'Past 100% boosts quiet people', true]);
+    const set = (v) => b.$eval(slider, (el, value) => {
+      el.value = String(value);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }, v);
+    await set(150);
+    assert.deepEqual(await b.evaluate(([sid, uid]) => {
+      const peer = yap.voice.peers.get(sid);
+      return [yap.settings.volumes[uid], peer.boost?.gain.gain.value ?? null, peer.audio.muted];
+    }, [adaSid, adaUid]), [1.5, 1.5, true], '150 %: boosted through WebAudio (the element plays muted)');
+    assert.equal(await b.textContent('#popover output'), '150%');
+    const row = `.voice-member[data-voice-sid="${adaSid}"]`;
+    assert.equal(await b.textContent(`${row} .vol-tag`), '150\u00a0%', 'her row says what you set');
+    await set(50);
+    assert.deepEqual(await b.evaluate(([sid, uid]) => {
+      const peer = yap.voice.peers.get(sid);
+      return [yap.settings.volumes[uid], peer.boost ?? null, peer.audio.volume];
+    }, [adaSid, adaUid]), [0.5, null, 0.5], '50 %: the element plays it quieter');
+    assert.equal(await b.textContent(`${row} .vol-tag`), '50\u00a0%');
+    // All the way down while she talks: a muted speaker on her row and her ring, dimmed.
+    await set(0);
+    await b.waitForSelector(`${row}.silenced.speaking .vol-tag.off svg`, { timeout: 3000 });
+    const ring = (sel) => b.$eval(`${sel} .avatar`, (el) => getComputedStyle(el).boxShadow);
+    assert.match(await ring(row), /rgb\(90, 143, 90\) 0px 0px 0px 3px/, 'a dimmed ring');
+    // Ben's synthetic voice has gaps between words: wait for him to be speaking before reading his ring.
+    await b.waitForSelector(`.voice-member[data-voice-sid="${benSid}"].speaking .avatar`, { timeout: 5000 });
+    assert.match(await ring(`.voice-member[data-voice-sid="${benSid}"].speaking`), /rgb\(0, 224, 0\)/, 'Ben\'s own ring is the bright one');
+    await b.locator('#voice-channels').screenshot({ path: path.join(OUT, 'TW6-row-muted.png') });
+    await set(100);
+    assert.equal(await b.locator(`${row} .vol-tag`).count(), 0, '100 %: nothing on the row');
+    assert.equal(await b.locator(`${row}.silenced`).count(), 0);
+    await b.keyboard.press('Escape');
+    await b.click('.chat-header');
+    // Ctrl/⌘ + scroll over her row: 5 % a notch, up = louder (and not the page's zoom).
+    await b.hover(`${row} .name`);
+    await b.keyboard.down('Control');
+    await b.mouse.wheel(0, -100);
+    await b.keyboard.up('Control');
+    await until(() => b.evaluate((uid) => yap.settings.volumes[uid] === 1.05, adaUid), 2000, '105 %');
+    assert.equal(await b.textContent(`${row} .vol-tag`), '105\u00a0%');
+    await b.keyboard.down('Meta');
+    for (let i = 0; i < 3; i++) await b.mouse.wheel(0, 100);
+    await b.keyboard.up('Meta');
+    await until(() => b.evaluate((uid) => yap.settings.volumes[uid] === 0.9, adaUid), 2000, '90 % (⌘ too)');
+    assert.equal(await b.evaluate(([sid]) => yap.voice.peers.get(sid).audio.volume, [adaSid]), 0.9, 'and she plays at that');
+    await b.locator('#voice-channels').screenshot({ path: path.join(OUT, 'TW6-row-volume.png') });
+    await b.mouse.wheel(0, 100); // no modifier: the sidebar just scrolls
+    assert.equal(await b.evaluate((uid) => yap.settings.volumes[uid], adaUid), 0.9);
+    await b.evaluate((uid) => {
+      const input = Object.assign(document.createElement('input'), { value: '100' });
+      input.dataset.volumeUid = uid;
+      document.body.append(input);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.remove();
+    }, adaUid);
+    // Your own row isn't a button.
+    assert.equal(await b.locator(`.voice-member[data-voice-sid="${benSid}"][data-action]`).count(), 0);
+  } finally {
+    await b.evaluate((uid) => {
+      const input = Object.assign(document.createElement('input'), { value: '100' });
+      input.dataset.volumeUid = uid;
+      document.body.append(input);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.remove();
+      document.querySelector('#popover').hidden = true;
+    }, await a.evaluate(() => yap.settings.uid)).catch(() => {});
+    await b.keyboard.up('Control');
+    await b.keyboard.up('Meta');
+  }
 });
 
 await test('Settings › Voice › Hear yourself: 4 s through the gate and an Opus loopback, played back', async () => {
@@ -2778,14 +3112,75 @@ await test('space voice: rooms are voice zones (another room is silent, your roo
   assert.equal(await b.evaluate(() => yap.ui.space.voiceMode), 'room', '"This room only" is the default');
   await spaceAt(a, 430, 420); // Lounge
   await spaceAt(b, 430, 800); // Plaza
-  await b.waitForFunction((sid) => { const p = yap.voice.peers.get(sid); return p?.proximity === 0 && p.audio.volume === 0; }, sidA, { timeout: 5000 });
+  // (In your room, voices are panned, so they play through WebAudio: what you hear is the graph's gain then.)
+  await b.waitForFunction((sid) => { const p = yap.voice.peers.get(sid); return p?.proximity === 0 && (p.boost ? p.boost.gain.gain.value : p.audio.volume) === 0; }, sidA, { timeout: 5000 });
   await b.waitForFunction(() => /1 here · 1 elsewhere/.test(document.querySelector('.space-room').textContent), null, { timeout: 2000 });
   assert.match(await b.locator('.space-room').innerText(), /Plaza[\s\S]*nobody in the rooms/);
   await spaceAt(b, 480, 430); // into the Lounge
-  await b.waitForFunction((sid) => { const p = yap.voice.peers.get(sid); return p?.proximity === 1 && p.audio.volume === 1; }, sidA, { timeout: 5000 });
+  await b.waitForFunction((sid) => { const p = yap.voice.peers.get(sid); return p?.proximity === 1 && (p.boost ? p.boost.gain.gain.value : p.audio.volume) === 1; }, sidA, { timeout: 5000 });
   await a.waitForFunction((sid) => yap.voice.peers.get(sid)?.proximity === 1, sidB, { timeout: 5000 });
   await b.waitForFunction(() => document.querySelector('.space-room-name').textContent === 'Lounge' && document.querySelectorAll('.space-room-people li').length === 2, null, { timeout: 2000 });
   await b.screenshot({ path: path.join(OUT, 'desktop-space-room.png') });
+});
+
+await test('space voice: left and right — someone 400 to your left plays in your left ear (the right at 1/4), close by in both; "Nearby is louder" too; "Everyone" not at all', async () => {
+  try {
+    // What Ben's speakers get from Ada, per ear (RMS over ~0.6 s), tapped from the graph that plays her.
+    const ears = () => b.evaluate(async (sid) => {
+      const peer = yap.voice.peers.get(sid);
+      if (!peer?.boost) return null;
+      const ctx = peer.boost.merge.context;
+      const split = ctx.createChannelSplitter(2);
+      const an = [ctx.createAnalyser(), ctx.createAnalyser()];
+      peer.boost.merge.connect(split);
+      an.forEach((x, i) => split.connect(x, i));
+      const sum = [0, 0];
+      const buf = new Float32Array(2048);
+      for (let k = 0; k < 12; k++) {
+        await new Promise((r) => setTimeout(r, 50));
+        an.forEach((x, i) => {
+          x.getFloatTimeDomainData(buf);
+          sum[i] += buf.reduce((s, v) => s + v * v, 0);
+        });
+      }
+      peer.boost.merge.disconnect(split);
+      return { left: Math.sqrt(sum[0]), right: Math.sqrt(sum[1]), pan: peer.pan };
+    }, sidA);
+    await spaceAt(a, 150, 420); // both in the Lounge: Ada at the left wall…
+    await spaceAt(b, 550, 420); // …Ben 400 to her right
+    // (Space eases where people are drawn, so the pan gets within a hair of ±1.)
+    await b.waitForFunction((sid) => Math.abs(yap.voice.peers.get(sid)?.pan + 1) < 0.01, sidA, { timeout: 5000 });
+    await a.waitForFunction((sid) => Math.abs(yap.voice.peers.get(sid)?.pan - 1) < 0.01, sidB, { timeout: 5000 });
+    let e = await ears();
+    assert.ok(e.left > 0.01, `Ada is heard (${e.left.toFixed(3)})`);
+    assert.ok(Math.abs(e.right / e.left - 0.25) < 0.04, `from the left: the right ear at ${(e.right / e.left).toFixed(2)} of the left (1/4)`);
+    const [l, r] = await b.evaluate((sid) => [yap.voice.peers.get(sid).boost.left.gain.value, yap.voice.peers.get(sid).boost.right.gain.value], sidA);
+    assert.ok(l === 1 && Math.abs(r - 0.25) < 0.01, `ear gains ${l}, ${r}`);
+    await spaceAt(b, 170, 440); // right next to her: the middle
+    await b.waitForFunction((sid) => yap.voice.peers.get(sid)?.pan === 0, sidA, { timeout: 5000 });
+    e = await ears();
+    assert.ok(Math.abs(e.right / e.left - 1) < 0.05, `close by: both ears full (${(e.right / e.left).toFixed(2)})`);
+    // "Nearby is louder": panned too (and a bit quieter at 400).
+    await spaceAt(b, 550, 420);
+    await b.selectOption('.space-voice select', 'near');
+    await b.waitForFunction((sid) => { const p = yap.voice.peers.get(sid); return Math.abs(p?.pan + 1) < 0.01 && p.proximity < 1; }, sidA, { timeout: 5000 });
+    // "Everyone": no panning; she plays straight from her element again.
+    await b.selectOption('.space-voice select', 'everyone');
+    await b.waitForFunction((sid) => { const p = yap.voice.peers.get(sid); return p?.pan === null && !p.boost && p.audio.volume === 1; }, sidA, { timeout: 5000 });
+    await b.selectOption('.space-voice select', 'room');
+    // Leaving Space: back to normal.
+    await b.click('[data-action="open-channel"][data-id="general"]');
+    await b.waitForFunction((sid) => { const p = yap.voice.peers.get(sid); return p?.pan === null && !p.boost; }, sidA, { timeout: 3000 });
+    await b.click('[data-action="open-view"][data-view="space"]');
+  } finally {
+    await b.evaluate(() => {
+      const select = document.querySelector('.space-voice select');
+      if (select && select.value !== 'room') {
+        select.value = 'room';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }).catch(() => {});
+  }
 });
 
 await test('space ball: one kicks it, the other sees it roll; a goal counts for both', async () => {
@@ -3092,6 +3487,32 @@ await test('watch together: pause, play and seek reach everyone (our controls an
     return p.time > 150 && p.time < 160;
   }, 6000, "Ada's player 30 s further on");
   await until(watchInSync, 6000, 'everyone back in sync');
+});
+
+await test('watch together: "Lower shared media while friends talk" halves your volume while someone talks, never saved as yours, then brings it back', async () => {
+  try {
+    assert.equal(await b.evaluate(() => yap.settings.duckMedia), false, 'off by default');
+    await setDuckMedia(b, true);
+    // Ada's test mic never stops: Ben's player goes to half of his 70.
+    await until(async () => (await ytPlayer(b))?.volume === 35, 4000, "Ben's player at half while Ada talks");
+    assert.equal(await b.inputValue('.watch-vol'), '70', 'his slider still shows his volume');
+    // The player reports that volume back long after our last command, with Ben's focus in it: still not his volume.
+    await b.waitForTimeout(2000);
+    await b.evaluate(() => (yap.ui.watch.touchedAt = performance.now()));
+    await ytFrame(b).evaluate(() => post({ event: 'infoDelivery', info: { volume: fakePlayer.volume, muted: fakePlayer.muted } }));
+    await b.waitForTimeout(300);
+    assert.deepEqual(await b.evaluate(() => [yap.ui.watch.prefs, JSON.parse(localStorage.getItem('yap.watch'))?.volume ?? 70]), [{ volume: 70, muted: false }, 70], 'the dip was never saved as his volume');
+    await b.screenshot({ path: path.join(OUT, 'TW5-watch-lowered.png') });
+    await a.click('[data-action="toggle-mute"]');
+    await until(async () => (await ytPlayer(b))?.volume === 70, 4000, 'back to 70 once Ada stops');
+    await a.click('[data-action="toggle-mute"]');
+    await setDuckMedia(b, false);
+    await b.waitForTimeout(1500);
+    assert.equal((await ytPlayer(b)).volume, 70, 'off: Ada talking changes nothing');
+  } finally {
+    await b.evaluate(() => (yap.settings.duckMedia = false)).catch(() => {});
+    await voiceReset(a);
+  }
 });
 
 await test('watch together: browsing keeps the same player going in a mini player (no reload), voice too', async () => {

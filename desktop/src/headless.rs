@@ -113,6 +113,12 @@ pub struct Args {
     pub share_sound: bool,
     /// Watch the first person sharing in our voice channel.
     pub watch_screen: bool,
+    /// Settings › Voice › Lower shared media while friends talk (the stats
+    /// line's `duck=`, the SUMMARY's `minDuck`).
+    pub lower_media: bool,
+    /// Listen for `yap --remote` (REMOTE lines; YAP_REMOTE moves the socket).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub listen_remote: bool,
 }
 
 /// An encrypted note, opened with this device's key: `NOTE <id> text=… [gif] [image <blob id>]`.
@@ -167,6 +173,7 @@ async fn run_async(args: Args) -> i32 {
         echo_cancellation: args.echo_cancel,
         sounds: false,
         mode: args.mode.unwrap_or(InputMode::Open),
+        lower_media: args.lower_media,
         ..Config::default()
     };
     if let Some(c) = &args.color {
@@ -210,6 +217,29 @@ async fn run_async(args: Args) -> i32 {
     }
     let (obs_tx, mut obs_rx) = tokio::sync::mpsc::unbounded_channel();
     let cmd = core::start(shared.clone(), Some(obs_tx));
+    #[cfg(unix)]
+    let _remote = if args.listen_remote {
+        let path = crate::remote::socket_path(&shared.config_path);
+        let handler = core::remote_handler(shared.clone(), cmd.clone());
+        let started = start;
+        let logged: crate::remote::Handler = std::sync::Arc::new(move |r| {
+            let answer = handler(r);
+            println!("{} REMOTE {r:?} -> {answer}", ts(started));
+            answer
+        });
+        match crate::remote::listen(&path, logged) {
+            Ok(l) => {
+                println!("{} REMOTE listening", ts(start));
+                Some(l)
+            }
+            Err(e) => {
+                println!("{} REMOTE off: {e}", ts(start));
+                None
+            }
+        }
+    } else {
+        None
+    };
     let watch_first = |shared: &Arc<core::Shared>, cmd: &tokio::sync::mpsc::UnboundedSender<Cmd>, start: Instant| {
         let m = shared.model.lock();
         if m.screen.watching.is_some() {
@@ -252,6 +282,8 @@ async fn run_async(args: Args) -> i32 {
     let mut restored: Vec<String> = Vec::new();
     // Whose OBS link listens in a voice channel without them (the greyed rows), as last logged.
     let mut obs_rows = String::new();
+    // The lowest the shared-media dip went (1 = never).
+    let mut min_duck = 1f32;
 
     loop {
         tokio::select! {
@@ -664,7 +696,9 @@ async fn run_async(args: Args) -> i32 {
                 if shared.model.lock().screen.watching.is_some() {
                     let sound: u64 = shared.audio.streams().iter().filter(|s| s.sid().starts_with("screen:")).map(|s| s.stats().bytes).sum();
                     screen_sound_bytes = screen_sound_bytes.max(sound);
-                    println!("{} SCREEN frames {frames} {}x{} sound {sound}B", ts(start), size.0, size.1);
+                    let duck = shared.audio.mixer.duck.get();
+                    min_duck = min_duck.min(duck);
+                    println!("{} SCREEN frames {frames} {}x{} sound {sound}B duck={duck:.2}", ts(start), size.0, size.1);
                 }
                 if shared.screen.share.sharing() {
                     let (n, sz) = shared.screen.share.stats();
@@ -759,6 +793,7 @@ async fn run_async(args: Args) -> i32 {
         "peers": summary_peers,
         "screenFrames": shared.screen.watch.stats().0,
         "screenSoundBytes": screen_sound_bytes,
+        "minDuck": min_duck,
         "screenSize": [shared.screen.watch.stats().1.0, shared.screen.watch.stats().1.1],
         "screenEncoded": shared.screen.share.stats().0,
         "screenEncodedSize": [shared.screen.share.stats().1.0, shared.screen.share.stats().1.1],

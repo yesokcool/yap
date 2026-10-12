@@ -1,6 +1,22 @@
 {
-  "current": "0.45.2",
+  "current": "0.46.0",
   "releases": [
+    {
+      "version": "0.46.0",
+      "date": "2026-10-12",
+      "title": "Little things from Mumble",
+      "items": [
+        "If you talk while muted, Yap reminds you with a soft blip and \"You're muted\" (at most every 5 s; you can turn it off in Settings › Voice).",
+        "Mute and deafen shortcuts (Ctrl/⌘+Shift+M and Ctrl/⌘+Shift+D), and push-to-mute: hold a key to cough. Desktop app: global keys for all three, and `yap --remote mute` for Stream Decks and Linux shortcuts.",
+        "Push-to-talk clicks when it opens and closes; double-tap it to stay live, tap again to stop.",
+        "If your connection is dropping some of your audio, Yap now tells you, not just the people who hear it; the call report shows how much each friend lost of yours.",
+        "Voice rows show the volume you set for someone (and a muted speaker at 0); Ctrl/⌘ + scroll over a name changes it.",
+        "An option to lower Watch together and screen-share sound while friends talk (Settings › Voice, off by default).",
+        "Space: voices come from the left or right, where people stand (web and desktop app).",
+        "The mic meter warns when you're too loud (clipping), and 256/510 kbps now say what they cost.",
+        "iPhone and Mac: someone's volume now really changes how loud they are for you (0 %, 50 % and the boost past 100 % never worked before)."
+      ]
+    },
     {
       "version": "0.45.2",
       "date": "2026-10-11",

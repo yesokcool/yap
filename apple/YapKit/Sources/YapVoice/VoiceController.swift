@@ -27,6 +27,15 @@ public struct VoiceSettings: Codable, Sendable, Equatable {
     public var screenVolumes: [String: Double] = [:]
     /// Smooth / Sharp / Max for my next share (the Mac).
     public var shareQuality: ScreenQuality = .smooth
+    /// "Remind me when I talk while muted": a soft blip and "You're muted"
+    /// (PROTOCOL.md › Voice › Transmit gate).
+    public var mutedReminder = true
+    /// "Push-to-talk click": a quiet click, for my ears only, when push to
+    /// talk opens and when it closes.
+    public var pushToTalkClick = true
+    /// "Lower shared media while friends talk": a screen share's sound eases
+    /// to half while someone else in the call speaks (off by default).
+    public var dipSharedMedia = false
     /// The scale `vadThreshold` is on: 3 = RMS dBFS (the web's); 2 = WebRTC's
     /// peak-based counters, ~9 dB hotter; before that, a 100 ms peak level.
     var vadScale = 3
@@ -68,6 +77,16 @@ public struct VoiceSettings: Codable, Sendable, Equatable {
         volumes = (try? c.decode([String: Double].self, forKey: .volumes)) ?? [:]
         screenVolumes = (try? c.decode([String: Double].self, forKey: .screenVolumes)) ?? [:]
         shareQuality = (try? c.decode(ScreenQuality.self, forKey: .shareQuality)) ?? .smooth
+        mutedReminder = (try? c.decode(Bool.self, forKey: .mutedReminder)) ?? true
+        pushToTalkClick = (try? c.decode(Bool.self, forKey: .pushToTalkClick)) ?? true
+        dipSharedMedia = (try? c.decode(Bool.self, forKey: .dipSharedMedia)) ?? false
+    }
+
+    /// The quality warning next to 256 and 510 kbps (PROTOCOL.md › Voice):
+    /// past ~230 kbps a frame and its copy don't fit in a packet, so there's
+    /// no RED, and each friend costs several times the upload.
+    public static func qualityWarning(_ bitrate: Int) -> String? {
+        bitrate > 128_000 ? "No dropout protection at this quality (each bit of voice no longer fits twice in a packet), and several times the upload for each friend in the call." : nil
     }
 }
 
@@ -80,6 +99,11 @@ public enum VoiceEvent: Sendable, Equatable {
     case peerLeft(uid: String)
     /// I muted/unmuted or deafened/undeafened (true = now quiet).
     case quieted(Bool)
+    /// I'm talking while muted (at most every 5 s): the soft blip.
+    /// `firstTime`: the first ever on this device (say what the sound means).
+    case talkingWhileMuted(firstTime: Bool)
+    /// Push to talk went live / closed after its tail: the click (if it's on).
+    case pushToTalk(live: Bool)
 }
 
 /// iPhone: what happened to the call's audio session (the app's background
@@ -187,6 +211,11 @@ public final class VoiceController: VoiceCoordinator {
     @ObservationIgnored private var networkWatch: NetworkWatch?
     @ObservationIgnored private var network: String?
     @ObservationIgnored private var noted = NotedState()
+    /// "You're muted": one nudge every 5 s at most.
+    @ObservationIgnored private var nudge = MutedNudge()
+    @ObservationIgnored private var nudgeHide: Task<Void, Never>?
+    /// "You're muted" shows by the Mute button (for 2.5 s after each nudge).
+    public private(set) var mutedNudgeShown = false
     @ObservationIgnored private unowned let client: YapClient
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let settingsKey: String
@@ -227,6 +256,11 @@ public final class VoiceController: VoiceCoordinator {
         engine.onPeerEvent = { [weak self] sid, event in self?.notePeerEvent(sid, event) }
         engine.onStats = { [weak self] stats in self?.noteStats(stats) }
         engine.onScreenViewers = { [weak self] joined in self?.screenViewersChanged(joined: joined) }
+        engine.onTalkWhileMuted = { [weak self] in self?.talkingWhileMuted() }
+        engine.onPushToTalk = { [weak self] live in
+            guard let self, self.settings.pushToTalkClick else { return }
+            self.onEvent?(.pushToTalk(live: live))
+        }
         engine.onRekey = { [weak self] old, new in
             // The sharer I watch came back under a new session: follow it.
             if self?.watch?.sid == old { self?.watch?.sid = new }
@@ -279,6 +313,10 @@ public final class VoiceController: VoiceCoordinator {
         public var hints: [String: ConnectionHint] = [:]
         public var resuming = false
         public var silent = false
+        /// "Your connection is dropping some of your audio".
+        public var ownWeak = false
+        /// These people (uids) show as speaking.
+        public var speaking: Set<String> = []
         public init() {}
     }
 
@@ -292,6 +330,43 @@ public final class VoiceController: VoiceCoordinator {
         if engine.failed.contains(sid), state != .connected { return engine.hasRelay ? .cantConnect : .needsRelay }
         if let weak = engine.weak[sid] { return .weak(concealed: weak.concealed, rttMs: weak.rttMs) }
         return nil
+    }
+
+    /// "Your connection is dropping some of your audio": most people in my
+    /// call lose more than 3 % of what I send (PROTOCOL.md › Voice ›
+    /// Connection hints › Your own connection).
+    public var ownConnectionWeak: Bool {
+        if demo?.ownWeak == true { return true }
+        return engine.ownLinkWeak && isInVoice
+    }
+
+    /// Someone in voice is speaking (their ring): the engine's levels (or a screenshot's).
+    public func isSpeaking(_ session: Session) -> Bool {
+        if let demo, demo.speaking.contains(session.uid) { return true }
+        return engine.speaking.contains(session.sid)
+    }
+
+    /// Talking while muted (the engine says so on every reading): a soft blip
+    /// and "You're muted" at most every 5 s, if the reminder is on; the first
+    /// time ever on this device, the app also says what the sound means.
+    func talkingWhileMuted() {
+        guard settings.mutedReminder, settings.muted, !settings.deafened, !micDenied, isInVoice, nudge.talking(at: now()) else { return }
+        let key = settingsKey + ".mutedNudgeExplained"
+        let firstTime = !defaults.bool(forKey: key)
+        if firstTime { defaults.set(true, forKey: key) }
+        mutedNudgeShown = true
+        nudgeHide?.cancel()
+        nudgeHide = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(MutedNudge.shownFor))
+            guard !Task.isCancelled else { return }
+            self?.mutedNudgeShown = false
+        }
+        onEvent?(.talkingWhileMuted(firstTime: firstTime))
+    }
+
+    /// Screenshots: "You're muted" by the button, without talking.
+    public func showMutedNudgeForDemo() {
+        mutedNudgeShown = true
     }
 
     /// "Your mic is sending silence": nothing at all from it for 5 s while
@@ -696,6 +771,7 @@ public final class VoiceController: VoiceCoordinator {
         engine.mode = settings.mode
         engine.vadThreshold = settings.vadThreshold
         engine.volumes = settings.volumes
+        engine.dipSharedMedia = settings.dipSharedMedia
         engine.screenVolumes = settings.screenVolumes
         if old != nil, old?.screenVolumes != settings.screenVolumes { engine.applyScreenVolumes() }
         // A channel-wide quality overrides mine; changing mine then changes nothing.
@@ -703,7 +779,11 @@ public final class VoiceController: VoiceCoordinator {
         engine.bitrate = callBitrate
         engine.setMuted(settings.muted || micDenied)
         engine.setDeafened(settings.deafened)
-        if old == nil || old?.mode != settings.mode { engine.setPushToTalk(false) }
+        if old == nil || old?.mode != settings.mode { engine.resetPushToTalk() }
+        if !settings.muted || settings.deafened, mutedNudgeShown {
+            nudgeHide?.cancel()
+            mutedNudgeShown = false
+        }
         engine.applySettings(renegotiate: bitrateChanged)
         if channelId != nil, old?.muted != settings.muted || old?.deafened != settings.deafened {
             sendState()
@@ -747,6 +827,7 @@ struct NotedState {
     /// uid → the connection state last noted.
     var states: [String: VoiceEngine.PeerState] = [:]
     var micSilent = false
+    var ownWeak = false
     var micMode: String?
     var sensitivityAt: Date?
 }
@@ -834,6 +915,12 @@ extension VoiceController {
             noted.micSilent = micSendsSilence
             notes.note(micSendsSilence ? "\"Your mic is sending silence\" shown" : "The mic is sending sound again")
         }
+        if engine.ownLinkWeak != noted.ownWeak {
+            noted.ownWeak = engine.ownLinkWeak
+            notes.note(engine.ownLinkWeak
+                ? "Your connection is dropping some of your audio (they lose about \(Int((engine.ownLinkLost * 100).rounded())) % of yours)"
+                : "Your connection is fine again")
+        }
         if MicModes.offered {
             let mode = MicModes.reported
             if mode != noted.micMode {
@@ -863,6 +950,9 @@ extension VoiceController {
         if old.highQualityBluetooth != new.highQualityBluetooth {
             notes.note("Settings: high-quality headphone audio \(new.highQualityBluetooth ? "on" : "off") (from the next join)")
         }
+        if old.dipSharedMedia != new.dipSharedMedia {
+            notes.note("Settings: lower shared media while friends talk \(new.dipSharedMedia ? "on" : "off")")
+        }
     }
 
     static func inputText(_ settings: VoiceSettings) -> String {
@@ -890,6 +980,7 @@ extension VoiceController {
         lines.append("Music mode: not in this app")
         lines.append("Hide my IP address: \(engine.relayOnly ? "on" : settings.relayOnly ? "on, but this server has no voice relay" : "off")")
         lines.append("Redundancy (RED): \(engine.redundancy ? "on" : "off")")
+        lines.append("Lower shared media while friends talk: \(settings.dipSharedMedia ? "on" : "off")")
         #if os(iOS)
         lines.append("High-quality headphone audio: \(settings.highQualityBluetooth ? "on" : "off")")
         lines.append("Mic mode: \(MicModes.reported) (what iOS reports)")

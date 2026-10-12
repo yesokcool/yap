@@ -48,7 +48,8 @@ import UIKit
 ///   YAP_SETTINGS_PAGE=look | profile | voice | voice-advanced | notifications | account | mods | invite | about
 ///                                                  the Settings page (with YAP_SCREEN=settings; iPhone: on top of the list;
 ///                                                  voice-advanced: Voice › Advanced, its page on iPhone, unfolded on the Mac)
-///   YAP_SETTINGS_SCROLL=bottom                     iPhone: that Settings page scrolled to its end (screenshots)
+///   YAP_SETTINGS_SCROLL=bottom | talk              iPhone: that Settings page scrolled to its end, or to
+///                                                  Voice › How you talk (screenshots)
 ///   YAP_SHOW_SHELF=1 / YAP_NEW_POLL=1              the open channel's media shelf / New poll
 ///   YAP_UNREAD_LAST=N                              pretend the last N messages of the open channel are new
 ///                                                  ("New since" line, and the pill when it's off screen)
@@ -66,7 +67,12 @@ import UIKit
 ///                                                  on iPhone without the broadcast extension; nothing is captured)
 ///   YAP_DEMO_VOICE=reconnecting:Ada,weak:Ben,relay:Cleo,cantconnect:Name,resuming,silent
 ///                                                  pretend these call notes/warnings (screenshots; with voicepanel:)
+///                  ,ownweak,speaking:Ben            "Your connection is dropping some of your audio"; Ben's ring speaks
+///                  ,volume:Ada=60,muted,nudge       Ada at 60 % for me; muted; "You're muted" by the button
+///                  ,ptt,latched,bitrate:256,dip     push to talk (double-tapped live); my quality; the shared-media dip
+///                                                  (any of these starts from the default voice settings)
 ///   YAP_DEMO_MICCHECK=recording | playing | done | failed   Settings › Voice › Hear yourself in that state
+///                    | loud                        …recording, too loud (clipping)
 ///                    | run                         …or run it once (with YAP_SYNTHETIC_AUDIO=1: the test chord, played silently)
 ///   YAP_SNAPSHOT=name                              Mac: after 8 s, save each window to the app's
 ///                                                  tmp folder as yap-<name>-<n>.png and quit
@@ -208,11 +214,27 @@ struct DebugLaunch {
     func applyVoiceDemo(to model: AppModel) {
         guard let demoVoice else { return }
         var demo = VoiceController.Demo()
+        var settings = VoiceSettings()
+        var latch = false
+        func uid(_ name: String) -> String? { model.client.members.first(where: { $0.name == name })?.id }
         for item in demoVoice.split(separator: ",").map(String.init) {
             let parts = item.split(separator: ":", maxSplits: 1).map(String.init)
             switch parts[0] {
             case "resuming": demo.resuming = true
             case "silent": demo.silent = true
+            case "ownweak": demo.ownWeak = true
+            case "muted": settings.muted = true
+            case "ptt": settings.mode = .pushToTalk
+            case "latched": latch = true
+            case "dip": settings.dipSharedMedia = true
+            case "nudge": model.voice.showMutedNudgeForDemo()
+            case "bitrate": settings.bitrate = (parts.count == 2 ? Int(parts[1]) : nil).map { $0 * 1000 } ?? settings.bitrate
+            case "speaking":
+                if parts.count == 2, let id = uid(parts[1]) { demo.speaking.insert(id) }
+            case "volume":
+                // volume:Ada=60
+                let pair = parts.count == 2 ? parts[1].split(separator: "=").map(String.init) : []
+                if pair.count == 2, let id = uid(pair[0]), let percent = Double(pair[1]) { settings.volumes[id] = percent / 100 }
             default:
                 guard parts.count == 2, let uid = model.client.members.first(where: { $0.name == parts[1] })?.id else { continue }
                 let hint: ConnectionHint? = switch parts[0] {
@@ -226,6 +248,11 @@ struct DebugLaunch {
             }
         }
         model.voice.demo = demo
+        if model.voice.settings != settings { model.voice.settings = settings }
+        if latch {
+            // A double-tap, as the button would send it.
+            for down in [true, false, true, false] { model.voice.setPushToTalk(down) }
+        }
     }
 
     /// `YAP_DEMO_MICCHECK`: Hear yourself in one of its states.
@@ -236,6 +263,7 @@ struct DebugLaunch {
         case "playing": model.micCheck.show(.playing)
         case "done": model.micCheck.show(.done)
         case "failed": model.micCheck.show(.failed("Couldn't open the microphone."))
+        case "loud": model.micCheck.show(.recording, level: 0.7, tooLoud: true)
         case "run": model.hearYourself()
         default: break
         }

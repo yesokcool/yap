@@ -13,12 +13,13 @@ import { endResume, renderAll } from '../app.js';
 import { $, conn, state } from './state.js';
 import { avatar, holdFocus, popoverOpened, toast } from './ui.js';
 import { maybeUpdate } from './updates.js';
-import { setView } from './places.js';
+import { setView, watchParty } from './places.js';
+import { Ducker } from '../duck.js';
 import { renderChannels, renderHeader, renderUserPanel } from './sidebar.js';
 import { renderMembers } from './people.js';
 import { soundboard } from './extras.js';
-import { renderMeter } from './settings-ui.js';
-import { callEnded, callJoined, callMuteChanged, callPerson, callStats } from './call-report-ui.js';
+import { HIGH_BITRATE, HIGH_BITRATE_WARNING, renderMeter } from './settings-ui.js';
+import { callEnded, callJoined, callMuteChanged, callNote, callPerson, callStats } from './call-report-ui.js';
 
 let statsTimer = null;
 
@@ -257,6 +258,34 @@ voice.addEventListener('mic', ({ detail }) => {
   renderUserPanel();
 });
 voice.addEventListener('health', () => renderVoicePanel());
+voice.addEventListener('push-mute', () => renderUserPanel()); // (the Mute button shows it while the key is held)
+// Push-to-talk: a quiet click when it opens and when it closes (after the tail), in a call; "Live — tap to stop" while latched.
+voice.addEventListener('ptt-click', ({ detail: { open } }) => {
+  if (!state.voiceChannel || !settings.pttClick) return;
+  (open ? sounds.pttOn : sounds.pttOff)();
+  state.pttClicks = [...(state.pttClicks ?? []), { open, at: performance.now() }].slice(-20); // (tests read these)
+});
+voice.addEventListener('ptt-latch', () => {
+  renderUserPanel();
+  callNote(voice.pttLatched ? 'Push-to-talk latched on (double-tap)' : 'Push-to-talk latch off');
+});
+// Talking (or pressing push-to-talk) while muted, in a call: a soft blip and "You're muted" by the Mute button
+// for a few seconds (voice.js says when, at most every 5 s). The first time on this device, what the sound means.
+const MUTED_NOTE_MS = 3000;
+let mutedNoteTimer = null;
+voice.addEventListener('muted-talk', () => {
+  if (!state.voiceChannel || !settings.mutedReminder || !settings.muted || settings.deafened) return;
+  sounds.mutedTalk();
+  state.remindedMuted = (state.remindedMuted ?? 0) + 1; // (tests read this)
+  state.mutedNoteUntil = Date.now() + MUTED_NOTE_MS;
+  renderUserPanel();
+  clearTimeout(mutedNoteTimer);
+  mutedNoteTimer = setTimeout(renderUserPanel, MUTED_NOTE_MS + 50);
+  if (!settings.mutedReminderExplained) {
+    save({ mutedReminderExplained: true });
+    toast("That sound means you're muted. Turn it off in Settings › Voice.");
+  }
+});
 voice.addEventListener('quality', () => renderChannels());
 voice.addEventListener('level', ({ detail: db }) => {
   if ($('settings-dialog').open) renderMeter(db);
@@ -312,6 +341,7 @@ export function leaveVoice() {
 export function toggleMute() {
   if (settings.deafened) save({ deafened: false, muted: false });
   else save({ muted: !settings.muted });
+  state.mutedNoteUntil = 0;
   applyVoiceToggles();
   (settings.muted ? sounds.mute : sounds.unmute)();
 }
@@ -338,6 +368,37 @@ function sendVoiceState() {
   }
 }
 
+// ── Lower shared media while friends talk (Settings › Voice; duck.js) ──────
+
+const ducker = new Ducker();
+let duckTimer = null;
+
+/** Someone else in the call is talking, and you'd hear them (not turned down to 0 %, not out of earshot in Space). */
+function friendTalking() {
+  for (const sid of state.speaking) {
+    const peer = sid === state.sid ? null : voice.peers.get(sid);
+    if (peer && (settings.volumes[peer.uid] ?? 1) > 0 && (peer.proximity ?? 1) > 0) return true;
+  }
+  return false;
+}
+
+function stepDuck() {
+  const on = settings.duckMedia && Boolean(state.voiceChannel);
+  const factor = ducker.step(performance.now(), on && friendTalking(), on);
+  state.duck = factor; // (tests read it)
+  watchParty.setDuck(factor);
+  screenView?.setDuck(factor);
+  if (!on && factor === 1) {
+    clearInterval(duckTimer);
+    duckTimer = null;
+  }
+}
+
+/** Run the dip while it's on in a call (and until the volume is back where you set it). */
+export function syncDuck() {
+  if (!duckTimer && ((settings.duckMedia && state.voiceChannel) || ducker.factor < 1)) duckTimer = setInterval(stepDuck, 40);
+}
+
 function startStats() {
   stopStats();
   statsTimer = setInterval(async () => {
@@ -345,12 +406,60 @@ function startStats() {
     callStats(state.voiceStats);
     renderVoicePanel();
   }, 2000);
+  syncDuck();
 }
 
 function stopStats() {
   clearInterval(statsTimer);
   statsTimer = null;
   state.voiceStats = null;
+}
+
+/** Your volume for someone, on their row when you've changed it (PROTOCOL.md › Your volume, on the row): "60 %", or a muted speaker at 0. */
+function volumeTag(uid) {
+  const volume = Math.round((settings.volumes[uid] ?? 1) * 100);
+  const name = state.users.get(uid)?.name ?? 'them';
+  if (volume === 100) return '';
+  if (volume === 0) return `<span class="vol-tag off" role="img" aria-label="turned all the way down, for you" title="You turned ${esc(name)} all the way down (only for you)">${icon('volume-x')}</span>`;
+  return `<span class="vol-tag" title="${esc(name)} at ${volume} % for you (only you hear it this way)">${volume}\u00a0%</span>`;
+}
+
+/**
+ * Someone's volume, just for you (0–2): their voice, the row's "60 %", and
+ * an open popover or People sheet showing it (its slider, Ctrl/⌘ + scroll).
+ */
+export function setVolumeFor(uid, level) {
+  save({ volumes: { ...settings.volumes, [uid]: level } });
+  voice.applySettings();
+  // Their rows, in place (a redraw would pull the row out from under an open popover).
+  for (const row of document.querySelectorAll(`.voice-member[data-uid="${CSS.escape(uid)}"]`)) {
+    row.querySelector('.vol-tag')?.remove();
+    row.querySelector('.name')?.insertAdjacentHTML('afterend', volumeTag(uid));
+    row.classList.toggle('silenced', level === 0);
+  }
+  const pct = String(Math.round(level * 100));
+  for (const slider of document.querySelectorAll(`input[data-volume-uid="${CSS.escape(uid)}"]`)) {
+    if (slider.value !== pct) slider.value = pct;
+    slider.closest('.field')?.querySelector('output')?.replaceChildren(`${pct}%`);
+  }
+}
+
+/** Ctrl/⌘ + scroll over someone in a voice channel: their volume in 5 % steps (a mouse notch = one step; trackpads add up). */
+let wheel = { uid: null, sum: 0 };
+export function onVoiceRowWheel(e) {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  const row = e.target.closest?.('.voice-member[data-uid]');
+  if (!row) return;
+  e.preventDefault(); // (not the page's zoom)
+  const uid = row.dataset.uid;
+  if (wheel.uid !== uid) wheel = { uid, sum: 0 };
+  wheel.sum += e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1);
+  if (Math.abs(wheel.sum) < 50) return;
+  const step = wheel.sum < 0 ? 5 : -5; // up = louder
+  wheel.sum = 0;
+  const now = Math.round((settings.volumes[uid] ?? 1) * 100);
+  const next = Math.max(0, Math.min(200, Math.round((now + step) / 5) * 5));
+  if (next !== now) setVolumeFor(uid, next / 100);
 }
 
 /** A soundboard clip someone in our voice channel played (not if we're deafened, or they're muted for us). */
@@ -376,11 +485,13 @@ export function voiceMember(session) {
   const connecting = inMyChannel && !me && !ghost && state.peerStates.get(session.sid) !== 'connected';
   const flag = session.voice.deafened ? icon('headphones-off') : session.voice.muted ? icon('mic-off') : '';
   const note = inMyChannel && !me ? voiceNote(session, user, ghost) : null;
+  const name = user?.name ?? 'Unknown';
+  const silenced = !me && (settings.volumes[session.uid] ?? 1) === 0;
   return `
-    <li class="voice-member ${state.speaking.has(session.sid) ? 'speaking' : ''} ${connecting ? 'connecting' : ''} ${ghost ? 'reconnecting' : ''}"
+    <li class="voice-member ${state.speaking.has(session.sid) ? 'speaking' : ''} ${connecting ? 'connecting' : ''} ${ghost ? 'reconnecting' : ''} ${silenced ? 'silenced' : ''}"
         data-voice-sid="${esc(session.sid)}" ${me ? '' : `data-action="member-menu" data-uid="${esc(session.uid)}" role="button" tabindex="0" aria-haspopup="dialog"`}
-        title="${connecting ? 'Connecting…' : esc(user?.name ?? '')}">
-      ${avatar(user, 'sm')}<span class="name">${esc(user?.name ?? 'Unknown')}</span>
+        title="${connecting ? 'Connecting…' : me ? esc(name) : `${esc(name)} (Ctrl/⌘ + scroll: their volume, just for you)`}">
+      ${avatar(user, 'sm')}<span class="name">${esc(name)}</span>${me ? '' : volumeTag(session.uid)}
       ${note ? `<span class="vq ${note.kind}" title="${esc(note.title)}">${esc(note.text)}</span>` : ''}
       ${session.voice.screen ? `<button class="live-badge" data-action="${me ? 'share-screen' : 'watch-screen'}" data-sid="${esc(session.sid)}" title="${me ? 'You’re sharing your screen (click to stop)' : `Watch ${esc(user?.name ?? 'their')}'s screen`}">LIVE</button>` : ''}
       <span class="flags" ${flag ? `role="img" aria-label="${session.voice.deafened ? 'deafened' : 'muted'}"` : ''}>${flag}</span>
@@ -420,6 +531,12 @@ function voiceNote(session, user, ghost) {
   return null;
 }
 
+/** Why "Your connection is dropping some of your audio", in plain words (their reports, so it's on your side). */
+function ownWeakTitle({ lost }) {
+  const pct = Math.max(1, Math.round((lost ?? 0) * 100));
+  return `The others say about ${pct}% of what you send never reaches them, so it's your connection, not theirs: a busy Wi‑Fi or mobile network. It usually passes; a cable, or getting closer to the router, helps.`;
+}
+
 export function renderVoicePanel() {
   const panel = $('voice-panel');
   if (!state.voiceWanted) {
@@ -448,6 +565,7 @@ export function renderVoicePanel() {
       ${voice.micOk || state.voiceChannel !== state.voiceWanted ? '' : '<div class="vp-warn">Listening only — no mic</div>'}
       ${voice.micOk && voice.silent && !settings.muted && !settings.deafened ? '<div class="vp-warn" title="Nothing at all is coming from your microphone. Check its mute switch, or pick another one in Settings › Voice.">Your mic is sending silence</div>' : ''}
       ${voice.micOk && voice.stalled ? '<div class="vp-warn" title="Your browser paused Yap\'s audio processing. Others still hear you, just without noise removal or voice activity. Click anywhere to bring it back.">Sending your plain mic for now</div>' : ''}
+      ${voice.ownWeak ? `<div class="vp-warn own-weak" title="${esc(ownWeakTitle(voice.ownWeak))}">Your connection is dropping some of your audio</div>` : ''}
     </div>
     <div class="vp-buttons">
       ${canShareScreen && !voice.screenStream ? `<button class="btn small" data-action="share-screen" title="Share your screen with this channel">${icon('monitor')}<span>Share screen</span></button>` : ''}
@@ -619,6 +737,7 @@ export function openVoiceMore(el) {
         ${[64000, 96000, 128000, 256000, 510000].map((b) => `<option value="${b}" ${shared === b ? 'selected' : ''}>${b / 1000}k for everyone</option>`).join('')}
       </select></span>
     </label>
+    <small class="warn-note vp-quality-warn" ${(shared ?? 0) >= HIGH_BITRATE ? '' : 'hidden'}>${esc(HIGH_BITRATE_WARNING)}</small>
     <small class="muted">Your own quality is in Settings › Voice › Advanced.</small>
     <div class="pop-actions"><button type="button" class="btn small" data-action="copy-call-report" title="What Yap noticed about this call: connections, lost audio, devices. No messages or IP addresses.">Copy call report</button></div>`;
   pop.hidden = false;

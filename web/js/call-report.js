@@ -37,6 +37,8 @@ export function readCallStats(report, voiceMid) {
   };
   const out = pick('outbound-rtp');
   const inbound = pick('inbound-rtp');
+  // What they report receiving from us (their RTCP receiver reports on our voice).
+  const back = out ? all.find((s) => s.type === 'remote-inbound-rtp' && s.kind === 'audio' && (s.localId === out.id || (s.ssrc != null && s.ssrc === out.ssrc))) : null;
   const n = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
   return {
     rtt: typeof pair?.currentRoundTripTime === 'number' ? pair.currentRoundTripTime * 1000 : null,
@@ -56,6 +58,12 @@ export function readCallStats(report, voiceMid) {
       // Packets rebuilt from a redundant copy, as far as the browser counts them (Chrome 153: Opus FEC, not RED).
       fecReceived: typeof inbound.fecPacketsReceived === 'number' ? inbound.fecPacketsReceived : null,
       fecDiscarded: n(inbound.fecPacketsDiscarded),
+    } : null,
+    /** Their side of our voice: packets of ours they lost (so far), the share lost in their last report, the round trip. */
+    theirs: back ? {
+      lost: n(back.packetsLost),
+      fraction: typeof back.fractionLost === 'number' && Number.isFinite(back.fractionLost) ? back.fractionLost : null,
+      rtt: typeof back.roundTripTime === 'number' ? back.roundTripTime * 1000 : null,
     } : null,
   };
 }
@@ -204,6 +212,7 @@ export class CallLog {
         name: name ?? 'Someone', present: true, state: null, paths: [], codecs: null, codecText: null,
         out: [], in: [], rtt: [], jitter: [], packets: 0, lost: 0, samples: 0, concealed: 0, rebuilt: 0, rebuiltKnown: false,
         restarts: 0, rebuilds: 0, kept: 0, weakMs: 0, weakSince: null, last: null, span: emptySpan(),
+        yours: { sent: 0, lost: 0, rtt: [] }, // what they report about our voice (remote-inbound-rtp)
       };
       this.people.set(key, p);
     }
@@ -237,6 +246,11 @@ export class CallLog {
       p.weakSince = null;
       this.note(`${p.name}: weak connection gone`, at);
     }
+  }
+
+  /** "Your connection is dropping some of your audio" went on (`info` = { lost: 0..1 }) or off (null). */
+  ownWeak(info, at = Date.now()) {
+    this.note(info ? `Your connection is dropping some of your audio (they lose about ${Math.round((info.lost ?? 0) * 100)} % of yours)` : 'Your connection is fine again', at);
   }
 
   /** They're out of the call (`text` says how); their numbers stay. */
@@ -303,6 +317,14 @@ export class CallLog {
     if (s && outBefore && elapsed > 0) {
       p.out.push(((s.bytes - outBefore.bytes) * 8) / elapsed);
       span.bytesOut += s.bytes - outBefore.bytes;
+    }
+    // Ours, as they got it: their lost count against what we sent, from their first report on.
+    const theirs = reading.theirs;
+    if (theirs && s) {
+      const b = prev?.reading.theirs && outBefore ? { lost: prev.reading.theirs.lost, sent: outBefore.packets } : { lost: 0, sent: 0 };
+      p.yours.sent += Math.max(0, s.packets - b.sent);
+      p.yours.lost += Math.max(0, theirs.lost - b.lost);
+      if (theirs.rtt != null) p.yours.rtt.push(theirs.rtt);
     }
     if (prev && elapsed > 0) span.ms += elapsed;
     if (reading.rtt != null) {
@@ -390,6 +412,7 @@ export function formatReport(log, now = Date.now()) {
       `  Jitter buffer (median): ${ms(median(p.jitter))}`,
       `  ICE restarts: ${p.restarts}, connection rebuilds: ${p.rebuilds}, reconnects kept: ${p.kept}`,
       `  Weak connection shown: ${weakMs > 0 ? duration(weakMs) : 'never'}`,
+      `  From you: ${p.yours.sent > 0 ? `they lost ${pct(p.yours.lost, p.yours.sent)} of yours (their round trip ${ms(median(p.yours.rtt))} median)` : 'no reports from them'}`,
     );
   }
   lines.push('', 'Timeline');

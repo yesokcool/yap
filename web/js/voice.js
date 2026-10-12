@@ -1,5 +1,6 @@
 import { settings } from './settings.js';
 import { negotiatedVoice, readCallStats } from './call-report.js';
+import { ClipWatch, MutedReminder, PttLatch } from './gate-worklet.js';
 
 /**
  * RNNoise (the noise remover the desktop app uses too), as an AudioWorklet
@@ -45,7 +46,13 @@ async function rnnoiseNode(ctx) {
  *         'peer' ({sid, state}), 'mic' ({ok, error}), 'health' (silent /
  *         stalled changed), 'screen' ({sid, stream}: a screen we watch came
  *         or went), 'screen-local' (our share started, stopped or changed),
- *         'viewers' (who watches our share changed).
+ *         'viewers' (who watches our share changed), 'muted-talk' (you're
+ *         talking, or pressed push-to-talk, while muted: remind them; at most
+ *         every 5 s), 'push-mute' ({down}: the push-to-mute key),
+ *         'own-quality' ({weak}: most people lose > 3 % of your audio, or
+ *         not any more), 'ptt-latch' ({latched}: double-tapped to stay live, or not any
+ *         more), 'ptt-click' ({open}: push-to-talk opened, or closed after
+ *         its tail; for your ears only).
  *
  * The mic's path: getUserMedia (the browser's echo cancellation and gain, and
  * its noise suppression only where RNNoise can't run) → RNNoise (Noise
@@ -67,6 +74,39 @@ const REMOTE_HOLD_MS = 250;
 /** A connection reads as weak when this much of their audio is patched over (concealed) or the round trip is this slow. */
 const WEAK_CONCEALED = 0.03;
 const WEAK_RTT_MS = 300;
+
+/**
+ * Your own connection (PROTOCOL.md › Connection hints): each 2 s, what the
+ * people you're sending to report losing of your audio (`fractionLost` in
+ * their receiver reports). When more than 3 % is lost for most of them (or
+ * the only one) three rounds in a row, it's your side: "Your connection is
+ * dropping some of your audio"; gone after three good rounds.
+ */
+export class OwnConnection {
+  /** null, or { lost: 0..1 (the middle of what they report), rtt: ms } */
+  weak = null;
+  #run = 0; // consecutive bad (+) or good (−) rounds
+
+  /** One round: [{ fraction, rtt }] for each person we're sending to who reported. True when `weak` changed. */
+  round(reports) {
+    const judged = reports.filter((r) => typeof r?.fraction === 'number');
+    const was = Boolean(this.weak);
+    if (!judged.length) {
+      // Nobody to judge by (alone, or no reports yet): no hint.
+      this.#run = 0;
+      this.weak = null;
+      return was;
+    }
+    const bad = judged.filter((r) => r.fraction > WEAK_CONCEALED).length * 2 > judged.length;
+    this.#run = bad ? Math.max(1, this.#run + 1) : Math.min(-1, this.#run - 1);
+    const middle = (list) => (list.length ? [...list].sort((a, b) => a - b)[list.length >> 1] : null);
+    const info = { lost: middle(judged.map((r) => r.fraction)), rtt: middle(judged.map((r) => r.rtt).filter((v) => v != null)) };
+    if (this.#run >= 3) this.weak = info;
+    else if (this.#run <= -3) this.weak = null;
+    else if (this.weak && bad) this.weak = info;
+    return was !== Boolean(this.weak);
+  }
+}
 
 /** The voice channel's quality, if it sets one; else your own setting. */
 let channelBitrate = null;
@@ -147,18 +187,31 @@ export class Voice extends EventTarget {
   micOk = false;
   muted = false;
   deafened = false;
+  /** Push-to-talk is on: its key is held, or it's latched (double-tap). */
   pttDown = false;
+  /** Push-to-talk is latched on by a double-tap ("Live — tap to stop"). */
+  get pttLatched() {
+    return this.#latch.latched;
+  }
+  /** The push-to-mute key is held: muted for that long (a "cough button"), whatever the mode. */
+  pushMuted = false;
   /** The gate is letting audio through (voice activity incl. its hold, push-to-talk incl. its tail, or always-on). */
   gateOpen = false;
   /** Where voice activity opens right now (your sensitivity, or higher in a noisy room). */
   openAt = -50;
   localDb = -100;
+  /** The mic's peaks keep hitting the top ("Too loud (clipping)" on the meter). */
+  clipping = false;
+  #clip = new ClipWatch();
   /** A mic test is running: push-to-talk acts like always-on. */
   micTest = false;
   /** The mic has sent nothing but digital silence for 5 s (a hardware mute switch, a dead device). */
   silent = false;
   /** The audio graph stopped reporting: peers get the plain mic meanwhile (fail open). */
   stalled = false;
+  /** Most people lose > 3 % of your audio ("Your connection is dropping some of your audio"): null or { lost, rtt }. */
+  ownWeak = null;
+  #own = new OwnConnection();
   #fallback = null; // that plain mic track, while stalled
   #lastLevelAt = 0;
   #watchdog = null;
@@ -177,6 +230,10 @@ export class Voice extends EventTarget {
   #handoverCheck = null;
   #iceAt = 0;
   #selfSpeaking = false;
+  #reminder = new MutedReminder();
+  #latch = new PttLatch();
+  #clicked = 0; // when push-to-talk's opening click played (0: it isn't open)…
+  #sawOpen = false; // …and the gate has said it's open since: its closing click comes when it closes
 
   /** Your screen share (getDisplayMedia), or null. */
   screenStream = null;
@@ -588,6 +645,8 @@ export class Voice extends EventTarget {
     this.#fallback = null;
     this.stalled = false;
     this.silent = false;
+    this.clipping = false;
+    this.#clip = new ClipWatch();
     this.rawStream?.getTracks().forEach((t) => t.stop());
     this.sendTrack?.stop();
     this.rawStream = null;
@@ -597,8 +656,19 @@ export class Voice extends EventTarget {
   // ── Transmit gate: mute / deafen / voice activity / push-to-talk ─────────
 
   setMuted(muted) {
+    if (muted && !this.muted) this.#reminder.muted(performance.now());
     this.muted = muted;
     this.#applyGate();
+  }
+
+  /**
+   * You're talking (the gate would open), or pressed push-to-talk, while
+   * muted: 'muted-talk', at most every 5 s (gate-worklet.js › MutedReminder).
+   * Not while deafened: that's a louder "I'm away" than mute.
+   */
+  #talkingWhileMuted() {
+    if (!this.muted || this.deafened || !this.micOk || !this.#reminder.due(performance.now())) return;
+    this.#emit('muted-talk');
   }
 
   setDeafened(deafened) {
@@ -620,17 +690,66 @@ export class Voice extends EventTarget {
     return this.#out;
   }
 
+  /** Push-to-mute: muted while the key is held, like mute (a hard switch here), but nothing is saved or broadcast. */
+  setPushToMute(down) {
+    if (this.pushMuted === down) return;
+    this.pushMuted = down;
+    this.#applyGate();
+    this.#emit('push-mute', { down });
+  }
+
+  /**
+   * The push-to-talk key went down or up. Pressed twice within 400 ms it
+   * stays open until the next press (PttLatch). Opening clicks at once (or
+   * reminds you that you're muted); closing clicks when the gate closes,
+   * after the tail (#onLevel).
+   */
   setPtt(down) {
-    if (this.pttDown === down) return;
-    this.pttDown = down;
+    if (down === this.#latch.held) return;
+    const latched = this.#latch.latched;
+    if (down) this.#latch.down(performance.now());
+    else this.#latch.up();
+    if (latched !== this.#latch.latched) this.#emit('ptt-latch', { latched: this.#latch.latched });
+    const open = this.#latch.open;
+    if (open === this.pttDown) return;
+    this.pttDown = open;
+    if (open && settings.mode === 'ptt') {
+      if (this.muted || this.deafened) this.#talkingWhileMuted();
+      else if (!this.pushMuted && !this.micTest && !this.#clicked) {
+        // (Pressed again within the tail: it never closed, so no second click.)
+        this.#clicked = performance.now();
+        this.#sawOpen = false;
+        this.#emit('ptt-click', { open: true });
+      }
+    }
+    this.#applyGate();
+  }
+
+  /** Push-to-talk off for good, latch and all (the input mode changed). */
+  releasePtt() {
+    const latched = this.#latch.latched;
+    this.#latch.reset();
+    this.#clicked = 0;
+    if (latched) this.#emit('ptt-latch', { latched: false });
+    if (!this.pttDown) return;
+    this.pttDown = false;
     this.#applyGate();
   }
 
   /** A report from the gate, every 20 ms (gate-worklet.js). */
-  #onLevel({ db, open, at, silent }) {
+  #onLevel({ db, peak, open, voice, pttOpen, at, silent }) {
     this.localDb = db;
+    this.clipping = this.#clip.push(peak ?? -120, performance.now());
     this.gateOpen = open;
     this.openAt = at;
+    // Push-to-talk's closing click: once the gate has closed after the tail.
+    if (this.#clicked && pttOpen) this.#sawOpen = true;
+    else if (this.#clicked && !pttOpen && !this.pttDown) {
+      if (this.#sawOpen) this.#emit('ptt-click', { open: false });
+      if (this.#sawOpen || performance.now() - this.#clicked > 1000) this.#clicked = 0; // (or it never opened: the gate stalled)
+    }
+    // Talking while muted: the level is measured before the mute (push-to-talk reminds on the key instead).
+    if (voice && settings.mode !== 'ptt') this.#talkingWhileMuted();
     this.#lastLevelAt = performance.now();
     if (this.stalled) this.#setStalled(false);
     if (silent !== this.silent) {
@@ -661,13 +780,13 @@ export class Voice extends EventTarget {
   }
 
   get transmitting() {
-    return Boolean(this.sendTrack) && !this.muted && !this.deafened && this.gateOpen;
+    return Boolean(this.sendTrack) && !this.muted && !this.pushMuted && !this.deafened && this.gateOpen;
   }
 
   #applyGate() {
     this.#syncGate();
-    // Mute/deafen: certain, from here. Everything else is the gate's job.
-    const enabled = !this.muted && !this.deafened;
+    // Mute/deafen (and push-to-mute): certain, from here. Everything else is the gate's job.
+    const enabled = !this.muted && !this.pushMuted && !this.deafened;
     if (this.sendTrack && this.sendTrack.enabled !== enabled) this.sendTrack.enabled = enabled;
     // The fail-open fallback has no gate: push-to-talk still works (from here), voice activity = always on.
     if (this.#fallback) this.#fallback.enabled = enabled && (settings.mode !== 'ptt' || this.pttDown);
@@ -847,6 +966,8 @@ export class Voice extends EventTarget {
   /** Leave the call but keep the mic (e.g. socket reconnecting). */
   hangupAll() {
     for (const sid of [...this.peers.keys()]) this.drop(sid);
+    this.#own = new OwnConnection();
+    this.ownWeak = null;
     clearInterval(this.#pollTimer);
     this.#pollTimer = null;
     clearTimeout(this.#handoverCheck);
@@ -955,11 +1076,19 @@ export class Voice extends EventTarget {
     this.#selfSpeaking = false;
   }
 
-  /** Space view: scale one person's volume by how far away they are (1 = full). */
-  setProximity(sid, factor) {
+  /**
+   * Space view: scale one person's volume by how far away they are (1 =
+   * full), and pan them left or right (−1…1; null = not panned, played
+   * straight from their element as usual).
+   */
+  setProximity(sid, factor, pan = null) {
     const peer = this.peers.get(sid);
-    if (!peer || Math.abs((peer.proximity ?? 1) - factor) < 0.02) return;
+    if (!peer) return;
+    // (Small steps of an easing wait for a bigger one, but a resting value — 0, 1, ±1 — always lands.)
+    const near = (a, b) => a === b || (a !== null && b !== null && Math.abs(a - b) < 0.02 && !Number.isInteger(b));
+    if (near(peer.proximity ?? 1, factor) && near(peer.pan ?? null, pan)) return;
     peer.proximity = factor;
+    peer.pan = pan;
     peer.applyOutput();
   }
 
@@ -1010,12 +1139,15 @@ export class Voice extends EventTarget {
    * Average round-trip time (ms) and what we're actually sending (kbps), plus
    * each connection's reading for the call report (`peers`: { sid, uid, peer,
    * reading, codecs }; see call-report.js › readCallStats, negotiatedVoice).
+   * Also judges your own connection (OwnConnection): 'own-quality' when the
+   * hint comes or goes.
    */
   async stats() {
     let rtt = 0;
     let rttCount = 0;
     let sendKbps = 0;
     const peers = [];
+    const yours = []; // what each person we're sending to reports losing of our voice
     for (const peer of [...this.peers.values()]) {
       const s = await peer.stats();
       if (s.rtt != null) {
@@ -1024,7 +1156,14 @@ export class Voice extends EventTarget {
       }
       sendKbps = Math.max(sendKbps, s.sendKbps ?? 0);
       if (s.weakChanged) this.#emit('quality', { sid: peer.sid, weak: peer.weak });
+      if (s.sending && s.reading.theirs) yours.push(s.reading.theirs);
       peers.push({ sid: peer.sid, uid: peer.uid, peer, reading: s.reading, codecs: negotiatedVoice(peer.pc.localDescription?.sdp, peer.pc.remoteDescription?.sdp) });
+    }
+    if (this.#own.round(yours)) {
+      this.ownWeak = this.#own.weak;
+      this.#emit('own-quality', { weak: this.ownWeak });
+    } else if (this.ownWeak) {
+      this.ownWeak = this.#own.weak; // (still on: the latest numbers)
     }
     return { rtt: rttCount ? Math.round(rtt / rttCount) : null, sendKbps: Math.round(sendKbps), peers };
   }
@@ -1339,10 +1478,12 @@ class Peer {
   }
 
   /**
-   * Volume, deafen and output device. Up to 100% the <audio> element plays it;
-   * past that a WebAudio gain node does (the element keeps playing, muted,
-   * because Chrome only feeds WebRTC audio to WebAudio while an element plays it),
-   * followed by a limiter so a boosted shout can't clip or blast your ears.
+   * Volume, deafen, Space's left/right and output device. Up to 100% the
+   * <audio> element plays it; past that, or while Space pans them, a WebAudio
+   * graph does (the element keeps playing, muted, because Chrome only feeds
+   * WebRTC audio to WebAudio while an element plays it): a gain, a gain per
+   * ear (panGains), then a limiter so a boosted shout can't clip or blast
+   * your ears.
    */
   applyOutput({ force = false } = {}) {
     if (this.voice.listenOnly) {
@@ -1354,11 +1495,20 @@ class Peer {
     }
     const uid = this.voice.uidOf(this.sid);
     const level = Math.max(0, (settings.volumes[uid] ?? 1) * (this.proximity ?? 1));
-    if (level > 1.001 && this.audio.srcObject) {
+    const pan = this.pan ?? null;
+    if ((level > 1.001 || pan !== null) && this.audio.srcObject) {
       if (!this.boost) {
         const ctx = this.voice.outputContext();
         const source = ctx.createMediaStreamSource(this.audio.srcObject);
         const gain = ctx.createGain();
+        // Two channels from here on (a mono voice goes to both), one gain per ear.
+        gain.channelCount = 2;
+        gain.channelCountMode = 'explicit';
+        gain.channelInterpretation = 'speakers';
+        const split = ctx.createChannelSplitter(2);
+        const left = ctx.createGain();
+        const right = ctx.createGain();
+        const merge = ctx.createChannelMerger(2);
         // A brick-wall-ish limiter just under full scale (the boost is for quiet talkers, not loud ones).
         const limiter = ctx.createDynamicsCompressor();
         limiter.threshold.value = -3;
@@ -1366,10 +1516,18 @@ class Peer {
         limiter.ratio.value = 20;
         limiter.attack.value = 0.002;
         limiter.release.value = 0.15;
-        source.connect(gain).connect(limiter).connect(ctx.destination);
-        this.boost = { source, gain, limiter };
+        source.connect(gain).connect(split);
+        split.connect(left, 0);
+        split.connect(right, 1);
+        left.connect(merge, 0, 0);
+        right.connect(merge, 0, 1);
+        merge.connect(limiter).connect(ctx.destination);
+        this.boost = { source, gain, split, left, right, merge, limiter };
       }
       this.boost.gain.gain.value = this.voice.deafened ? 0 : level;
+      const [l, r] = panGains(pan ?? 0);
+      this.boost.left.gain.value = l;
+      this.boost.right.gain.value = r;
       this.audio.muted = true;
     } else {
       this.#unboost();
@@ -1384,9 +1542,7 @@ class Peer {
 
   #unboost() {
     if (!this.boost) return;
-    this.boost.source.disconnect();
-    this.boost.gain.disconnect();
-    this.boost.limiter.disconnect();
+    for (const node of Object.values(this.boost)) node.disconnect();
     this.boost = null;
   }
 
@@ -1444,9 +1600,11 @@ class Peer {
     const last = this.#lastStats;
     let sendKbps = null;
     let weakChanged = false;
+    let sending = false; // our voice goes out to them (≥ 30 packets a second): their reports on it count
     if (last) {
       const secs = (now - last.at) / 1000;
       if (secs > 0) sendKbps = ((bytesSent - last.bytesSent) * 8) / 1000 / secs;
+      sending = secs > 0 && this.pc.connectionState === 'connected' && ((reading.sent?.packets ?? 0) - (last.sentPackets ?? 0)) / secs >= 30;
       const pps = inbound && last.inbound ? (inbound.packets - last.inbound.packets) / secs : 0;
       if (pps >= 30 && this.pc.connectionState === 'connected' && now - this.#connectedAt > 10_000) {
         const samples = inbound.samples - last.inbound.samples;
@@ -1461,8 +1619,8 @@ class Peer {
         weakChanged = was !== Boolean(this.weak);
       }
     }
-    this.#lastStats = { at: now, bytesSent, inbound };
-    return { rtt, sendKbps, weakChanged, reading };
+    this.#lastStats = { at: now, bytesSent, inbound, sentPackets: reading.sent?.packets ?? 0 };
+    return { rtt, sendKbps, weakChanged, reading, sending };
   }
 
   close() {
@@ -1475,6 +1633,17 @@ class Peer {
   }
 }
 
+/**
+ * Space's left/right as a gain per ear (PROTOCOL.md › Space): the near ear
+ * stays full, the far one goes down to 1/4 of it at the edge (pan ±1), and
+ * the middle (0) is full in both. [left, right].
+ */
+export function panGains(pan) {
+  const p = Math.max(-1, Math.min(1, Number(pan) || 0));
+  const far = 1 - 0.75 * Math.abs(p);
+  return p >= 0 ? [far, 1] : [1, far];
+}
+
 /** Screen-share audio (a tab, a game) is music: stereo and at least this rich. */
 export const screenAudioBitrate = () => Math.max(callBitrate(), 160_000);
 
@@ -1484,8 +1653,10 @@ const TWCC = /^a=(?:rtcp-fb:\d+ transport-cc|extmap:\d+(?:\/\w+)? http:\/\/www\.
  * Tune every audio section of our SDP (offer or answer) before
  * setLocalDescription. The Opus parameters describe what *we* want to
  * receive, so each side tunes its own description:
- *  - maxaveragebitrate: our quality setting (the call runs at the lower of
- *    the two people's settings; the sender also caps itself via maxBitrate)
+ *  - maxaveragebitrate: our quality setting, what we ask to receive. It's a
+ *    request, not a cap: browsers (libwebrtc) don't hold their encoder to the
+ *    other side's value, so each person's voice goes out at their own setting
+ *    (the sender caps itself via maxBitrate; measured 2026-10-11)
  *  - useinbandfec=1: forward error correction — survives packet loss
  *  - usedtx=0: keep sending during silence (no clipped first syllables)
  *  - stereo=1: we can play stereo (music mode, screen-share audio). It also

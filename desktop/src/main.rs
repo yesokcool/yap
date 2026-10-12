@@ -16,6 +16,7 @@ mod notify;
 mod picture;
 mod protocol;
 mod ptt;
+mod remote;
 mod screen;
 mod ui;
 mod update;
@@ -29,7 +30,14 @@ yap — native desktop client for Yap
 
 USAGE:
   yap [--config FILE] [--server URL|INVITE] [--key KEY]
+  yap --remote CMD [--config FILE]
   yap --headless --server URL [options]
+
+REMOTE (macOS, Linux; for Wayland and Stream Decks):
+  --remote CMD         Tell the running app (the one with these settings) to
+                       mute, unmute, toggle-mute, deafen, undeafen, toggle-deafen,
+                       or just say how it is (status). Prints its answer, e.g.
+                       \"muted, in a call\". A private socket: only you can use it.
 
 OPTIONS (window):
   --config FILE        Use this settings file instead of the default one
@@ -110,6 +118,10 @@ OPTIONS (headless test mode):
   --share-sound        ...with a test tone as the share's sound
   --watch-screen       Watch the first person sharing in our voice channel (SCREEN
                        frames lines; the SUMMARY says how many pictures decoded, and their size)
+  --lower-media        Lower shared media while friends talk: the share's sound dips
+                       to half while someone talks (SCREEN … duck=, SUMMARY minDuck)
+  --listen-remote      Answer `yap --remote` (REMOTE lines; YAP_REMOTE=<path> puts the
+                       socket there, for both ends)
   --delete-after SECS  Delete our last picture (else last message) SECS in (encrypted: with its blob)
   --token TOKEN        Sign in with a device token (one of --password / --token is needed)
   --duration SECS      Exit after SECS (default: run until killed)
@@ -141,6 +153,7 @@ fn main() {
     let mut key: Option<String> = None;
     let mut list_devices = false;
     let mut update_mode: Option<bool> = None;
+    let mut remote: Option<String> = None;
     let need = |args: &mut std::iter::Peekable<std::iter::Skip<std::env::Args>>, flag: &str| -> String {
         args.next().unwrap_or_else(|| {
             eprintln!("{flag} needs a value");
@@ -230,6 +243,9 @@ fn main() {
             }
             "--share-sound" => h.share_sound = true,
             "--watch-screen" => h.watch_screen = true,
+            "--lower-media" => h.lower_media = true,
+            "--listen-remote" => h.listen_remote = true,
+            "--remote" => remote = Some(need(&mut args, "--remote")),
             "--delete-after" => h.delete_after = need(&mut args, "--delete-after").parse().ok(),
             "--channel-bitrate" => h.channel_bitrate = need(&mut args, "--channel-bitrate").parse().ok(),
             "--update-check" => update_mode = Some(false),
@@ -247,6 +263,11 @@ fn main() {
                 std::process::exit(2);
             }
         }
+    }
+
+    // `yap --remote CMD`: tell the running app, print its answer, done.
+    if let Some(cmd) = remote {
+        std::process::exit(remote_cli(&cmd, &config_path.unwrap_or_else(config::Config::default_path)));
     }
 
     update::cleanup();
@@ -297,6 +318,37 @@ fn main() {
     }
     if update::should_relaunch() {
         update::relaunch();
+    }
+}
+
+/// `yap --remote CMD [--config FILE]`: mute, deafen… the app that's running with those settings.
+fn remote_cli(cmd: &str, config: &std::path::Path) -> i32 {
+    if remote::Remote::parse(cmd).is_none() {
+        eprintln!("yap --remote: unknown command {cmd:?} (one of: {})", remote::COMMANDS);
+        return 2;
+    }
+    #[cfg(unix)]
+    {
+        match remote::send(&remote::socket_path(config), cmd) {
+            Ok(answer) if answer.starts_with("error") => {
+                eprintln!("yap: {answer}");
+                1
+            }
+            Ok(answer) => {
+                println!("{answer}");
+                0
+            }
+            Err(e) => {
+                eprintln!("yap: {e}");
+                1
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = config;
+        eprintln!("yap --remote isn't on Windows yet: the global keys in Settings › Voice work everywhere there.");
+        2
     }
 }
 

@@ -66,6 +66,16 @@ public struct PeerStats: Sendable, Equatable {
     /// The Opus fmtp in our own description: what we asked the far side to send.
     public var opusFmtpAsked: String?
 
+    // What they report receiving from us (`remote-inbound-rtp` about our
+    // voice, from their RTCP reports; PROTOCOL.md › Voice › Connection hints ›
+    // Your own connection): the share lost in their latest report (0…1), how
+    // many of ours they've lost so far, the round trip measured with them,
+    // and how many such measurements (nil/0 until their first report).
+    public var remoteFractionLost: Double?
+    public var remotePacketsLost = 0
+    public var remoteRttMs: Double?
+    public var remoteReports = 0
+
     public init(sid: String) {
         self.sid = sid
     }
@@ -136,6 +146,19 @@ public struct PeerStats: Sendable, Equatable {
             default:
                 break
             }
+        }
+        // Their report about our voice: the remote-inbound-rtp whose outbound
+        // stream is the voice's (the first audio section), else the only one.
+        let remote = rows.values.filter { $0.type == "remote-inbound-rtp" && $0.values["kind"] as? String == "audio" }
+        let voiceReport = remote.first { row in
+            guard let voiceMid, let local = (row.values["localId"] as? String).flatMap({ rows[$0] }) else { return false }
+            return local.values["mid"] as? String == voiceMid
+        } ?? (remote.count == 1 ? remote.first : nil)
+        if let v = voiceReport?.values {
+            stats.remoteFractionLost = number(v, "fractionLost")?.doubleValue
+            stats.remotePacketsLost = max(0, number(v, "packetsLost")?.intValue ?? 0)
+            stats.remoteRttMs = number(v, "roundTripTime").map { $0.doubleValue * 1000 }
+            stats.remoteReports = number(v, "roundTripTimeMeasurements")?.intValue ?? 0
         }
         if let pair = (transportPair ?? nominatedPair).flatMap({ rows[$0] }) {
             if let rtt = pair.values["currentRoundTripTime"] as? NSNumber { stats.rttMs = rtt.doubleValue * 1000 }

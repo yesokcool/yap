@@ -21,10 +21,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Instant;
 
-/// The latest report about our stream: fraction lost (0–255, of 256) and how many reports so far.
+/// The latest report about our stream: fraction lost (0–255, of 256), the
+/// cumulative count they've lost, and how many reports so far.
 #[derive(Default)]
 pub struct LossReport {
     fraction: AtomicU32,
+    total_lost: AtomicU32,
     reports: AtomicU32,
     /// Our sending SSRC (reports about anything else are ignored); 0 = take any.
     pub ssrc: AtomicU32,
@@ -42,6 +44,11 @@ impl LossReport {
         (self.fraction.load(Ordering::Relaxed) as f64 / 256.0, self.reports.load(Ordering::Relaxed))
     }
 
+    /// How many of our packets they've lost in all (RTCP's cumulative count), as of the latest report.
+    pub fn total_lost(&self) -> u32 {
+        self.total_lost.load(Ordering::Relaxed)
+    }
+
     /// The latest report about our screen video: (fraction lost 0–1, reports so far).
     pub fn video(&self) -> (f64, u32) {
         (self.video_fraction.load(Ordering::Relaxed) as f64 / 256.0, self.video_reports.load(Ordering::Relaxed))
@@ -56,6 +63,9 @@ impl LossReport {
                 self.video_reports.fetch_add(1, Ordering::Relaxed);
             } else if ours == 0 || b.ssrc == ours {
                 self.fraction.store(b.fraction_lost as u32, Ordering::Relaxed);
+                // (24 bits, signed: duplicates can make it "negative"; that's none lost.)
+                let total = if b.total_lost & 0x80_0000 != 0 { 0 } else { b.total_lost & 0xff_ffff };
+                self.total_lost.store(total, Ordering::Relaxed);
                 self.reports.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -147,10 +157,13 @@ mod tests {
     fn reads_blocks_from_sender_and_receiver_reports() {
         let r = Arc::new(LossReport::default());
         r.ssrc.store(7, Ordering::Relaxed);
-        let block = |ssrc, fraction_lost| ReceptionReport { ssrc, fraction_lost, ..Default::default() };
-        r.take(&SenderReport { reports: vec![block(9, 200), block(7, 13)], ..Default::default() }.reports);
+        let block = |ssrc, fraction_lost, total_lost| ReceptionReport { ssrc, fraction_lost, total_lost, ..Default::default() };
+        r.take(&SenderReport { reports: vec![block(9, 200, 900), block(7, 13, 40)], ..Default::default() }.reports);
         assert_eq!(r.latest(), (13.0 / 256.0, 1), "only the block about our stream");
-        r.take(&ReceiverReport { reports: vec![block(7, 0)], ..Default::default() }.reports);
-        assert_eq!(r.latest(), (0.0, 2));
+        assert_eq!(r.total_lost(), 40);
+        r.take(&ReceiverReport { reports: vec![block(7, 0, 41)], ..Default::default() }.reports);
+        assert_eq!((r.latest(), r.total_lost()), ((0.0, 2), 41));
+        r.take(&ReceiverReport { reports: vec![block(7, 0, 0xff_fffe)], ..Default::default() }.reports);
+        assert_eq!(r.total_lost(), 0, "a \"negative\" count (duplicates) is none lost");
     }
 }

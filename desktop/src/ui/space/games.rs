@@ -134,6 +134,7 @@ impl SpaceUi {
     pub(super) fn on_leave(&mut self, c: &mut Ctx, sid: &str, last: Option<(f32, f32)>) {
         self.shown.remove(sid);
         self.vol.remove(sid);
+        self.pan.remove(sid);
         self.fx.remove(sid);
         self.laps.remove(sid);
         self.splashes.remove(sid);

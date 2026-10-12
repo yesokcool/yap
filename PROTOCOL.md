@@ -395,7 +395,11 @@ its doorway counts as inside. Space voice is a per-device choice
 your zone at 100 %, everyone else on Space at 0 %; `near` = full volume
 within 260 units, fading to 12 % at 1100; `everyone` = no change. Use the
 other person's last reported spot, ease the volume over ~0.4 s so doorways
-crossfade, and leave people who are in the call but not on Space alone.
+crossfade, and leave people who are in the call but not on Space alone. In
+`near` (and inside your own room) voices are also **panned left/right** by
+where the person stands relative to you on screen: pan = clamp(dx / 400, −1, 1)
+with the far ear never under 1/4 of the near one, and anyone within 60 units in
+the middle (both ears full): near ear 1, far ear 1 − 0.75·|pan|; ease the pan with the volume. "Everyone" and screen-share sound are never panned. *(The iPhone/Mac app plays the call with its own engine, so Space's voice rules don't reach it yet.)*
 
 **Mini-games** (`space.game { g, d }`). Nothing is stored, so whoever owns a
 piece of state answers `sync`. People are named by the first 8 characters of
@@ -912,8 +916,15 @@ webrtc-rs refuses an edited local description. A native client built on another 
 same, or native ↔ native calls pad again.)*
 
 Also cap your own sender: `encodings[0].maxBitrate = <your setting>`,
-`priority`/`networkPriority = "high"`. Net effect: each direction runs at the
-lower of the two people's settings. Default 128 kbps; offer 64/96/128/256/510.
+`priority`/`networkPriority = "high"`. In practice each person's audio goes
+out at **their own** setting: browsers (and libwebrtc) don't hold their encoder
+to the receiver's `maxaveragebitrate`, so a 510 kbps sender sends 510 to a
+128 kbps listener (measured 2026-10-11); the receiver's value is a request, not
+a cap. Default 128 kbps; offer 64/96/128/256/510. Next to 256 and 510, clients
+say: "No dropout protection at this quality (each bit of voice no longer fits
+twice in a packet), and several times the upload for each friend in the call."
+(Opus is "pretty much transparent" at 128 kbps per Xiph; a few hard music
+samples stay detectable for trained listeners up to 160–192 kbps.)
 
 **Redundancy (RED, RFC 2198) on the voice.** In the voice section (the
 first audio section), offer and answer `red/48000/2` with
@@ -976,6 +987,10 @@ client should do (the web's is `web/js/gate-worklet.js`, with tests):
 | Fades | 5 ms in, 15 ms out (no clicks) |
 | Music mode + voice activity | behaves as always-on (a gate cuts quiet passages out of music) |
 | Mute / deafen | a hard switch outside the gate, so it holds even if audio processing stalls |
+| Talking while muted | measure the level before the mute; when the gate *would* open (or push-to-talk is pressed) while you're muted, show "You're muted" by the Mute button and play a soft blip, at most once every **5 s**; the first time ever on a device, say once what that sound means ("That sound means you're muted. Turn it off in Settings › Voice."). Setting: **Remind me when I talk while muted** (on). |
+| Push-to-talk click | a quiet click, for your own ears only, when push-to-talk opens and when it closes (after the tail). Setting: **Push-to-talk click** (on). |
+| Double-tap to stay live | push-to-talk pressed twice within 400 ms latches it open ("Live — tap to stop" by the button); the next press closes it. |
+| Push-to-mute | while a push-to-mute key is held you're muted (a "cough button"), whatever the mode. Nothing is saved or sent (`voice.state` unchanged; others hear silence), and it never sets off the talking-while-muted reminder. |
 
 *(Reading the level from WebRTC stats instead of the samples: a media
 source's `totalAudioEnergy` adds up each 10 ms frame's **peak**, not its RMS,
@@ -1002,6 +1017,26 @@ person in your call, a quiet word, and only when something's off:
   TURN server (*can't connect* when it has one).
 - *reconnecting…* — their socket dropped and you're keeping the call (next
   section).
+- **Your own connection** (about you, next to your name or the voice panel):
+  from each peer's `remote-inbound-rtp` (what they report receiving from
+  you: `fractionLost`, `roundTripTime`), judged every 2 s while you're
+  sending: when more than 3 % of your audio is lost for **most** people in the
+  call (or the only one), after 3 bad readings in a row, show "Your connection
+  is dropping some of your audio"; gone after 3 good ones. Nothing on the wire.
+
+**Your volume, on the row** (each app; nothing on the wire). Next to someone in
+a voice channel, when you've changed how loud they are for you: their level
+("60 %", "150 %"), or a muted-speaker glyph at 0 %; when someone you've turned
+to 0 % talks, their ring shows dimmed. On computers, Ctrl/⌘ + scroll over
+their row changes it in 5 % steps.
+
+**Shared media, for yourself** (each app; nothing on the wire). Every app has
+its own volume for Watch together and for each screen share's sound, kept on
+the device. **Lower shared media while friends talk** (Settings › Voice, per
+device, off by default): while anyone else in your call is speaking, Watch
+together and screen-share sound ease to 50 % of your volume (over ~150 ms),
+and back over ~600 ms once nobody has spoken for 1 s; it never changes the
+volume you saved.
 
 **Call report** (each app on its own; nothing on the wire). Every app keeps
 notes on the call you're in and on the last one you left, so a call that
@@ -1027,7 +1062,9 @@ the apps in their own data folder (the last three). Contents, in this order:
    `totalSamplesReceived`); how many packets RED rebuilt, where the stack says (the desktop does;
    Chrome and libwebrtc don't, so the web and Apple apps show copies received);
    jitter buffer delay (median); ICE restarts, connection rebuilds and
-   reconnects kept; how long *weak connection* showed.
+   reconnects kept; how long *weak connection* showed; and what they report
+   receiving **from you** (`remote-inbound-rtp`): "they lost X % of yours",
+   with their round trip.
 3. **Timeline**, as `+mm:ss` since you joined (`+h:mm:ss` past an hour):
    joining (and who was there), people joining and leaving, connection
    states, ICE restarts, your socket dropping and coming back, settings

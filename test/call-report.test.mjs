@@ -12,7 +12,7 @@ const IPV4 = /\b\d{1,3}(?:\.\d{1,3}){3}\b/;
 const IPV6 = /\b[0-9a-f]{1,4}(?::[0-9a-f]{0,4}){2,}::?[0-9a-f]{0,4}\b/i;
 
 /** A getStats() report the way Chrome shapes it: a map of id → stats, with candidates that carry addresses. */
-function chromeReport({ bytesSent = 0, packetsSent = 0, received = 0, lost = 0, samples = 0, concealed = 0, silent = 0, jbDelay = 0, jbEmitted = 0, fec = 0, fecDiscarded = 0, bytesIn = 0, rtt = 0.038, local = 'srflx', remote = 'prflx' } = {}) {
+function chromeReport({ bytesSent = 0, packetsSent = 0, received = 0, lost = 0, samples = 0, concealed = 0, silent = 0, jbDelay = 0, jbEmitted = 0, fec = 0, fecDiscarded = 0, bytesIn = 0, rtt = 0.038, local = 'srflx', remote = 'prflx', theirLost = null, fraction = 0, theirRtt = 0.04 } = {}) {
   const list = [
     { id: 'T01', type: 'transport', selectedCandidatePairId: 'CPa', dtlsState: 'connected' },
     { id: 'CPa', type: 'candidate-pair', localCandidateId: 'ILa', remoteCandidateId: 'IRb', state: 'succeeded', nominated: true, currentRoundTripTime: rtt },
@@ -26,6 +26,9 @@ function chromeReport({ bytesSent = 0, packetsSent = 0, received = 0, lost = 0, 
     { id: 'IT0', type: 'inbound-rtp', kind: 'audio', mid: '0', packetsReceived: received, packetsLost: lost, bytesReceived: bytesIn, totalSamplesReceived: samples, concealedSamples: concealed, silentConcealedSamples: silent, jitterBufferDelay: jbDelay, jitterBufferEmittedCount: jbEmitted, fecPacketsReceived: fec, fecPacketsDiscarded: fecDiscarded },
     { id: 'IT1', type: 'inbound-rtp', kind: 'audio', mid: '1', packetsReceived: 5, packetsLost: 500 },
     { id: 'C111', type: 'codec', mimeType: 'audio/opus', payloadType: 111, sdpFmtpLine: 'minptime=10;useinbandfec=1' },
+    // Their receiver reports: on the screen's sound (ignored), and on our voice once they've sent one.
+    { id: 'RI1', type: 'remote-inbound-rtp', kind: 'audio', localId: 'OT1', packetsLost: 4444, fractionLost: 0.5, roundTripTime: 9 },
+    ...(theirLost == null ? [] : [{ id: 'RI0', type: 'remote-inbound-rtp', kind: 'audio', localId: 'OT0', ssrc: 1234, packetsLost: theirLost, fractionLost: fraction, roundTripTime: theirRtt, jitter: 0.002 }]),
   ];
   return new Map(list.map((s) => [s.id, s]));
 }
@@ -47,6 +50,8 @@ t('readCallStats: the voice stream (not the screen\'s sound), the selected pair\
   assert.equal(r.received.lost, 2);
   assert.equal(r.received.fecReceived, 3);
   assert.equal(r.audioBytesSent, 64000 + 999999, 'the panel\'s kbps counts every audio stream we send');
+  assert.equal(r.theirs, null, 'no receiver report on our voice yet');
+  assert.deepEqual(readCallStats(chromeReport({ packetsSent: 100, theirLost: 3, fraction: 0.0625, theirRtt: 0.041 }), '0').theirs, { lost: 3, fraction: 0.0625, rtt: 41 }, 'their report on our voice (not on the screen\'s sound)');
   const json = JSON.stringify(r);
   for (const secret of SECRETS) assert.ok(!json.includes(secret), `no ${secret} in the reading`);
   assert.doesNotMatch(json, IPV4);
@@ -106,7 +111,7 @@ function sampleCall() {
   log.connection('ben', 'Ben', 'connected', t0 + 450); // (repeats are not lines)
   const conn = {};
   const codecs = negotiatedVoice(SDP('63 111'), SDP('63 111'));
-  let c = { bytesSent: 0, packetsSent: 0, received: 0, lost: 0, samples: 0, concealed: 0, jbDelay: 0, jbEmitted: 0, fec: 0, bytesIn: 0 };
+  let c = { bytesSent: 0, packetsSent: 0, received: 0, lost: 0, samples: 0, concealed: 0, jbDelay: 0, jbEmitted: 0, fec: 0, bytesIn: 0, theirLost: 0 };
   for (let i = 1; i <= 38; i++) {
     const lossy = i >= 10 && i < 16; // 12 s of a bad network
     c = {
@@ -121,9 +126,12 @@ function sampleCall() {
       jbEmitted: c.jbEmitted + 96_000,
       fec: c.fec + (lossy ? 4 : 0),
       bytesIn: c.bytesIn + 64_750,
+      theirLost: c.theirLost + (lossy ? 10 : 0), // Ben loses 10 of our 100 a reading while it's bad
     };
     const at = t0 + 400 + i * 2000;
-    log.sample('ben', 'Ben', conn, readCallStats(chromeReport({ ...c, rtt: lossy ? 0.31 : 0.038 }), '0'), codecs, at);
+    log.sample('ben', 'Ben', conn, readCallStats(chromeReport({ ...c, rtt: lossy ? 0.31 : 0.038, theirRtt: lossy ? 0.3 : 0.04, fraction: lossy ? 0.1 : 0 }), '0'), codecs, at);
+    if (i === 13) log.ownWeak({ lost: 0.1, rtt: 300 }, at);
+    if (i === 16) log.ownWeak(null, at);
     if (i === 12) log.weak('ben', 'Ben', { concealed: 0.05, rtt: 310 }, at);
     if (i === 18) log.weak('ben', 'Ben', null, at);
     if (i === 14) {
@@ -165,6 +173,7 @@ t('formatReport: header, people, timeline, in that order, with the numbers', () 
   assert.match(ben, /^ {2}Jitter buffer \(median\): 40 ms$/m);
   assert.match(ben, /^ {2}ICE restarts: 1, connection rebuilds: 0, reconnects kept: 0$/m);
   assert.match(ben, /^ {2}Weak connection shown: 0:12$/m);
+  assert.match(ben, /^ {2}From you: they lost 1\.6 % of yours \(their round trip 40 ms median\)$/m, '60 of the 3,800 we sent');
   const tl = lines.slice(timeline + 1);
   assert.equal(tl[0], '+00:00 You joined Lounge; Ben was there');
   assert.ok(tl.includes('+00:00 Ben: connecting') && tl.includes('+00:00 Ben: connected'));
@@ -178,6 +187,8 @@ t('formatReport: header, people, timeline, in that order, with the numbers', () 
   assert.match(per[1], /lost [1-9]\.\d %, patched [1-9]\.\d %/, 'the lossy stretch shows');
   assert.ok(tl.includes('+00:24 Ben: weak connection (5 % patched over, rtt 310 ms)'));
   assert.ok(tl.includes('+00:36 Ben: weak connection gone'));
+  assert.ok(tl.includes('+00:26 Your connection is dropping some of your audio (they lose about 10 % of yours)'));
+  assert.ok(tl.includes('+00:32 Your connection is fine again'));
   assert.ok(tl.includes('+01:10 Settings: echo cancellation off'));
   assert.ok(tl.includes('+01:18 Ben left'));
   assert.equal(tl.at(-2), '+01:20 Call ended: you left');
@@ -207,6 +218,7 @@ t('a rebuilt connection counts from zero again; a call still going says so', () 
   assert.match(text, /Codec: not negotiated/);
   assert.match(text, /Rebuilt from a redundant copy: not counted by this browser/, 'zero from the browser is "not counted", not "none"');
   assert.match(text, /^ {2}Bitrate \(median\): 120 kbps out, 120 kbps in$/m, 'rates only from readings on the same connection');
+  assert.match(text, /^ {2}From you: no reports from them$/m);
 });
 
 t(`the timeline keeps the last ${MAX_TIMELINE} lines; the summary is always there`, () => {

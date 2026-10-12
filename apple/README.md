@@ -16,10 +16,10 @@ app and a native macOS app from the same code. The wire protocol is
 | `Yap/` | The app. Synced folder: new files join the target automatically. |
 | `YapBroadcast/` | The ReplayKit broadcast upload extension (`SampleHandler`): iPhone and iPad screen sharing. Links only `YapScreenLink`. |
 | `Yap/App/` | What the screens share: `AppModel`, `Theme`, `AppIdentity`, `Look` (one look; the status bar); `CallWatch` (a call ending off screen on iPhone: "You left Lounge"), `Notifier`, `BroadcastPicker` (iOS's screen-broadcast sheet); `ChannelController` (an open channel's behaviour: opening, jumps, edit/reply/staged picture, Send/Esc/↑, the channel menu's sheets), `SuggestionEngine`, `MessageMenu` and `ChannelMenuItems`, `InlineText` (message text), `GifSearch` / `EmojiBrowser` (the pickers' logic), `Prompts` (Ping everyone, Sign out others, copy), wording (`VoiceOptions`, `Stamps` for dates, `ColorNames`), `MediaViews` (looping GIF video, animated images), `SystemControls` (Paste, date pickers, `FlowLayout`). |
-| `Yap/Views/`, `Yap/Components/` | The screens and their **Windows 98** building blocks. |
+| `Yap/Views/`, `Yap/Components/` | The screens and their **Windows 98** building blocks (`Views/Voice/TalkCues98`: the tooltip, the warning line and the volume badge round 10 added). |
 | `YapKit/` | Local Swift package, everything that isn't a view. |
 | `YapKit/Sources/YapCore` | Protocol models and frames, `YapConnection` (WebSocket + heartbeat + backoff + network changes), `SendLine` (sends the server turns away), `YapClient` (identity and all the state screens read; `YapClient+Account/Events/Messages/People/Search/Vault/Extras.swift` by topic), `Mentions` (the server's mention rule), emoji codec and catalog, message formatter, KLIPY client, Keychain. No WebRTC. |
-| `YapKit/Sources/YapVoice` | WebRTC mesh: `VoiceEngine` + `Peer` (perfect negotiation, Opus tuning, transmit gate, speaking levels, ICE restarts, link quality), `VoiceGate` (the transmit gate table), `VoiceHealth` (`PathWatch` ICE restart timing, `LinkQuality` "weak connection", `BoostLimiter`), `CallKeeper` (keeping calls across reconnects), `LevelMonitor` (the mic level while you're alone), `VoiceController` (join → own echo → offer, hints, the audio session, watching and sharing a screen), `MicCheck` (Hear yourself), `SyntheticAudioDevice` (fake mic for tests), `PeerStats` (one connection's `getStats()`, boiled down; never an address); the call report: `CallReport` (the notes and their text), `CallNotes` (takes them during a call) and `CallReportStore` (the last three), `CallSurroundings` (device, audio route, network kind, `MicModes`); screen sharing: `ScreenShare` (`ScreenQuality` presets, the `ScreenWatch` viewer states, `ScreenAudience` "Watching: …", H.264-first `ScreenCodecs`), `ScreenRenderer` (decoded frames → `AVSampleBufferDisplayLayer`), `ScreenFeeder` (+ `FrameRelay`, `SyntheticScreenFeeder`), `MacScreenFeeder` (ScreenCaptureKit + the system picker), `BroadcastScreenFeeder` (iPhone/iPad: the extension's pictures); `BackgroundCall` (the rules for a call off screen on iPhone). |
+| `YapKit/Sources/YapVoice` | WebRTC mesh: `VoiceEngine` + `Peer` (perfect negotiation, Opus tuning, transmit gate, speaking levels, ICE restarts, link quality), `VoiceGate` (the transmit gate table), `VoiceHealth` (`PathWatch` ICE restart timing, `LinkQuality` "weak connection", `OwnLinkQuality` "Your connection is dropping some of your audio", `BoostLimiter`), `TalkCues` (`MutedNudge`, `PushToTalkLatch`, `ClipWatch`, `MediaDip`), `CallKeeper` (keeping calls across reconnects), `LevelMonitor` (the mic level while you're alone), `VoiceController` (join → own echo → offer, hints, the audio session, watching and sharing a screen), `MicCheck` (Hear yourself), `SyntheticAudioDevice` (fake mic for tests), `PeerStats` (one connection's `getStats()`, boiled down; never an address); the call report: `CallReport` (the notes and their text), `CallNotes` (takes them during a call) and `CallReportStore` (the last three), `CallSurroundings` (device, audio route, network kind, `MicModes`); screen sharing: `ScreenShare` (`ScreenQuality` presets, the `ScreenWatch` viewer states, `ScreenAudience` "Watching: …", H.264-first `ScreenCodecs`), `ScreenRenderer` (decoded frames → `AVSampleBufferDisplayLayer`), `ScreenFeeder` (+ `FrameRelay`, `SyntheticScreenFeeder`), `MacScreenFeeder` (ScreenCaptureKit + the system picker), `BroadcastScreenFeeder` (iPhone/iPad: the extension's pictures); `BackgroundCall` (the rules for a call off screen on iPhone). |
 | `YapKit/Sources/YapScreenLink` | The extension ↔ app link: a Unix domain socket in the App Group's container, the framing (`ScreenLinkWire`), both ends, and `FrameScaler` (VideoToolbox). No WebRTC. |
 | `Tools/` | `web-voice-peer.mjs` + `run-voice-interop.sh` (voice interop test), `seed-demo.mjs` (screenshot data), `make-icons.swift` (app icons, Win98 window + speech bubble). |
 
@@ -363,6 +363,29 @@ and TURN addresses: none come out; the 2,000-line timeline cap; a line per
 person every 10 s, then every minute; the last three kept; a call cut
 short says so).
 
+Round 10 added: `TalkCuesTests` (the "You're muted" nudge at most every
+5 s; push to talk's double-tap — 400 ms, the stopping press an ordinary one
+that can't start another; "Too loud (clipping)" — 3 peaks at −1 dBFS in
+2 s, readings within 120 ms one peak, shown 3 s; the shared-media dip's
+150 ms down / 1 s quiet / 600 ms up; your own connection's majority and
+3-in-a-row rules; `remote-inbound-rtp` read for the voice only; the call
+report's "From you: they lost X % of yours" and older saved reports still
+opening; the new settings' defaults; the quality warning; the cue sounds
+short and soft) and, on the iOS simulator, `TalkCuesLoopbackTests` (a real
+engine with a synthetic mic: the level still reads while muted, about
+−27 dBFS on the test chord, so talking while muted is seen in voice
+activity and always on, never while deafened or quiet; the clicks and the
+latch, and no click while muted; clipping from a full-scale mic; the far
+side's RTCP report about our voice; someone's volume reaching their voice
+— 0 % silent, 50 % half — and the dip never touching it). The voice
+interop also checks, against the real web client: muted, a nudge every
+5 s (explained the first time only); the web's reports about our voice
+(no hint on localhost); the call report's "From you" line; and a web
+share's sound dipping to half while the web speaks, back when switched off.
+The app's `TalkCuesAppTests`: the spec's words, the row's "60%" / muted
+glyph and Ctrl/⌘ + scroll's 5 % steps, and the call bar's "You're muted" /
+"Live — tap to stop".
+
 **App target:** `xcodebuild test -project Yap.xcodeproj -scheme Yap -destination 'platform=iOS Simulator,id=<UDID>'`
 (identity, no pixel font shipping, a stored Apple/Arch skin loading as Windows 98 with light/dark kept, the status bar, edit drafts, skin tone,
 color names, away-message ends, composer suggestions, the web's words for the sign-on hint,
@@ -409,9 +432,15 @@ no video). Voice screenshots without a call:
 `YAP_DEMO_VOICE=reconnecting:Ada,weak:Ben,relay:Cleo,cantconnect:Name,resuming,silent`
 (the notes next to people, "Reconnecting… voice is still on", "Your mic is
 sending silence"; with `voicepanel:lounge` and `seed-demo.mjs --stay 600
---voice`, which sits Cleo, Ada and Ben in Lounge) and
-`YAP_DEMO_MICCHECK=recording|playing|done|failed|run` (Settings › Voice ›
-Hear yourself; `run` runs it, silently with `YAP_SYNTHETIC_AUDIO=1`). The v0.36 extras: `YAP_SCREEN=switcher` (with
+--voice`, which sits Cleo, Ada and Ben in Lounge; round 10 adds `ownweak`,
+`speaking:Ben`, `volume:Ada=60`, `muted`, `nudge`, `ptt`, `latched`,
+`bitrate:256` and `dip`, and any of these starts from the default voice
+settings; `YAP_SETTINGS_SCROLL=talk` shows Voice › How you talk) and
+`YAP_DEMO_MICCHECK=recording|playing|done|failed|loud|run` (Settings › Voice ›
+Hear yourself; `loud` is recording and too loud; `run` runs it, silently with
+`YAP_SYNTHETIC_AUDIO=1`). The real nudge: `YAP_SYNTHETIC_AUDIO=1
+YAP_AUTOJOIN=gaming YAP_DEMO_VOICE=muted` (alone in a channel, the test
+chord counts as talking). The v0.36 extras: `YAP_SCREEN=switcher` (with
 `YAP_SWITCHER=text` typed in), `catchup`, `hang` (Plan a hang), `doodle` (a
 doodle for general's newest message); `YAP_SETTINGS_PAGE=look|profile|voice|notifications|account|mods|invite|about`
 with `YAP_SCREEN=settings` (on iPhone the page sits on top of Settings' list;
@@ -796,13 +825,20 @@ Click (Mac), tap (iPhone, iPad), right-click / Control-click (Mac) or
 long-press someone under a voice channel — or in the call sheet — for a
 small popover (`VoicePersonMenu`): their name and role, their away note,
 **Volume** 0–200 % in steps of 5 ("Past 100% boosts quiet people", the same
-setting as People › person), **Watch screen** while they share, and what the
+setting as People › person; since round 10 it really reaches their voice:
+before, the SDK's fresh wrappers made the voice's transceiver never match,
+so every volume, 0 % and the boost did nothing), **Watch screen** while they share, and what the
 web offers owner and mods: **Make mod / Remove mod** (owner), **Reset
 password…** and **Ban** (mods, not on the owner; asked first in the usual box). Your own
 row has none, nor does an OBS link (no row while its account is in the call; a greyed line
 without a popover after it left). SwiftUI has no right-click gesture, so one
 local event monitor hands a right-click to the row under the pointer
-(`RightClicks`).
+(`RightClicks`). The same monitor turns **Ctrl/⌘ + scroll** over a row
+into 5 % steps (Mac; a mouse notch or ~12 points of trackpad a step, up =
+louder whatever the scrolling direction). When you've changed someone's
+volume, their row (channel list and call sheet) says it: "60%", "150%", or
+a muted speaker at 0 %; someone at 0 % who talks gets a dimmed ring
+(PROTOCOL.md › Voice › Your volume, on the row).
 
 ## Watch together (on the web)
 
@@ -983,6 +1019,67 @@ YapCore's `Extras.swift`, `Chimes.swift`, `WAV.swift`, `TextRules.swift`,
   Hang (half-hour times, up to 3 weeks, optional voice channel), and when
   `hang.now` comes a calm notice with Join voice (a notification if Yap is
   in the background).
+
+## Round 10: cues around talking (PROTOCOL.md › Voice)
+
+- **"You're muted"** (Transmit gate › Talking while muted): muted (not
+  deafened, as in Mumble) and talking — the gate *would* open on the level
+  before the mute, in voice activity and always on, or push to talk pressed
+  — plays a soft blip (the web's `mutedTalk`, 329.63 Hz twice) and hangs
+  "You're muted" under the Mute button for 2.5 s, at most every 5 s; in a
+  call the voice bar's status line and the call sheet say it too. The first
+  time on a device: "That sound means you're muted. Turn it off in Settings
+  › Voice." (Settings › Voice › How you talk › **Remind me when I talk while
+  muted**, on). **The level source:** muting switches the track off
+  (`isEnabled = false`), but WebRTC computes the media-source counters
+  (`totalAudioEnergy`, `audioLevel`) in `AudioSendStream::SendAudioData`,
+  before the channel's input mute, so the counters voice activity already
+  reads keep reading (measured: −27 dBFS on the test chord while muted).
+  AVAudioInputNode's muted speech-activity listener (iOS 17 / macOS 14) wasn't
+  used: it belongs to AVAudioEngine's voice-processing input, and calls run
+  through WebRTC's own audio unit (iOS) or Core Audio device (Mac).
+- **⌘⇧M / ⌘⇧D** (Mac, iPad with a keyboard): a Voice menu with Mute and
+  Deafen, inside Yap only. No global keys and no push-to-mute key (the app
+  has no push-to-talk key either; push to talk is the on-screen button).
+- **Push to talk:** a quiet click (the web's `pttOn` / `pttOff` ticks)
+  when it goes live and when it closes after its 200 ms tail, for your ears
+  (Settings › Voice › **Push-to-talk click**, on); pressed twice within
+  400 ms it stays live, "Live — tap to stop" on the button and the call
+  bar; the next press ends that (and closes when it lets go). Muted, a press
+  is the nudge, no click. (`PushToTalkLatch`, in the engine.)
+- **Your own connection** (Connection hints): each connection's
+  `remote-inbound-rtp` (what they report receiving from us: `fractionLost`,
+  `packetsLost`, `roundTripTime`), judged every 2 s while we send ≥ 30
+  packets/s: more than 3 % lost for most people (more than half; or the only
+  one), three readings in a row → "Your connection is dropping some of your
+  audio" in the call sheet (and on your own row there) and the call bar;
+  three good ones, or nobody reporting, take it away (`OwnLinkQuality`).
+  libwebrtc sends audio RTCP about every 5 s, so a bad report counts for a
+  couple of readings. The call report's people say "From you: they lost
+  X % of yours (their round trip N ms median)", and the timeline when the
+  warning came and went.
+- **Shared media, for yourself:** a screen share's sound has its own
+  volume per person (0–100 %, remembered; already there), and **Lower
+  shared media while friends talk** (Settings › Voice › Mic & output, off):
+  while anyone else in the call I can hear speaks, it eases to half over
+  ~150 ms, back over ~600 ms once nobody has spoken for 1 s (`MediaDip`, a
+  factor on top of the saved volume, which never changes). Watch together
+  plays in the browser, with the web's own volume and dip (a browser tab
+  that isn't in the call doesn't know who's talking).
+- **Space panning:** nothing here. Space is the web app in an in-app web
+  view, but that page isn't in the call — the app's own engine plays the
+  voices — so Space's voice rules (This room only, Nearby, and now left/
+  right) don't reach what the app plays (see Known gaps).
+- **Too loud (clipping)** on Settings › Voice's meter (in a call, or while
+  Hear yourself records): peaks at −1 dBFS or more 3 times in 2 s turn the
+  bar red with "Too loud (clipping)" for 3 s (`ClipWatch`). In a call the
+  peak is WebRTC's media-source `audioLevel` (the loudest sample of ~110 ms,
+  after processing); Hear yourself measures its own buffers.
+- **Quality:** next to 256 and 510 kbps (Settings › Voice › Advanced, the
+  call's ⋯ menu, "Sound: 256k for everyone"): "No dropout protection at this
+  quality (each bit of voice no longer fits twice in a packet), and several
+  times the upload for each friend in the call." The note says each voice
+  goes out at its own setting (not "the lower of the two").
 
 ## How voice works here
 
@@ -1184,7 +1281,14 @@ estimator sends probe padding through an audio-only call. Video keeps it.
 - iPhone/iPad sharing is the whole screen and picture only (no app sound),
   and needs the App Group set up once (TestFlight above).
 - No mic/speaker device picker on the Mac (system default devices), no
-  global push-to-talk key; a call doesn't follow a new default device.
+  global push-to-talk key and no push-to-mute key (⌘⇧M / ⌘⇧D work inside
+  Yap); a call doesn't follow a new default device.
+- Space's voice rules (This room only, Nearby, left/right panning) don't
+  apply in the app: Space runs in an in-app web view that isn't in the call,
+  while the app's engine plays the voices. Volumes could be bridged from the
+  page to the engine; panning each voice needs a stereo mix per person,
+  which stasel/WebRTC's SDK doesn't offer (one mixed playout, a mono gain
+  per track) without a custom audio device.
 - No mic modes on the Mac (WebRTC's Core Audio device isn't Apple's voice
   processing, which mic modes need).
 - Voice activity has no 40 ms pre-roll and libwebrtc's ~3 ms switch ramp

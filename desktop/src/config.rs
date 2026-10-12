@@ -53,8 +53,15 @@ pub struct Config {
     pub mode: InputMode,
     /// Voice-activity threshold in dBFS.
     pub vad_threshold: f32,
-    /// Push-to-talk key, as a KeyboardEvent.code-style name ("Backquote", "KeyV", "Mouse4"…).
+    /// Push-to-talk key, as a KeyboardEvent.code-style name ("Backquote", "KeyV", "Mouse4"…),
+    /// maybe with modifiers in front ("Ctrl+Shift+KeyM"; `ptt::Combo`).
     pub ptt_key: String,
+    /// Settings › Voice: global keys next to push-to-talk, the same kind of
+    /// name ("" = none, the default): toggle mute, toggle deafen, and
+    /// push-to-mute (held: muted, whatever the mode). They work in a call.
+    pub mute_key: String,
+    pub deafen_key: String,
+    pub push_to_mute_key: String,
     /// Opus bitrate in bits/s.
     pub bitrate: u32,
     pub noise_suppression: bool,
@@ -64,6 +71,14 @@ pub struct Config {
     /// back out of the mic (AEC3), so friends don't hear themselves.
     pub echo_cancellation: bool,
     pub sounds: bool,
+    /// Settings › Voice › "Remind me when I talk while muted": a soft blip and
+    /// "You're muted" by the Mute button, at most every 5 s.
+    pub remind_muted: bool,
+    /// That blip was explained once on this device.
+    pub muted_explained: bool,
+    /// Settings › Voice › "Push-to-talk click": a quiet click, for your ears
+    /// only, when push-to-talk opens and when it closes.
+    pub ptt_click: bool,
     /// Desktop notifications for @mentions, pings and join requests.
     pub notifications: bool,
     /// …and for every message (only when `notifications` is on).
@@ -74,6 +89,9 @@ pub struct Config {
     pub volumes: HashMap<String, f32>,
     /// uid -> how loud their screen share's sound plays (0–1), apart from their voice.
     pub screen_volumes: HashMap<String, f32>,
+    /// Settings › Voice › "Lower shared media while friends talk" (off): a
+    /// screen share's sound dips to half while someone in the call speaks.
+    pub lower_media: bool,
     /// The last screen-share choices (the share dialog starts from them).
     pub share_quality: crate::screen::Quality,
     pub share_sound: bool,
@@ -121,17 +139,24 @@ impl Default for Config {
             mode: InputMode::Vad,
             vad_threshold: -50.0,
             ptt_key: "Backquote".into(),
+            mute_key: String::new(),
+            deafen_key: String::new(),
+            push_to_mute_key: String::new(),
             bitrate: 128_000,
             noise_suppression: true,
             auto_gain: true,
             echo_cancellation: true,
             sounds: true,
+            remind_muted: true,
+            muted_explained: false,
+            ptt_click: true,
             notifications: true,
             notify_all: false,
             muted: false,
             deafened: false,
             volumes: HashMap::new(),
             screen_volumes: HashMap::new(),
+            lower_media: false,
             share_quality: crate::screen::Quality::Smooth,
             share_sound: true,
             channel: "general".into(),
@@ -172,6 +197,9 @@ impl Config {
         if self.color.is_empty() {
             let i = (random_u32() as usize) % COLORS.len();
             self.color = COLORS[i].to_string();
+        }
+        if self.ptt_key.is_empty() {
+            self.ptt_key = "Backquote".into();
         }
         if !BITRATES.contains(&self.bitrate) {
             self.bitrate = 128_000;
@@ -396,6 +424,32 @@ mod tests {
         let again = Config::load(&path);
         assert_eq!(again.password_later, ["pin"], "Later is remembered, for that reason only");
         assert_eq!(again.name, "Ada");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Round 10's settings are new fields: a config from before them loads
+    /// whole, with their defaults (no extra keys, reminders and the
+    /// push-to-talk click on, shared media left alone), and what's saved stays.
+    #[test]
+    fn round10_settings_default_and_old_configs_load() {
+        let dir = std::env::temp_dir().join(format!("yap-r10-test-{}", random_hex(6)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"server":"https://chat.example.com","name":"Ada","uid":"u1","mode":"ptt","ptt_key":"KeyV","muted":true,"volumes":{"u2":0.6}}"#).unwrap();
+        let mut c = Config::load(&path);
+        assert_eq!((c.name.as_str(), c.ptt_key.as_str(), c.mode, c.muted, c.volume_for("u2")), ("Ada", "KeyV", InputMode::Ptt, true, 0.6));
+        assert_eq!((c.mute_key.as_str(), c.deafen_key.as_str(), c.push_to_mute_key.as_str()), ("", "", ""));
+        assert!(c.remind_muted && !c.muted_explained, "the reminder is on, not explained yet");
+        assert!(c.ptt_click, "the push-to-talk click is on");
+        assert!(!c.lower_media, "shared media is left alone unless you ask");
+        c.mute_key = "Ctrl+Shift+KeyM".into();
+        c.push_to_mute_key = "Mouse4".into();
+        c.save(&path);
+        let again = Config::load(&path);
+        assert_eq!((again.mute_key.as_str(), again.push_to_mute_key.as_str(), again.deafen_key.as_str()), ("Ctrl+Shift+KeyM", "Mouse4", ""));
+        // An empty push-to-talk key (hand-edited) falls back to the default.
+        std::fs::write(&path, r#"{"ptt_key":""}"#).unwrap();
+        assert_eq!(Config::load(&path).ptt_key, "Backquote");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

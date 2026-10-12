@@ -31,6 +31,9 @@ public final class MicCheck {
     public private(set) var phase: Phase = .idle
     /// The level while recording (linear RMS, on the meter's scale).
     public private(set) var level = 0.0
+    /// Peaks keep reaching −1 dBFS while recording ("Too loud (clipping)").
+    public private(set) var tooLoud = false
+    @ObservationIgnored private var clipWatch = ClipWatch()
     /// It went through Opus (false: no encoder here, so without the codec).
     public private(set) var throughCodec = true
     public var isRunning: Bool { phase == .recording || phase == .playing }
@@ -38,10 +41,18 @@ public final class MicCheck {
     /// Screenshots only (`YAP_DEMO_MICCHECK`): show this phase. Only the
     /// app's debug launch calls it; not behind `#if DEBUG` because SwiftPM
     /// builds this package without DEBUG under the app's Dev configuration.
-    public func show(_ phase: Phase, level: Double = 0, throughCodec: Bool = true) {
+    public func show(_ phase: Phase, level: Double = 0, throughCodec: Bool = true, tooLoud: Bool = false) {
         self.phase = phase
         self.level = level
         self.throughCodec = throughCodec
+        self.tooLoud = tooLoud
+    }
+
+    /// One chunk's level and loudest sample while recording.
+    private func heard(rms: Double, peakDb: Double) {
+        level = rms
+        let loud = clipWatch.update(peakDb: peakDb, at: ProcessInfo.processInfo.systemUptime)
+        if loud != tooLoud { tooLoud = loud }
     }
 
     private let source: Source
@@ -56,6 +67,8 @@ public final class MicCheck {
         guard !isRunning else { return }
         phase = .recording
         level = 0
+        clipWatch.reset()
+        tooLoud = false
         let recorded: Recording
         do {
             switch source {
@@ -72,6 +85,7 @@ public final class MicCheck {
             return
         }
         level = 0
+        tooLoud = false
         let rendered = await Task.detached(priority: .userInitiated) {
             Self.render(recorded.samples, sampleRate: recorded.sampleRate, bitrate: bitrate, mode: mode, threshold: threshold)
         }.value
@@ -126,8 +140,9 @@ public final class MicCheck {
             guard let channel = buffer.floatChannelData?[0] else { return }
             let chunk = Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
             let level = Self.rms(chunk)
+            let peak = ClipWatch.peakDb(chunk)
             collected.withLock { $0.append(contentsOf: chunk) }
-            Task { @MainActor in self?.level = level }
+            Task { @MainActor in self?.heard(rms: level, peakDb: peak) }
         }
         engine.prepare()
         try engine.start()
@@ -150,7 +165,7 @@ public final class MicCheck {
         var at = 0
         while at < samples.count {
             let chunk = Array(samples[at..<min(samples.count, at + step)])
-            level = Self.rms(chunk)
+            heard(rms: Self.rms(chunk), peakDb: ClipWatch.peakDb(chunk))
             at += step
             try? await Task.sleep(for: .milliseconds(100))
         }

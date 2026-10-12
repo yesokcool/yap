@@ -7,8 +7,9 @@
  * Rooms are voice zones. On "This room only" (the default) you hear the
  * people in your room at full volume and nobody outside it; the Plaza
  * (everywhere that isn't a room) is a zone of its own. "Nearby is louder"
- * and "Everyone" are the other choices. People in the call who aren't on
- * Space are heard as usual.
+ * and "Everyone" are the other choices. In "Nearby is louder" and inside your
+ * room, voices also come from the left or right, where people stand. People
+ * in the call who aren't on Space are heard as usual.
  *
  * Mini-games ride on space.game {g, d}: relayed to everyone else on Space,
  * never stored. Whoever owns a piece of state answers 'sync' (sent whenever
@@ -30,7 +31,7 @@ import { esc, initial } from './format.js';
 import { icon } from './icons.js';
 import {
   WORLD, RADIUS, PLAZA, PLAZA_SPOT, SPAWN, ROOMS, SOLID, MID, BALL_R, TAG_SPOT, TRACK, CORNERS, MUSIC_ZONE, GALLERY_ZONE, ART, SEATS, DECOR,
-  seatAt, zoneOf, zoneName, blocked, netAt, onFire, inWater, onTrack, inRect, instrumentAt, frameAt,
+  seatAt, zoneOf, zoneName, blocked, netAt, onFire, inWater, onTrack, inRect, instrumentAt, frameAt, voicePan,
 } from './space-map.js';
 import {
   FONT, clock, drawFloor, drawRoomNames, drawWalls, drawDecor, drawBall, drawBalloon, drawPuddle, drawGlow, drawFlames, drawWet, drawBurst,
@@ -82,7 +83,7 @@ export class SpaceWorld {
   /**
    * @param {HTMLElement} root
    * @param {{ send: (m: object) => void, mySid: () => string, who: (sid: string) => {name: string, color: string, avatar: string|null, look: string|null} | null,
-   *           proximity: (sid: string, factor: number) => void, setLook: (look: string|null) => void,
+   *           proximity: (sid: string, factor: number, pan?: number|null) => void, setLook: (look: string|null) => void,
    *           inCall?: (sid: string) => {muted: boolean, deafened: boolean} | null, user?: (uid: string) => {name: string, color: string} | null }} hooks
    *   inCall: that session's voice state if it's in your voice call (yours if you're in one), else null.
    *   user: a member by uid (who made a drawing).
@@ -231,7 +232,8 @@ export class SpaceWorld {
       if (this.voiceMode === 'everyone') {
         for (const [sid, p] of this.players) {
           p.vol = 1;
-          this.hooks.proximity(sid, 1);
+          p.pan = null;
+          this.hooks.proximity(sid, 1, null);
         }
       }
       this.panelAt = 0;
@@ -312,7 +314,8 @@ export class SpaceWorld {
     this.keys.clear();
     for (const [sid, p] of this.players) {
       delete p.vol;
-      this.hooks.proximity(sid, 1);
+      delete p.pan;
+      this.hooks.proximity(sid, 1, null);
     }
     // The others take over whatever we owned once they see us go; next time we sync afresh.
     this.ball = freshBall();
@@ -556,7 +559,12 @@ export class SpaceWorld {
     }
   }
 
-  /** Per-person volume for Space voice; eased, so walking through a door crossfades. */
+  /**
+   * Per-person volume for Space voice, and where it comes from: in "Nearby
+   * is louder" and inside your own room, left or right by where they stand
+   * on screen (voicePan). Both eased, so walking through a door crossfades
+   * and someone walking past moves across smoothly.
+   */
   #stepVoice(dt) {
     const me = this.me;
     if (!me) return;
@@ -564,15 +572,26 @@ export class SpaceWorld {
     const ease = Math.min(1, dt * 8);
     for (const [sid, p] of this.players) {
       let target = 1;
+      let pan = null; // null: not panned ("Everyone")
+      const dx = p.x - me.x;
+      const dy = p.y - me.y;
       if (this.voiceMode === 'near') {
-        const dist = Math.hypot(p.x - me.x, p.y - me.y);
+        const dist = Math.hypot(dx, dy);
         target = dist < 260 ? 1 : dist > 1100 ? 0.12 : 1 - ((dist - 260) / 840) * 0.88;
+        pan = voicePan(dx, dy);
       } else if (this.voiceMode === 'room') {
-        target = zoneOf(p.tx, p.ty) === myZone ? 1 : 0;
+        const here = zoneOf(p.tx, p.ty) === myZone;
+        target = here ? 1 : 0;
+        pan = here ? voicePan(dx, dy) : 0;
       }
       p.vol = p.vol === undefined ? target : p.vol + (target - p.vol) * ease;
       if (Math.abs(target - p.vol) < 0.03) p.vol = target;
-      this.hooks.proximity(sid, p.vol);
+      if (pan === null) p.pan = null;
+      else {
+        p.pan = p.pan == null ? pan : p.pan + (pan - p.pan) * ease;
+        if (Math.abs(pan - p.pan) < 0.02) p.pan = pan;
+      }
+      this.hooks.proximity(sid, p.vol, p.pan);
     }
   }
 

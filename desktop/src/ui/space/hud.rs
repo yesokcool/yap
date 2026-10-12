@@ -124,7 +124,8 @@ pub(super) fn room_panel(st: &mut SpaceUi, ui: &mut egui::Ui, m: &Model, p: &Pal
                         if theme::menu_item(ui, l, v == st.voice, p).clicked() {
                             st.voice = v;
                             if v == VoiceMode::Everyone {
-                                let all: Vec<(String, f32)> = st.vol.drain().map(|(k, _)| (k, 1.0)).collect();
+                                st.pan.clear();
+                                let all: Vec<(String, f32, f32)> = st.vol.drain().map(|(k, _)| (k, 1.0, 0.0)).collect();
                                 acts.push(Act::Cmd(Cmd::Proximity(all)));
                             }
                         }

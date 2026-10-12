@@ -11,6 +11,7 @@
 pub mod clips;
 pub mod decode;
 pub mod dsp;
+pub mod duck;
 pub mod echo;
 #[cfg(test)]
 mod echo_sim;
@@ -64,7 +65,14 @@ impl AtomicF32 {
 pub struct Gate {
     pub muted: AtomicBool,
     pub deafened: AtomicBool,
+    /// Push-to-talk held (or latched open by a double-tap).
     pub ptt_down: AtomicBool,
+    /// …latched open: "Live — tap to stop".
+    pub ptt_latched: AtomicBool,
+    /// The push-to-mute key is held: muted, whatever the mode (a "cough button").
+    pub cough: AtomicBool,
+    /// Click when push-to-talk opens and closes (Settings › Voice).
+    pub ptt_click: AtomicBool,
     mode: AtomicU8,
     pub vad_threshold: AtomicF32,
     pub noise_suppression: AtomicBool,
@@ -91,14 +99,24 @@ pub struct Gate {
     pub agc_db: AtomicF32,
     /// Capture is behind: noise removal skipped for now.
     pub behind: AtomicBool,
+    /// The mic's peaks keep hitting the top: "Too loud (clipping)" on the meter.
+    pub clipping: AtomicBool,
+    /// When you last talked while muted (`now_ms`; 0 = never): the gate
+    /// would have opened, or push-to-talk was pressed (PROTOCOL.md › Voice ›
+    /// Transmit gate › Talking while muted). The core turns it into the nudge.
+    pub talked_muted_ms: AtomicU64,
+    epoch: Instant,
 }
 
 impl Gate {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             muted: AtomicBool::new(false),
             deafened: AtomicBool::new(false),
             ptt_down: AtomicBool::new(false),
+            ptt_latched: AtomicBool::new(false),
+            cough: AtomicBool::new(false),
+            ptt_click: AtomicBool::new(true),
             mode: AtomicU8::new(0),
             vad_threshold: AtomicF32::new(-50.0),
             noise_suppression: AtomicBool::new(true),
@@ -114,7 +132,14 @@ impl Gate {
             silent: AtomicBool::new(false),
             agc_db: AtomicF32::new(0.0),
             behind: AtomicBool::new(false),
+            clipping: AtomicBool::new(false),
+            talked_muted_ms: AtomicU64::new(0),
+            epoch: Instant::now(),
         }
+    }
+    /// Milliseconds since this gate was made (never 0).
+    pub fn now_ms(&self) -> u64 {
+        self.epoch.elapsed().as_millis() as u64 + 1
     }
     pub fn mode(&self) -> InputMode {
         match self.mode.load(Ordering::Relaxed) {
@@ -155,8 +180,13 @@ pub struct AudioFrame {
 pub struct PeerStream {
     /// Whose (it changes when they resume the call under a new session).
     sid: RwLock<String>,
+    /// Shared media (a screen share's sound), not a voice: it dips while
+    /// friends talk, and it never counts as someone talking.
+    media: bool,
     jb: Mutex<JitterBuffer>,
     pub volume: AtomicF32,
+    /// Space: where their voice comes from, −1 (left) … 1 (right); 0 = the middle.
+    pub pan: AtomicF32,
     /// Past 100 % volume, a limiter keeps a boosted voice under full scale (V13).
     limiter: Mutex<dsp::Limiter>,
     /// RMS of the last decoded frame (pre-volume).
@@ -191,6 +221,11 @@ impl PeerStream {
 pub struct Mixer {
     streams: RwLock<Vec<Arc<PeerStream>>>,
     gate: Arc<Gate>,
+    /// Settings › Voice › Lower shared media while friends talk.
+    pub lower_media: AtomicBool,
+    ducker: Mutex<duck::Ducker>,
+    /// Shared media's dip right now (× your volume; 1 = none), for the logs.
+    pub duck: AtomicF32,
     tones: Mutex<VecDeque<f32>>,
     /// Soundboard, chimes, previews, instruments (limited; silent while deafened).
     pub clips: Mutex<clips::Clips>,
@@ -208,7 +243,21 @@ impl Mixer {
         scratch.resize(out.len(), 0.0);
         let deaf = self.gate.deafened.load(Ordering::Relaxed);
         let now_ms = self.epoch.elapsed().as_millis() as u64;
-        for s in self.streams.read().iter() {
+        let streams = self.streams.read();
+        // Lower shared media while friends talk: someone we'd hear (not turned
+        // down to 0, not out of earshot in Space) was speaking in the last
+        // block, on the output's own clock. A ramp across the block from
+        // where the dip was to where it is.
+        let talking = streams.iter().any(|s| !s.media && s.volume.get() > 0.001 && s.level.get() > REMOTE_SPEAKING_LEVEL);
+        let audio_ms = self.rendered.load(Ordering::Relaxed) as f64 * 1000.0 / RATE as f64;
+        let (dip_from, dip_to) = {
+            let mut d = self.ducker.lock();
+            let from = d.factor;
+            (from, d.step(audio_ms, talking, self.lower_media.load(Ordering::Relaxed)))
+        };
+        self.duck.set(dip_to);
+        let frames = (out.len() / 2).max(1) as f32;
+        for s in streams.iter() {
             s.jb.lock().pull(scratch);
             let rms = (scratch.iter().map(|x| x * x).sum::<f32>() / scratch.len().max(1) as f32).sqrt();
             s.level.set(rms);
@@ -218,11 +267,21 @@ impl Mixer {
             if deaf {
                 continue;
             }
-            let v = s.volume.get();
+            let mut v = s.volume.get();
             if v > 1.001 {
                 s.limiter.lock().process(scratch, v);
-                for (o, x) in out.iter_mut().zip(scratch.iter()) {
-                    *o += x;
+                v = 1.0;
+            }
+            // Space: each ear's share of their voice (1, 1 in the middle).
+            let (left, right) = space_sound::pan_gains(s.pan.get());
+            if s.media && (dip_from < 1.0 || dip_to < 1.0) {
+                for (i, (o, x)) in out.iter_mut().zip(scratch.iter()).enumerate() {
+                    *o += x * v * (dip_from + (dip_to - dip_from) * (i / 2) as f32 / frames);
+                }
+            } else if left < 1.0 || right < 1.0 {
+                for (o, x) in out.as_chunks_mut::<2>().0.iter_mut().zip(scratch.as_chunks::<2>().0) {
+                    o[0] += x[0] * v * left;
+                    o[1] += x[1] * v * right;
                 }
             } else {
                 for (o, x) in out.iter_mut().zip(scratch.iter()) {
@@ -230,6 +289,7 @@ impl Mixer {
                 }
             }
         }
+        drop(streams);
         {
             let mut tones = self.tones.lock();
             for o in out.iter_mut() {
@@ -522,6 +582,9 @@ impl AudioEngine {
             Arc::new(Mixer {
                 streams: RwLock::new(Vec::new()),
                 gate: gate.clone(),
+                lower_media: AtomicBool::new(false),
+                ducker: Mutex::new(duck::Ducker::default()),
+                duck: AtomicF32::new(1.0),
                 tones: Mutex::new(VecDeque::new()),
                 clips: Mutex::new(clips::Clips::default()),
                 epoch: Instant::now(),
@@ -594,8 +657,10 @@ impl AudioEngine {
     pub fn add_stream(&self, sid: &str, volume: f32) -> Arc<PeerStream> {
         let s = Arc::new(PeerStream {
             sid: RwLock::new(sid.to_string()),
+            media: sid.starts_with("screen:"),
             jb: Mutex::new(JitterBuffer::new()),
             volume: AtomicF32::new(volume),
+            pan: AtomicF32::new(0.0),
             limiter: Mutex::new(dsp::Limiter::new(RATE)),
             level: AtomicF32::new(0.0),
             last_loud_ms: AtomicU64::new(0),
@@ -630,6 +695,13 @@ impl AudioEngine {
     pub fn set_volume(&self, sid: &str, volume: f32) {
         if let Some(s) = self.stream(sid) {
             s.volume.set(volume);
+        }
+    }
+
+    /// Space: where someone's voice comes from (−1 left … 1 right).
+    pub fn set_pan(&self, sid: &str, pan: f32) {
+        if let Some(s) = self.stream(sid) {
+            s.pan.set(pan);
         }
     }
 
@@ -687,6 +759,7 @@ impl AudioEngine {
             recorder: self.recorder.clone(),
             last_chunk: self.last_chunk.clone(),
             echo: self.echo_ref.clone(),
+            mixer: self.mixer.clone(),
         };
         *self.last_chunk.lock() = Some(Instant::now());
         let _ = std::thread::Builder::new().name("yap-capture".into()).spawn(move || process_capture(chunk_rx, capture));
@@ -968,7 +1041,7 @@ fn run_wav_input(path: &str, tx: std_mpsc::SyncSender<Chunk>, stop: std_mpsc::Re
 }
 
 fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
-    let Capture { gate, frames, notify, recorder, last_chunk, echo } = shared;
+    let Capture { gate, frames, notify, recorder, last_chunk, echo, mixer } = shared;
     let mut canceller = echo::Canceller::new(echo);
     let mut blocks = 0u32;
     let mut resampler: Option<(u32, Resampler)> = None;
@@ -986,6 +1059,9 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
     let mut frame_sq = 0f32;
     let mut frame_voice = false;
     let mut silent_samples = 0usize;
+    let mut muted_talk = MutedTalk::default();
+    let mut clip = ClipWatch::default();
+    let mut clip_peak = 0f32;
     while let Ok(chunk) = rx.recv() {
         *last_chunk.lock() = Some(Instant::now());
         // Digital silence straight from the device (before anything here touches it).
@@ -1013,6 +1089,13 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
         while acc.len() - offset >= BLOCK {
             work.copy_from_slice(&acc[offset..offset + BLOCK]);
             offset += BLOCK;
+            // Clipping is the mic's own (before any processing): the loudest sample of each 20 ms.
+            clip_peak = work.iter().fold(clip_peak, |m, s| m.max(s.abs()));
+            if blocks % 2 == 1 {
+                let db = if clip_peak > 0.0 { 20.0 * clip_peak.log10() } else { -120.0 };
+                gate.clipping.store(clip.push(db, gate.now_ms() as f64), Ordering::Relaxed);
+                clip_peak = 0.0;
+            }
             highpass.process(&mut work);
             // Echo cancellation: every block, on or off, so it stays lined up with the speakers.
             canceller.process(gate.echo_cancellation.load(Ordering::Relaxed), &mut work);
@@ -1036,6 +1119,7 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
                 gate.agc_db.set(agc.gain_db());
             }
             // The gate: settings from the UI / PTT poller, then 10 ms through it.
+            let before = (tx.mode(), tx.is_open());
             tx.set_mode(gate.tx_mode());
             tx.set_threshold(gate.vad_threshold.get());
             tx.set_test(gate.test.load(Ordering::Relaxed));
@@ -1049,14 +1133,25 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
             if let Some(rec) = recorder.lock().as_mut() {
                 rec.extend_from_slice(&gated);
             }
-            // Mute / deafen: a hard switch outside the gate.
-            let on = gate.mic_ok.load(Ordering::Relaxed) && !gate.muted.load(Ordering::Relaxed) && !gate.deafened.load(Ordering::Relaxed) && tx.is_open();
+            // Mute / deafen / push-to-mute: a hard switch outside the gate.
+            let muted = gate.muted.load(Ordering::Relaxed) || gate.deafened.load(Ordering::Relaxed);
+            let live = gate.mic_ok.load(Ordering::Relaxed) && !muted && !gate.cough.load(Ordering::Relaxed);
+            let on = live && tx.is_open();
+            // Push-to-talk click: opening, and closing after the tail (your ears only).
+            if let Some(opened) = ptt_click(before, (tx.mode(), tx.is_open()), gate.test.load(Ordering::Relaxed)).filter(|_| live && gate.ptt_click.load(Ordering::Relaxed)) {
+                let (notes, volume) = if opened { (PTT_CLICK_OPEN, 0.035) } else { (PTT_CLICK_CLOSE, 0.03) };
+                mixer.play_notes(&notes, 0.0, PTT_CLICK_LEN, volume, true);
+            }
+            // Talking while muted (not while holding push-to-mute: that's on purpose).
+            let ptt = gate.ptt_down.load(Ordering::Relaxed);
+            if muted_talk.block(muted && gate.mic_ok.load(Ordering::Relaxed) && !gate.cough.load(Ordering::Relaxed), tx.mode(), ptt, db, tx.open_at()) {
+                gate.talked_muted_ms.store(gate.now_ms(), Ordering::Relaxed);
+            }
             gate.transmitting.store(on, Ordering::Relaxed);
             let speaking = on && (tx.mode() == gate::Mode::Vad || db > gate.vad_threshold.get());
             if gate.speaking.swap(speaking, Ordering::Relaxed) != speaking {
                 notify();
             }
-            let live = gate.mic_ok.load(Ordering::Relaxed) && !gate.muted.load(Ordering::Relaxed) && !gate.deafened.load(Ordering::Relaxed);
             for &s in &gated {
                 let v = if live { s } else { 0.0 };
                 frame[frame_fill] = (v.clamp(-1.0, 1.0) * 32767.0) as i16;
@@ -1079,6 +1174,71 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
     *gate.echo.lock() = echo::EchoStats::default();
 }
 
+/// The push-to-talk click (PROTOCOL.md › Voice › Transmit gate): a short,
+/// quiet tick, higher (and a touch louder) when it opens than when it closes;
+/// the web's `sounds.pttOn` / `pttOff`.
+pub const PTT_CLICK_OPEN: [f32; 1] = [1318.51];
+pub const PTT_CLICK_CLOSE: [f32; 1] = [987.77];
+pub const PTT_CLICK_LEN: f32 = 0.03;
+
+/// Did push-to-talk just open (Some(true)) or close, after its tail (Some(false))?
+/// `before`/`after`: the gate's (mode, open) around one block. Only a
+/// push-to-talk gate that stayed one (switching modes isn't a click), and
+/// never in a mic test (where it's always open).
+fn ptt_click(before: (gate::Mode, bool), after: (gate::Mode, bool), test: bool) -> Option<bool> {
+    (before.0 == gate::Mode::Ptt && after.0 == gate::Mode::Ptt && !test && before.1 != after.1).then_some(after.1)
+}
+
+/// "Too loud (clipping)" on the mic meter (the web's `ClipWatch`): the
+/// loudest sample of a 20 ms stretch at −1 dBFS or more, three times within
+/// 2 s, shows it for 3 s. (Once is a pop; again and again is a mic turned up
+/// too far.)
+pub const CLIP_DB: f32 = -1.0;
+const CLIP_HITS: usize = 3;
+const CLIP_WINDOW_MS: f64 = 2000.0;
+const CLIP_HOLD_MS: f64 = 3000.0;
+
+#[derive(Default)]
+struct ClipWatch {
+    hits: VecDeque<f64>,
+    until: f64,
+}
+
+impl ClipWatch {
+    /// One 20 ms stretch's peak (dBFS) at `now` (ms): is it clipping?
+    fn push(&mut self, peak_db: f32, now: f64) -> bool {
+        if peak_db >= CLIP_DB {
+            self.hits.push_back(now);
+        }
+        while self.hits.front().is_some_and(|t| *t <= now - CLIP_WINDOW_MS) {
+            self.hits.pop_front();
+        }
+        if self.hits.len() >= CLIP_HITS {
+            self.until = now + CLIP_HOLD_MS;
+        }
+        now < self.until
+    }
+}
+
+/// Talking while muted, one 10 ms block at a time: push-to-talk pressed, or
+/// (voice activity, always on) 30 ms in a row loud enough that voice activity
+/// would open, so a keyboard click or a bump doesn't count.
+#[derive(Default)]
+struct MutedTalk {
+    loud: u32,
+}
+
+impl MutedTalk {
+    const LOUD_BLOCKS: u32 = 3;
+
+    /// `muted`: muted (or deafened), with a mic, not holding push-to-mute.
+    /// True while this block counts as talking.
+    fn block(&mut self, muted: bool, mode: gate::Mode, ptt: bool, db: f32, open_at: f32) -> bool {
+        self.loud = if muted && db > open_at { self.loud + 1 } else { 0 };
+        muted && if mode == gate::Mode::Ptt { ptt } else { self.loud >= Self::LOUD_BLOCKS }
+    }
+}
+
 /// What the capture thread shares with the rest of the engine.
 struct Capture {
     gate: Arc<Gate>,
@@ -1090,6 +1250,8 @@ struct Capture {
     last_chunk: Arc<Mutex<Option<Instant>>>,
     /// What the speakers play (the echo canceller's far end).
     echo: Arc<echo::EchoRef>,
+    /// The call's output (the push-to-talk click).
+    mixer: Arc<Mixer>,
 }
 
 struct OutputState {
@@ -1263,5 +1425,142 @@ fn run_null_output(
     }
     if let Some(w) = writer {
         w.finish();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lower shared media while friends talk, through the real mixer: a
+    /// screen share's sound at your 80 % goes to 40 % while a friend talks
+    /// (and never touches the 80 % you set), and back once they've been quiet
+    /// a second; the voice itself is never dipped; off, nothing changes.
+    #[test]
+    fn the_mixer_dips_shared_media_while_a_friend_talks() {
+        let engine = AudioEngine::new(Arc::new(|| {}));
+        let mixer = engine.mixer.clone();
+        let voice = engine.add_stream("ana", 1.0);
+        let media = engine.add_stream("screen:ana", 0.8);
+        let (mut out, mut scratch) = (vec![0f32; BLOCK * 2], Vec::new());
+        // What the media stream adds, block by block: fill both jitter buffers' PCM directly.
+        let level = |mixer: &Mixer, out: &mut Vec<f32>, scratch: &mut Vec<f32>, voice_on: bool| {
+            voice.jb.lock().inject_pcm(&vec![if voice_on { 0.2 } else { 0.0 }; BLOCK * 2]);
+            media.jb.lock().inject_pcm(&vec![0.1; BLOCK * 2]);
+            mixer.render(out, scratch);
+            // The voice's part is known (0.2 or 0): what's left is the media's.
+            out[out.len() - 2] - if voice_on { 0.2 } else { 0.0 }
+        };
+        mixer.lower_media.store(true, Ordering::Relaxed);
+        assert!((level(&mixer, &mut out, &mut scratch, false) - 0.08).abs() < 1e-4, "nobody talking: your 80 %");
+        let mut last = 0.0;
+        for _ in 0..30 {
+            last = level(&mixer, &mut out, &mut scratch, true);
+        }
+        assert!((last - 0.04).abs() < 1e-4, "a friend talking: half of your 80 % ({last})");
+        assert!((media.volume.get() - 0.8).abs() < 1e-6, "your volume is untouched");
+        for _ in 0..95 {
+            last = level(&mixer, &mut out, &mut scratch, false);
+        }
+        assert!((last - 0.04).abs() < 1e-4, "still down a second after they stopped");
+        for _ in 0..70 {
+            last = level(&mixer, &mut out, &mut scratch, false);
+        }
+        assert!((last - 0.08).abs() < 1e-4, "back up ({last})");
+        mixer.lower_media.store(false, Ordering::Relaxed);
+        for _ in 0..30 {
+            last = level(&mixer, &mut out, &mut scratch, true);
+        }
+        assert!((last - 0.08).abs() < 1e-4, "switched off: nothing changes ({last})");
+    }
+
+    /// Space's panning, through the real mixer: someone to the right comes
+    /// out of the right (the left ear at a quarter at the edge), a boosted
+    /// voice through its limiter too; the middle is untouched.
+    #[test]
+    fn the_mixer_pans_voices() {
+        let engine = AudioEngine::new(Arc::new(|| {}));
+        let mixer = engine.mixer.clone();
+        let ana = engine.add_stream("ana", 1.0);
+        let (mut out, mut scratch) = (vec![0f32; BLOCK * 2], Vec::new());
+        let mut play = |pan: f32, vol: f32| {
+            ana.pan.set(pan);
+            ana.volume.set(vol);
+            ana.jb.lock().inject_pcm(&vec![0.1; BLOCK * 2]);
+            mixer.render(&mut out, &mut scratch);
+            (out[100], out[101])
+        };
+        assert_eq!(play(0.0, 1.0), (0.1, 0.1), "the middle");
+        let (l, r) = play(1.0, 1.0);
+        assert!((l - 0.025).abs() < 1e-6 && (r - 0.1).abs() < 1e-6, "far right: {l} {r}");
+        let (l, r) = play(-0.5, 0.5);
+        assert!((l - 0.05).abs() < 1e-6 && (r - 0.03125).abs() < 1e-6, "a bit left, at 50 %: {l} {r}");
+        let (l, r) = play(1.0, 1.5);
+        assert!(r > 0.1 && (l / r - 0.25).abs() < 1e-3, "boosted: louder, still panned ({l} {r})");
+    }
+
+    #[test]
+    fn push_to_talk_clicks_open_and_closed_only() {
+        use gate::Mode::{Open, Ptt, Vad};
+        assert_eq!(ptt_click((Ptt, false), (Ptt, true), false), Some(true), "opened");
+        assert_eq!(ptt_click((Ptt, true), (Ptt, false), false), Some(false), "closed (after the tail)");
+        assert_eq!(ptt_click((Ptt, true), (Ptt, true), false), None);
+        assert_eq!(ptt_click((Open, true), (Ptt, false), false), None, "switching modes isn't a click");
+        assert_eq!(ptt_click((Vad, false), (Vad, true), false), None, "voice activity never clicks");
+        assert_eq!(ptt_click((Ptt, false), (Ptt, true), true), None, "a mic test");
+    }
+
+    /// The click through the gate: pressed at 0.5 s, let go at 1 s — one
+    /// click as it opens, one after the 200 ms tail.
+    #[test]
+    fn the_click_follows_the_gate_and_its_tail() {
+        let mut g = gate::Gate::new(RATE, gate::Mode::Ptt, -50.0);
+        let (mut out, block) = ([0f32; BLOCK], [0.1f32; BLOCK]);
+        let mut clicks = Vec::new();
+        for i in 0..150 {
+            let before = (g.mode(), g.is_open());
+            g.set_ptt((50..100).contains(&i));
+            g.process(&block, &mut out);
+            if let Some(opened) = ptt_click(before, (g.mode(), g.is_open()), false) {
+                clicks.push((i, opened));
+            }
+        }
+        // (Block 119 ends exactly 200 ms after the release at block 100's start.)
+        assert_eq!(clicks, vec![(50, true), (119, false)], "open at the press, closed 200 ms after the release");
+    }
+
+    /// The web's ClipWatch cases: one pop isn't clipping, three within 2 s
+    /// is, for 3 s after the last; three spread over more than 2 s aren't.
+    #[test]
+    fn too_loud_means_peaks_at_the_top_again_and_again() {
+        let mut c = ClipWatch::default();
+        assert!(!c.push(-0.5, 0.0), "one pop");
+        assert!(!c.push(-6.0, 20.0));
+        assert!(!c.push(-0.2, 500.0), "two");
+        assert!(c.push(0.0, 900.0), "three within 2 s: too loud");
+        assert!(c.push(-20.0, 3800.0), "still shown 2.9 s after");
+        assert!(!c.push(-20.0, 3900.0), "gone 3 s after the last");
+        let mut spread = ClipWatch::default();
+        assert!(!spread.push(-0.5, 0.0) && !spread.push(-0.5, 1500.0) && !spread.push(-0.5, 3000.0), "three, but over 3 s");
+        assert!(!ClipWatch::default().push(-1.01, 0.0), "just under −1 dBFS isn't a hit");
+    }
+
+    /// Talking while muted: push-to-talk counts at once; voice activity and
+    /// always-on need 30 ms in a row over where voice activity opens (a click
+    /// doesn't count); unmuted or holding push-to-mute, nothing.
+    #[test]
+    fn talking_while_muted() {
+        let mut t = MutedTalk::default();
+        assert!(t.block(true, gate::Mode::Ptt, true, -90.0, -50.0), "push-to-talk pressed while muted");
+        assert!(!t.block(true, gate::Mode::Ptt, false, -20.0, -50.0), "loud, but push-to-talk isn't pressed");
+        let mut t = MutedTalk::default();
+        assert!(!t.block(true, gate::Mode::Vad, false, -30.0, -50.0));
+        assert!(!t.block(true, gate::Mode::Vad, false, -30.0, -50.0));
+        assert!(t.block(true, gate::Mode::Vad, false, -30.0, -50.0), "30 ms of talking");
+        assert!(!t.block(true, gate::Mode::Vad, false, -60.0, -50.0), "quiet again");
+        let mut click = MutedTalk::default();
+        assert!(!click.block(true, gate::Mode::Open, false, -10.0, -50.0) && !click.block(true, gate::Mode::Open, false, -70.0, -50.0), "a click");
+        let mut unmuted = MutedTalk::default();
+        assert!((0..10).all(|_| !unmuted.block(false, gate::Mode::Vad, false, -30.0, -50.0)), "not muted (or holding push-to-mute)");
     }
 }

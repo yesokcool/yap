@@ -33,6 +33,8 @@ export class ScreenView {
     this.lastFrame = 0;
     this.timer = null;
     this.frameCall = null;
+    /** × the share's volume while friends talk (Settings › Voice › Lower shared media while friends talk). */
+    this.duck = 1;
     el.innerHTML = `
       <div class="screen-bar">
         <span class="screen-title"></span>
@@ -107,16 +109,22 @@ export class ScreenView {
     this.#say('stopped');
   }
 
-  /** The share's sound: this person's screen volume, silent while you're deafened, on your speakers. */
+  /** The share's sound: this person's screen volume (lowered while friends talk, if asked), silent while you're deafened, on your speakers. */
   applyAudio() {
     if (!this.sid) return;
     const volume = Math.min(1, Math.max(0, this.hooks.volume(this.sid)));
-    this.video.volume = volume;
+    this.video.volume = volume * this.duck;
     this.video.muted = this.hooks.muted();
     this.slider.value = String(Math.round(volume * 100));
     this.el.querySelector('.screen-volume output').textContent = `${Math.round(volume * 100)}%`;
     const sink = this.hooks.sinkId();
     if (this.video.setSinkId && this.video.sinkId !== sink) this.video.setSinkId(sink).catch(() => this.video.setSinkId('').catch(() => {}));
+  }
+
+  /** Lower (or raise back) the share's sound while friends talk: a factor on its volume; the slider keeps showing yours. */
+  setDuck(factor) {
+    this.duck = Math.min(1, Math.max(0, factor));
+    if (this.sid) this.video.volume = Math.min(1, Math.max(0, this.hooks.volume(this.sid))) * this.duck;
   }
 
   toggleFullScreen() {

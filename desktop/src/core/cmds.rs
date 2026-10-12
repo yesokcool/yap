@@ -68,6 +68,7 @@ fn cmd_group(cmd: &Cmd) -> Part {
         | Cmd::LeaveVoice
         | Cmd::ToggleMute
         | Cmd::ToggleDeafen
+        | Cmd::Remote(..)
         | Cmd::SetVolume { .. }
         | Cmd::AudioSettings { .. }
         | Cmd::CheckRelay
@@ -537,13 +538,19 @@ impl Core {
             }
             Cmd::Proximity(list) => {
                 let m = &mut *self.shared.model.lock();
-                for (sid, f) in list {
+                for (sid, f, pan) in list {
                     if (f - 1.0).abs() < 0.001 {
                         m.proximity.remove(&sid);
                     } else {
                         m.proximity.insert(sid.clone(), f);
                     }
+                    if pan.abs() < 0.001 {
+                        m.pan.remove(&sid);
+                    } else {
+                        m.pan.insert(sid.clone(), pan);
+                    }
                     self.shared.audio.set_volume(&sid, m.session_volume(&sid));
+                    self.shared.audio.set_pan(&sid, pan);
                 }
             }
             Cmd::OpenWeb { place, video } => {
@@ -562,6 +569,32 @@ impl Core {
         }
     }
 
+    /// Mute and deafen, by the buttons' rules (`remote::next`), from the
+    /// buttons, the global keys or `yap --remote`: the timeline, the gate,
+    /// everyone else's mark and the blip, when something changed.
+    fn voice_flags(&mut self, cmd: crate::remote::Remote) {
+        let (was, now, sounds) = {
+            let mut m = self.shared.model.lock();
+            let was = (m.config.muted, m.config.deafened);
+            let now = crate::remote::next(cmd, was.0, was.1);
+            (m.config.muted, m.config.deafened) = now;
+            m.config_dirty |= now != was;
+            (was, now, m.config.sounds)
+        };
+        if now == was {
+            return;
+        }
+        // (A deafen change is the news; else mute.)
+        let (on, note) = if now.1 != was.1 { (now.1, if now.1 { "You deafened" } else { "You undeafened" }) } else { (now.0, if now.0 { "You muted" } else { "You unmuted" }) };
+        self.call_note(note);
+        self.shared.apply_gate();
+        self.send_voice_state();
+        if sounds {
+            self.shared.audio.mixer.play_notes(&[if on { 392.0 } else { 587.33 }], 0.075, 0.08, 0.05, true);
+        }
+        self.repaint();
+    }
+
     /// Voice and sound: joining, mute/deafen, audio settings, the mic test, the soundboard, chimes.
     pub(super) async fn on_audio_cmd(&mut self, cmd: Cmd) {
         match cmd {
@@ -575,41 +608,9 @@ impl Core {
                 self.stop_watching();
                 self.leave_voice();
             }
-            Cmd::ToggleMute => {
-                let (muted, sounds) = {
-                    let mut m = self.shared.model.lock();
-                    if m.config.deafened {
-                        m.config.deafened = false;
-                        m.config.muted = false;
-                    } else {
-                        m.config.muted = !m.config.muted;
-                    }
-                    m.config_dirty = true;
-                    (m.config.muted, m.config.sounds)
-                };
-                self.call_note(if muted { "You muted" } else { "You unmuted" });
-                self.shared.apply_gate();
-                self.send_voice_state();
-                if sounds {
-                    self.shared.audio.mixer.play_notes(&[if muted { 392.0 } else { 587.33 }], 0.075, 0.08, 0.05, true);
-                }
-                self.repaint();
-            }
-            Cmd::ToggleDeafen => {
-                let (deaf, sounds) = {
-                    let mut m = self.shared.model.lock();
-                    m.config.deafened = !m.config.deafened;
-                    m.config_dirty = true;
-                    (m.config.deafened, m.config.sounds)
-                };
-                self.call_note(if deaf { "You deafened" } else { "You undeafened" });
-                self.shared.apply_gate();
-                self.send_voice_state();
-                if sounds {
-                    self.shared.audio.mixer.play_notes(&[if deaf { 392.0 } else { 587.33 }], 0.075, 0.08, 0.05, true);
-                }
-                self.repaint();
-            }
+            Cmd::ToggleMute => self.voice_flags(crate::remote::Remote::ToggleMute),
+            Cmd::ToggleDeafen => self.voice_flags(crate::remote::Remote::ToggleDeafen),
+            Cmd::Remote(r) => self.voice_flags(r),
             Cmd::SetVolume { uid } => {
                 let m = self.shared.model.lock();
                 for s in m.sessions.values().filter(|s| s.uid == uid) {
@@ -1132,11 +1133,14 @@ impl Core {
             let sids: Vec<String> = {
                 let mut m = self.shared.model.lock();
                 m.space = SpaceModel::default();
-                m.proximity.drain().map(|(k, _)| k).collect()
+                let mut sids: Vec<String> = m.proximity.drain().map(|(k, _)| k).collect();
+                sids.extend(m.pan.drain().map(|(k, _)| k));
+                sids
             };
             let m = self.shared.model.lock();
             for sid in sids {
                 self.shared.audio.set_volume(&sid, m.session_volume(&sid));
+                self.shared.audio.set_pan(&sid, 0.0);
             }
         }
         if !self.online {

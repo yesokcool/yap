@@ -39,7 +39,10 @@ struct VoicePersonMenu: ViewModifier {
                 #if os(iOS)
                 .onLongPressGesture { open = true }
                 #else
-                .modifier(RightClickOpens(id: session.sid) { open = true })
+                .modifier(RightClickOpens(id: session.sid) { open = true } scrolled: { [voice = model.voice, uid = session.uid] steps in
+                    // Ctrl/⌘ + scroll over the row: their volume, 5 % a step.
+                    voice.setVolume(PersonVolume.stepped(voice.settings.volumes[uid] ?? 1, by: steps), for: uid)
+                })
                 #endif
                 .popover(isPresented: $open, arrowEdge: .trailing) {
                     VoicePersonPopover98(session: session) { action in
@@ -187,10 +190,13 @@ struct VolumeRow98: View {
 #if os(macOS)
 /// Right-click (or Control-click) on a row opens its popover too. SwiftUI
 /// has no right-click gesture, so one local event monitor sends the click to
-/// whichever row the pointer is over (rows say so on hover).
+/// whichever row the pointer is over (rows say so on hover). The same
+/// monitor turns Ctrl/⌘ + scroll over a row into volume steps
+/// (PROTOCOL.md › Voice › Your volume, on the row).
 private struct RightClickOpens: ViewModifier {
     var id: String
     var action: () -> Void
+    var scrolled: (Int) -> Void
     @State private var clicks = RightClicks.shared
 
     func body(content: Content) -> some View {
@@ -205,6 +211,9 @@ private struct RightClickOpens: ViewModifier {
             .onChange(of: clicks.count) { _, _ in
                 if clicks.requested == id { action() }
             }
+            .onChange(of: clicks.scrolls) { _, _ in
+                if let scroll = clicks.scroll, scroll.id == id { scrolled(scroll.steps) }
+            }
             .onAppear { clicks.install() }
     }
 }
@@ -216,11 +225,43 @@ final class RightClicks {
     @ObservationIgnored var hovered: String?
     private(set) var requested: String?
     private(set) var count = 0
+    /// The last Ctrl/⌘ + scroll over a row: whose, and how many 5 % steps (+ = louder).
+    private(set) var scroll: (id: String, steps: Int)?
+    private(set) var scrolls = 0
+    /// A trackpad's small deltas add up to steps.
+    @ObservationIgnored private var leftover = 0.0
     @ObservationIgnored private var monitor: Any?
+
+    /// Points of trackpad scrolling per 5 % step.
+    static let pointsPerStep = 12.0
 
     func install() {
         guard monitor == nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { event in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown, .scrollWheel]) { event in
+            if event.type == .scrollWheel {
+                guard !event.modifierFlags.intersection([.command, .control]).isEmpty else { return event }
+                // Up (or away), as the hand moves, is louder, whatever the scrolling direction setting.
+                let delta = Double(event.scrollingDeltaY) * (event.isDirectionInvertedFromDevice ? -1 : 1)
+                let precise = event.hasPreciseScrollingDeltas
+                let taken = MainActor.assumeIsolated { () -> Bool in
+                    let clicks = RightClicks.shared
+                    guard let id = clicks.hovered else { return false }
+                    var steps = 0
+                    if precise {
+                        clicks.leftover += delta
+                        steps = Int((clicks.leftover / Self.pointsPerStep).rounded(.towardZero))
+                        clicks.leftover -= Double(steps) * Self.pointsPerStep
+                    } else if delta != 0 {
+                        steps = delta > 0 ? 1 : -1
+                    }
+                    if steps != 0 {
+                        clicks.scroll = (id, steps)
+                        clicks.scrolls += 1
+                    }
+                    return true
+                }
+                return taken ? nil : event
+            }
             let secondary = event.type == .rightMouseDown || event.modifierFlags.contains(.control)
             guard secondary else { return event }
             let taken = MainActor.assumeIsolated { () -> Bool in

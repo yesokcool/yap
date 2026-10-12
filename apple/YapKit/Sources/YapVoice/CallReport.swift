@@ -41,6 +41,13 @@ public struct CallReport: Codable, Sendable, Equatable {
         public var weakSeconds: Double = 0
         /// Since when "weak connection" shows (nil = not now).
         public var weakSince: TimeInterval?
+        /// What they report receiving from us (`remote-inbound-rtp`): our
+        /// packets sent to them, how many of those they lost, and the round
+        /// trip measured with their reports. Optional: reports kept by an
+        /// older version don't have them.
+        public var sentToThem: Int?
+        public var theyLost: Int?
+        public var theirRttMs: [Double]?
 
         public init(uid: String, name: String) {
             self.uid = uid
@@ -170,10 +177,20 @@ public struct CallReport: Codable, Sendable, Equatable {
         }
         if p.secondaryUsed > 0 { lines.append("Rebuilt from FEC/RED (WebRTC's count): \(p.secondaryUsed) packets") }
         if let jb = median(p.jitterBufferMs) { lines.append("Jitter buffer: \(Int(jb.rounded())) ms (median)") }
+        if let line = theyLostLine(p) { lines.append(line) }
         lines.append("ICE restarts: \(p.iceRestarts); connection rebuilds: \(p.rebuilds); reconnects kept: \(p.reconnectsKept)")
         let weak = p.weakSeconds + (p.weakSince.map { max(0, until - $0) } ?? 0)
         lines.append("Weak connection shown: \(weak > 0 ? duration(weak) : "never")")
         return lines
+    }
+
+    /// "From you: they lost 0.4 % of yours (their round trip 38 ms median)",
+    /// from their reports (the web's words).
+    static func theyLostLine(_ p: Person) -> String? {
+        guard let sent = p.sentToThem else { return nil }
+        guard sent > 0, (p.theirRttMs?.isEmpty == false) || (p.theyLost ?? 0) > 0 else { return "From you: no reports from them" }
+        let rtt = median(p.theirRttMs ?? []).map { " (their round trip \(Int($0.rounded())) ms median)" } ?? ""
+        return "From you: they lost \(percent(Double(p.theyLost ?? 0), of: Double(sent))) of yours" + rtt
     }
 
     // MARK: Formatting helpers

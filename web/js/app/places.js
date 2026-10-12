@@ -73,7 +73,7 @@ export function setView(view) {
       send: (m) => conn?.send(m),
       mySid: () => state.sid,
       who: (sid) => state.users.get(state.sessions.get(sid)?.uid) ?? null,
-      proximity: (sid, f) => voice.setProximity(sid, f),
+      proximity: (sid, f, pan) => voice.setProximity(sid, f, pan ?? null),
       setLook: (look) => conn?.send({ t: 'profile', look }),
       inCall: (sid) => {
         const v = state.sessions.get(sid)?.voice;

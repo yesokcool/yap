@@ -18,11 +18,26 @@ const WEAK_RTT_MS: u32 = 300;
 const DEVICES_EVERY: Duration = Duration::from_secs(2);
 /// Hear yourself records this long.
 pub(super) const HEAR_SECS: u64 = 4;
+/// "You're muted": at most this often…
+pub const NUDGE_EVERY: Duration = Duration::from_secs(5);
+/// …and only for talking this recent (ms; not something from before the call).
+const NUDGE_FRESH_MS: u64 = 400;
+/// The nudge's soft blip: two quick low notes (the web's `sounds.mutedTalk`).
+pub const NUDGE_NOTES: [f32; 2] = [329.63, 329.63];
+
+/// Should talking while muted be pointed out now? `talked_ms`: when the gate
+/// last saw it (the gate's clock), `now_ms` the gate's clock now, `last`: the
+/// last nudge.
+pub fn nudge_due(talked_ms: u64, now_ms: u64, last: Option<Instant>, now: Instant) -> bool {
+    talked_ms > 0 && now_ms.saturating_sub(talked_ms) <= NUDGE_FRESH_MS && last.is_none_or(|t| now.duration_since(t) >= NUDGE_EVERY)
+}
 
 /// One connection's numbers at the last hint check.
 #[derive(Default)]
 pub(super) struct HintTrack {
     at: Option<Instant>,
+    /// Our packets sent to them by then.
+    sent: u64,
     packets: u64,
     frames: u64,
     concealed: u64,
@@ -41,6 +56,50 @@ pub(super) fn judge(track: &mut HintTrack, share: f32, rtt: Option<u32>) -> Opti
         track.weak = None;
     }
     track.weak
+}
+
+/// Your own connection (PROTOCOL.md › Connection hints): each 2 s, what the
+/// people you're sending to report losing of your audio (the fraction lost
+/// in their latest report about it). More than 3 % for most of them (or the
+/// only one) three rounds in a row: it's your side, "Your connection is
+/// dropping some of your audio"; gone after three good rounds, or when
+/// there's nobody to judge by. The web's `OwnConnection`, the same rules.
+#[derive(Default)]
+pub(super) struct OwnTrack {
+    /// Bad (+) or good (−) rounds in a row.
+    run: i32,
+    /// Shown, with the middle of what they report losing (0–1).
+    pub weak: Option<f32>,
+}
+
+impl OwnTrack {
+    /// One round: the fraction lost each person we're sending to reports. True when `weak` came or went.
+    pub fn round(&mut self, fractions: &[f32]) -> bool {
+        let was = self.weak.is_some();
+        if fractions.is_empty() {
+            self.run = 0;
+            self.weak = None;
+            return was;
+        }
+        let bad = fractions.iter().filter(|f| **f > WEAK_CONCEALED).count() * 2 > fractions.len();
+        self.run = if bad { self.run.max(0) + 1 } else { self.run.min(0) - 1 };
+        let mut sorted = fractions.to_vec();
+        sorted.sort_by(f32::total_cmp);
+        let middle = sorted[sorted.len() / 2];
+        if self.run >= 3 || (self.weak.is_some() && bad) {
+            self.weak = Some(middle);
+        } else if self.run <= -3 {
+            self.weak = None;
+        }
+        was != self.weak.is_some()
+    }
+}
+
+/// The voice panel's words, and why (the web's).
+pub const OWN_WEAK_TEXT: &str = "Your connection is dropping some of your audio";
+pub fn own_weak_title(lost: f32) -> String {
+    let pct = ((lost * 100.0).round() as u32).max(1);
+    format!("The others say about {pct}% of what you send never reaches them, so it's your connection, not theirs: a busy Wi‑Fi or mobile network. It usually passes; a cable, or getting closer to the router, helps.")
 }
 
 /// Should the mic (or speakers) be reopened? `configured`: the device picked
@@ -85,6 +144,13 @@ impl Core {
             self.emit(CoreEvent::Extra("MIC", if silent { "sending silence".into() } else { "sound again".into() }));
             self.repaint();
         }
+        self.tick_nudge(in_voice);
+        // Push-to-talk latched by a double-tap, or let go: on the timeline (the web's words).
+        let latched = self.shared.audio.gate.ptt_latched.load(Ordering::Relaxed);
+        if latched != self.ptt_latched {
+            self.ptt_latched = latched;
+            self.call_note(if latched { "Push-to-talk latched on (double-tap)" } else { "Push-to-talk latch off" });
+        }
         if in_voice && self.last_hints.is_none_or(|t| t.elapsed() >= HINT_EVERY) {
             self.last_hints = Some(Instant::now());
             self.update_hints();
@@ -99,6 +165,43 @@ impl Core {
         }
     }
 
+    /// Talking while muted (PROTOCOL.md › Voice › Transmit gate): "You're
+    /// muted" by the Mute button and a soft blip, at most every 5 s; the first
+    /// time on this device, what the blip means.
+    fn tick_nudge(&mut self, in_voice: bool) {
+        let g = &self.shared.audio.gate;
+        let talked = g.talked_muted_ms.load(Ordering::Relaxed);
+        if talked == self.nudge_seen {
+            return;
+        }
+        self.nudge_seen = talked;
+        let (remind, muted, first) = {
+            let m = self.shared.model.lock();
+            // (Not while deafened, like the web: you meant to be out of it.)
+            (m.config.remind_muted, m.config.muted && !m.config.deafened, !m.config.muted_explained)
+        };
+        let now = Instant::now();
+        if !in_voice || !remind || !muted || !nudge_due(talked, g.now_ms(), self.last_nudge, now) {
+            return;
+        }
+        self.last_nudge = Some(now);
+        self.shared.audio.mixer.play_notes(&NUDGE_NOTES, 0.11, 0.07, 0.035, false);
+        {
+            let mut m = self.shared.model.lock();
+            // (The first time's explanation stays up its whole 8 s.)
+            let explaining = m.muted_nudge.is_some_and(|(at, explain)| explain && at.elapsed() < Duration::from_secs(8));
+            if !explaining {
+                m.muted_nudge = Some((now, first));
+            }
+            if first {
+                m.config.muted_explained = true;
+                m.config_dirty = true;
+            }
+        }
+        self.emit(CoreEvent::Extra("NUDGE", if first { "you're muted (explained)".into() } else { "you're muted".into() }));
+        self.repaint();
+    }
+
     /// Connection hints: "weak connection", "needs the voice relay" / "can't connect".
     fn update_hints(&mut self) {
         let relay = self.voice.has_relay();
@@ -106,6 +209,8 @@ impl Core {
         let debug = cfg!(debug_assertions).then(|| std::env::var("YAP_DEBUG_HINT").ok()).flatten();
         let mut hints: HashMap<String, Hint> = HashMap::new();
         let mut weak_changes = Vec::new();
+        // What the people we're sending to report losing of our voice (your own connection).
+        let mut yours: Vec<f32> = Vec::new();
         for p in &peers {
             let sid = p.sid();
             let track = self.hint_track.entry(p.id).or_default();
@@ -113,8 +218,13 @@ impl Core {
             let stats = self.shared.audio.stream(&sid).map(|s| s.stats()).unwrap_or_default();
             let now = Instant::now();
             let connected = *p.state.lock() == "connected";
+            let sent = p.packets_sent.load(Ordering::Relaxed);
             if let Some(at) = track.at {
                 let secs = now.duration_since(at).as_secs_f64().max(0.001);
+                let sending = sent.saturating_sub(track.sent) as f64 / secs >= HINT_MIN_PPS;
+                if connected && sending && p.their_reports.load(Ordering::Relaxed) > 0 {
+                    yours.push(p.their_fraction.load(Ordering::Relaxed) as f32 / 1000.0);
+                }
                 let pps = stats.packets.saturating_sub(track.packets) as f64 / secs;
                 let settled = p.connected_at.lock().is_some_and(|c| c.elapsed() > HINT_SETTLE);
                 if pps >= HINT_MIN_PPS && connected && settled {
@@ -125,6 +235,7 @@ impl Core {
                 }
             }
             track.at = Some(now);
+            track.sent = sent;
             track.packets = stats.packets;
             track.frames = stats.frames;
             track.concealed = stats.concealed;
@@ -151,6 +262,21 @@ impl Core {
         }
         for (sid, weak) in weak_changes {
             self.call_weak(&sid, weak);
+        }
+        // Your own connection: on (or off) for the voice panel, the timeline and the logs.
+        let own_changed = self.own.round(&yours);
+        let own = if debug.as_deref() == Some("own") { Some(0.06) } else { self.own.weak };
+        if self.shared.model.lock().own_weak.is_some() != own.is_some() || own_changed {
+            self.shared.model.lock().own_weak = own;
+            let line = match own {
+                Some(lost) => format!("{OWN_WEAK_TEXT} (they lose about {} % of yours)", (lost * 100.0).round()),
+                None => "Your connection is fine again".to_string(),
+            };
+            self.emit(CoreEvent::Extra("HINT", format!("self {}", if own.is_some() { "dropping" } else { "ok" })));
+            self.call_note(line);
+            self.repaint();
+        } else if own.is_some() {
+            self.shared.model.lock().own_weak = own; // (still on: the latest numbers)
         }
         let live: HashSet<u64> = peers.iter().map(|p| p.id).collect();
         self.hint_track.retain(|id, _| live.contains(id));
@@ -349,6 +475,57 @@ mod tests {
         judge(&mut u, 0.1, None);
         judge(&mut u, 0.0, None);
         assert_eq!(judge(&mut u, 0.1, None), None);
+    }
+
+    /// The web's OwnConnection cases: the only one, 2 of 3, not 1 of 2,
+    /// exactly 3 % isn't more than 3 %, three rounds each way, and nobody to
+    /// judge by clears it.
+    #[test]
+    fn your_own_connection_needs_most_people_three_rounds_running() {
+        let mut t = OwnTrack::default();
+        assert!(!t.round(&[0.08]) && !t.round(&[0.08]));
+        assert!(t.round(&[0.08]), "the only one, three rounds: shown");
+        assert_eq!(t.weak, Some(0.08));
+        assert!(!t.round(&[0.0]) && !t.round(&[0.0]));
+        assert!(t.round(&[0.0]) && t.weak.is_none(), "three good rounds: gone");
+        let mut t = OwnTrack::default();
+        for _ in 0..3 {
+            t.round(&[0.1, 0.05, 0.0]);
+        }
+        assert_eq!(t.weak, Some(0.05), "2 of 3 lose more than 3 % (the middle one)");
+        let mut t = OwnTrack::default();
+        for _ in 0..5 {
+            t.round(&[0.2, 0.0]);
+        }
+        assert_eq!(t.weak, None, "1 of 2 isn't most: theirs, not yours");
+        let mut t = OwnTrack::default();
+        for _ in 0..5 {
+            t.round(&[0.03]);
+        }
+        assert_eq!(t.weak, None, "exactly 3 % isn't more than 3 %");
+        let mut t = OwnTrack::default();
+        for _ in 0..3 {
+            t.round(&[0.1]);
+        }
+        assert!(t.round(&[]) && t.weak.is_none(), "alone (or no reports): nothing to say");
+        // One good round in a bad run starts over.
+        let mut t = OwnTrack::default();
+        t.round(&[0.1]);
+        t.round(&[0.1]);
+        t.round(&[0.0]);
+        t.round(&[0.1]);
+        assert_eq!(t.weak, None);
+        assert!(own_weak_title(0.004).contains("about 1%"), "never \"0%\"");
+    }
+
+    #[test]
+    fn the_muted_nudge_waits_five_seconds_and_only_for_fresh_talk() {
+        let t0 = Instant::now();
+        assert!(nudge_due(1000, 1100, None, t0), "talking now, never nudged");
+        assert!(!nudge_due(0, 1100, None, t0), "never talked");
+        assert!(!nudge_due(1000, 2000, None, t0), "talked a second ago (before the call): not now");
+        assert!(!nudge_due(9000, 9050, Some(t0), t0 + Duration::from_millis(4900)), "4.9 s after the last one");
+        assert!(nudge_due(9000, 9050, Some(t0), t0 + Duration::from_secs(5)), "5 s after");
     }
 
     #[test]

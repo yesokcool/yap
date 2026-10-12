@@ -11,11 +11,19 @@
  *    (hold). The output runs 40 ms behind the mic (pre-roll), so the gate
  *    opens *before* the first syllable instead of after it. Voice activity
  *    only: push-to-talk and always-on have no extra delay.
- *  - Push to talk: open while the key is down, plus a 200 ms tail.
+ *  - Push to talk: open while the key is down, plus a 200 ms tail. (Double-tap
+ *    to stay live is decided on the main thread, by PttLatch below: the gate
+ *    only hears "held" or not.) Its report says when push-to-talk is open
+ *    (`pttOpen`), so the page can click when it closes after the tail.
  *  - Opening fades in over 5 ms, closing fades out over 15 ms (no clicks).
  *  - Every 20 ms it reports the mic's level (dBFS RMS, before the gate),
  *    whether the gate is open, the noise floor, and whether the mic has sent
  *    nothing but digital silence for 5 s.
+ *  - …and the loudest sample in those 20 ms (`peak`, dBFS), for the meter's
+ *    "Too loud (clipping)" (ClipWatch below).
+ *  - It also says whether voice activity *would* open it (`voice`), in every
+ *    mode: you're talking. Mute is applied after this (below), so that still
+ *    works while you're muted: the "You're muted" reminder.
  * Mute and deafen stay on the main thread (`track.enabled`): those must be
  * certain even if this thread stalls.
  *
@@ -65,6 +73,7 @@ export class Gate {
     this.t = 0; // samples processed
     this.open = mode === 'open';
     this.holdUntil = -1;
+    this.voiceUntil = -1; // voice activity in any mode (talking while muted: would the gate open?)
     this.gain = this.open ? 1 : 0;
     // Delay line for the pre-roll (per channel, allocated on first use).
     this.ring = [];
@@ -147,6 +156,8 @@ export class Gate {
       this.floor = this.buckets.length ? Math.min(...this.buckets) : -120;
     }
     if (this.mode === 'vad' && db > (this.open ? this.closeAt : this.openAt)) this.holdUntil = this.t + this.hold;
+    // The same decision whatever the mode: are you talking? (Push-to-talk and always-on don't use it to send.)
+    if (db > (this.t < this.voiceUntil ? this.closeAt : this.openAt)) this.voiceUntil = this.t + this.hold;
     this.#decide();
   }
 
@@ -188,13 +199,105 @@ export class Gate {
       }
       if (++this.repN === this.reportLen) {
         this.silentFor = this.repPeak < GATE.silencePeak ? this.silentFor + this.repN : 0;
-        report = { db: toDb(this.repSum / this.repN), open: this.open, floor: this.floor, at: this.openAt, silent: this.silentFor >= this.silenceLen };
+        report = {
+          db: toDb(this.repSum / this.repN), peak: toDb(this.repPeak * this.repPeak), open: this.open, voice: this.t < this.voiceUntil,
+          pttOpen: this.mode === 'ptt' && !this.test && this.open,
+          floor: this.floor, at: this.openAt, silent: this.silentFor >= this.silenceLen,
+        };
         this.repSum = 0;
         this.repN = 0;
         this.repPeak = 0;
       }
     }
     return report;
+  }
+}
+
+/**
+ * Talking while muted (PROTOCOL.md › Transmit gate): when to remind you. At
+ * most once every 5 s, and not in the first second after you muted (you may
+ * be finishing a word). The page plays the blip and shows "You're muted".
+ */
+export const MUTED_REMINDER = { everyMs: 5000, graceMs: 1000 };
+
+export class MutedReminder {
+  #mutedAt = -Infinity;
+  #remindedAt = -Infinity;
+
+  /** You just muted (ms, any clock). */
+  muted(now) {
+    this.#mutedAt = now;
+  }
+
+  /** You're talking (or pressed push-to-talk) while muted: remind you now? */
+  due(now) {
+    if (now - this.#mutedAt < MUTED_REMINDER.graceMs || now - this.#remindedAt < MUTED_REMINDER.everyMs) return false;
+    this.#remindedAt = now;
+    return true;
+  }
+}
+
+/**
+ * Push-to-talk's double-tap (PROTOCOL.md › Transmit gate): pressed twice
+ * within 400 ms (key down to key down), it stays open after you let go
+ * ("Live — tap to stop"); the next press ends that, and is an ordinary
+ * press (open while held, then the tail), so it never cuts you off mid-word.
+ */
+export const PTT_LATCH_MS = 400;
+
+export class PttLatch {
+  held = false;
+  latched = false;
+  #lastDown = -Infinity;
+
+  /** The key went down (ms, any clock). */
+  down(now) {
+    if (this.latched) {
+      this.latched = false;
+      this.#lastDown = -Infinity; // (the press that ends it doesn't start a new double-tap)
+    } else if (now - this.#lastDown <= PTT_LATCH_MS) {
+      this.latched = true;
+      this.#lastDown = -Infinity;
+    } else {
+      this.#lastDown = now;
+    }
+    this.held = true;
+  }
+
+  up() {
+    this.held = false;
+  }
+
+  /** Off for good (the input mode changed). */
+  reset() {
+    this.held = false;
+    this.latched = false;
+    this.#lastDown = -Infinity;
+  }
+
+  /** Push-to-talk is on: held, or latched. */
+  get open() {
+    return this.held || this.latched;
+  }
+}
+
+/**
+ * "Too loud (clipping)" on the mic meter: the loudest sample of a 20 ms
+ * report at −1 dBFS or more, three times within 2 s, shows it for 3 s.
+ * (Once is a pop; again and again is a mic turned up too far.)
+ */
+export const CLIP = { db: -1, hits: 3, windowMs: 2000, holdMs: 3000 };
+
+export class ClipWatch {
+  #hits = [];
+  #until = -Infinity;
+
+  /** One report's peak (dBFS) at `now` (ms): is it clipping? */
+  push(peakDb, now) {
+    if (peakDb >= CLIP.db) this.#hits.push(now);
+    while (this.#hits.length && this.#hits[0] <= now - CLIP.windowMs) this.#hits.shift();
+    if (this.#hits.length >= CLIP.hits) this.#until = now + CLIP.holdMs;
+    return now < this.#until;
   }
 }
 

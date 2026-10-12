@@ -375,6 +375,12 @@ impl JitterBuffer {
     }
 
     /// Fill `out` (interleaved stereo) completely; silence where there's nothing.
+    /// Tests: decoded audio (stereo, interleaved) to play next.
+    #[cfg(test)]
+    pub fn inject_pcm(&mut self, pcm: &[f32]) {
+        self.pcm.extend(pcm);
+    }
+
     pub fn pull(&mut self, out: &mut [f32]) {
         while self.pcm.len() < out.len() {
             self.decode_one();

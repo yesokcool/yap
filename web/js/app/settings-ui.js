@@ -10,7 +10,7 @@ import { ago, avatar, copyByHand, nameIn, nameOf, swatches, toast, untilText } f
 import { applyTheme } from './look.js';
 import { postImage } from './uploads.js';
 import { currentPushSubscription, disableBrowserPush, enableBrowserPush } from './push.js';
-import { fetchIce, hasRelay, renderVoicePanel, screenView, voice } from './voice-ui.js';
+import { fetchIce, hasRelay, renderVoicePanel, screenView, syncDuck, voice } from './voice-ui.js';
 import { renderCallReportButton } from './call-report-ui.js';
 import { renderUserPanel } from './sidebar.js';
 import { canAddToHome } from './account.js';
@@ -132,7 +132,8 @@ export function openSettings(tab) {
   form.mode.value = settings.mode;
   form.vadThreshold.value = settings.vadThreshold;
   form.bitrate.value = String(settings.bitrate);
-  for (const k of ['music', 'noiseSuppression', 'echoCancellation', 'autoGain', 'sounds', 'relayOnly']) form[k].checked = settings[k];
+  renderBitrateWarning();
+  for (const k of ['music', 'noiseSuppression', 'echoCancellation', 'autoGain', 'sounds', 'relayOnly', 'mutedReminder', 'pttClick', 'duckMedia']) form[k].checked = settings[k];
   // Relay-only needs a TURN relay on the server; say so instead of pretending.
   fetchIce().then((ice) => {
     const ok = hasRelay(ice);
@@ -146,7 +147,7 @@ export function openSettings(tab) {
   form.soundboardMuted.checked = settings.soundboardMuted;
   renderAwaySettings();
   renderChimeSettings();
-  $('ptt-key').textContent = keyLabel(settings.pttKey);
+  renderKeys();
   syncSettingsVisibility();
   renderMeter(voice.rawStream ? voice.localDb : -100);
   renderCallReportButton();
@@ -266,6 +267,17 @@ function syncSettingsVisibility() {
   $('music-vad-note').hidden = !(settings.music && settings.mode === 'vad');
 }
 
+/**
+ * Next to 256 and 510 kbps (PROTOCOL.md › Voice): RED's copy no longer fits
+ * a packet, and it's several times the upload. Here and in the call's ⋯.
+ */
+export const HIGH_BITRATE = 256000;
+export const HIGH_BITRATE_WARNING = 'No dropout protection at this quality (each bit of voice no longer fits twice in a packet), and several times the upload for each friend in the call.';
+
+function renderBitrateWarning() {
+  $('bitrate-warn').hidden = settings.bitrate < HIGH_BITRATE;
+}
+
 export function renderMeter(db) {
   const pct = (v) => `${Math.max(0, Math.min(100, ((v + 80) / 80) * 100))}%`;
   const fill = $('meter-fill');
@@ -274,6 +286,10 @@ export function renderMeter(db) {
   if (micTest.on) micTest.levels.push(db);
   // "Hot" = loud enough to open the gate (in a noisy room that's above your line: the gate adapts).
   fill.classList.toggle('hot', settings.mode === 'vad' && db > Math.max(settings.vadThreshold, voice.openAt));
+  // Peaks hitting the top again and again: "Too loud (clipping)" (gate-worklet.js › ClipWatch).
+  const clipping = db > -100 && voice.clipping;
+  fill.classList.toggle('clip', clipping);
+  $('mic-clip').hidden = !clipping;
   $('meter-mark').style.left = pct(settings.vadThreshold);
 }
 
@@ -386,23 +402,42 @@ export async function hearYourself() {
   }
 }
 
-export let bindingPtt = false;
-export function bindPttKey() {
-  const button = $('ptt-key');
-  bindingPtt = true;
+/** A key being picked in Settings › Voice (push-to-talk or push-to-mute): other key handling stands aside. */
+export let bindingKey = false;
+const KEY_BUTTONS = { pttKey: 'ptt-key', pushToMuteKey: 'ptm-key' };
+
+/** Push-to-talk / push-to-mute key: the next key pressed (Escape: leave it as it was). */
+export function bindKey(name) {
+  const button = $(KEY_BUTTONS[name]);
+  bindingKey = true;
   button.textContent = 'Press a key…';
   const onKey = (e) => {
     e.preventDefault();
     e.stopPropagation();
     removeEventListener('keydown', onKey, true);
-    bindingPtt = false;
-    if (e.key !== 'Escape') save({ pttKey: e.code });
-    button.textContent = keyLabel(settings.pttKey);
+    bindingKey = false;
+    const other = name === 'pttKey' ? 'pushToMuteKey' : 'pttKey';
+    if (e.key !== 'Escape' && e.code === settings[other]) toast(`${keyLabel(e.code)} is already your ${other === 'pttKey' ? 'push-to-talk' : 'push-to-mute'} key.`);
+    else if (e.key !== 'Escape') save({ [name]: e.code });
+    renderKeys();
   };
   addEventListener('keydown', onKey, true);
 }
 
-function keyLabel(code) {
+/** Push-to-mute: none. */
+export function clearPushToMute() {
+  save({ pushToMuteKey: '' });
+  voice.setPushToMute(false);
+  renderKeys();
+}
+
+function renderKeys() {
+  $('ptt-key').textContent = keyLabel(settings.pttKey);
+  $('ptm-key').textContent = settings.pushToMuteKey ? keyLabel(settings.pushToMuteKey) : 'None (click to pick one)';
+  $('ptm-clear').hidden = !settings.pushToMuteKey;
+}
+
+export function keyLabel(code) {
   const named = { Backquote: '`', Space: 'Space', CapsLock: 'Caps Lock', ShiftLeft: 'Left Shift', ShiftRight: 'Right Shift', ControlLeft: 'Left Ctrl', ControlRight: 'Right Ctrl', AltLeft: 'Left Alt', AltRight: 'Right Alt', MetaLeft: 'Left ⌘', MetaRight: 'Right ⌘' };
   return named[code] ?? code.replace(/^Key|^Digit/, '');
 }
@@ -456,12 +491,13 @@ export function bindSettings() {
         return voice.applySettings();
       case 'mode':
         save({ mode: form.mode.value });
-        voice.setPtt(false);
+        voice.releasePtt();
         return syncSettingsVisibility();
       case 'vadThreshold':
         return save({ vadThreshold: Number(form.vadThreshold.value) });
       case 'bitrate':
         save({ bitrate: Number(form.bitrate.value) });
+        renderBitrateWarning();
         voice.applySettings({ renegotiate: true });
         return renderVoicePanel();
       case 'music':
@@ -475,6 +511,15 @@ export function bindSettings() {
         return renderVoicePanel();
       case 'sounds':
         return save({ sounds: form.sounds.checked });
+      case 'pttClick':
+        return save({ pttClick: form.pttClick.checked });
+      case 'duckMedia':
+        save({ duckMedia: form.duckMedia.checked });
+        return syncDuck();
+      case 'mutedReminder':
+        save({ mutedReminder: form.mutedReminder.checked });
+        state.mutedNoteUntil = 0;
+        return renderUserPanel();
       case 'chime': {
         const chime = form.chime.value;
         conn?.send({ t: 'profile', chime: chime === 'default' ? null : chime });

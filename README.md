@@ -33,7 +33,7 @@ than most chat apps and costs nothing to run.
 - **Voice:** peer-to-peer calls at 128 kbps by default (up to Opus's 510).
   Each packet also carries the one before it, so choppy Wi‑Fi doesn't make
   voices robotic.
-  - Noise suppression (RNNoise, the same AI filter in the browser and the desktop app), echo cancellation, push-to-talk and per-person volume.
+  - Noise suppression (RNNoise, the same AI filter in the browser and the desktop app), echo cancellation, push-to-talk (double-tap to stay live) and push-to-mute, a reminder when you talk while muted, and per-person volume shown on their row.
   - Screen sharing with sound, a soundboard with a loudness cap, and join
     chimes.
   - A call report you can copy when a call sounded off.

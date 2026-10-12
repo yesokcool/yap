@@ -11,6 +11,17 @@
  */
 
 export const WORLD = { w: 2400, h: 1600 };
+
+/**
+ * Space voice, left/right (PROTOCOL.md › Space): someone to your right on
+ * screen comes from the right. Pan = dx / 400, from −1 (left) to 1 (right);
+ * anyone within 60 units is in the middle (both ears full).
+ */
+export const PAN = { width: 400, middle: 60 };
+export function voicePan(dx, dy) {
+  if (Math.hypot(dx, dy) < PAN.middle) return 0;
+  return Math.max(-1, Math.min(1, dx / PAN.width));
+}
 export const RADIUS = 24; // a person
 export const T = 22; // wall thickness
 const DOOR = 140;

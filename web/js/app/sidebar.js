@@ -7,10 +7,11 @@ import { esc } from '../format.js';
 import { $, conn, isMod, state } from './state.js';
 import { avatar, hangWhen, holdFocus } from './ui.js';
 import { VIEWS, watchParty } from './places.js';
-import { obsListening, voiceMember } from './voice-ui.js';
+import { obsListening, voice, voiceMember } from './voice-ui.js';
 import { isUnread, updateTitle } from './chat.js';
 import { inviteWarning } from './people.js';
 import { unreadElsewhere } from './extras.js';
+import { keyLabel } from './settings-ui.js';
 
 let minecraftTimer = null;
 
@@ -192,8 +193,15 @@ export function renderHeader() {
 
 export function renderUserPanel() {
   const muted = settings.muted || settings.deafened;
+  const held = voice.pushMuted; // the push-to-mute key, held right now
   const me = state.users.get(settings.uid) ?? { name: settings.name || '…', color: settings.color };
   const refocus = holdFocus($('user-panel')); // (Mute from the keyboard keeps the keyboard on Mute)
+  // A word by the Mute button, like a tooltip: you're talking while muted (for a few seconds).
+  const bubble = settings.muted && !settings.deafened && Date.now() < (state.mutedNoteUntil ?? 0)
+    ? { text: "You're muted", title: "You're talking, but you're muted: nobody hears you. (Settings › Voice › Remind me when I talk while muted)" }
+    : voice.pttLatched && settings.mode === 'ptt'
+      ? { text: 'Live — tap to stop', title: `Push-to-talk stays on (you double-tapped it). Press ${keyLabel(settings.pttKey)} again to stop.` }
+      : null;
   // The whole card opens Settings (on Profile); mute and deafen get big buttons.
   $('user-panel').innerHTML = `
     <button class="me" data-action="open-settings" data-tab="Profile" title="Your profile and settings" ${state.sid ? `data-voice-sid="${esc(state.sid)}"` : ''}>
@@ -202,8 +210,9 @@ export function renderUserPanel() {
       ${icon('settings')}
     </button>
     <div class="me-actions">
-      <button class="btn big-toggle ${muted ? 'on' : ''}" data-action="toggle-mute" title="${muted ? 'Unmute' : 'Mute'} your mic" aria-pressed="${muted}">${icon(muted ? 'mic-off' : 'mic')}<span>${muted ? 'Muted' : 'Mute'}</span></button>
-      <button class="btn big-toggle ${settings.deafened ? 'on' : ''}" data-action="toggle-deafen" title="${settings.deafened ? 'Undeafen' : 'Deafen'}: hear nobody, and mute" aria-pressed="${settings.deafened}">${icon(settings.deafened ? 'headphones-off' : 'headphones')}<span>${settings.deafened ? 'Deafened' : 'Deafen'}</span></button>
+      ${bubble ? `<span class="me-bubble" role="status" title="${esc(bubble.title)}">${esc(bubble.text)}</span>` : ''}
+      <button class="btn big-toggle ${muted || held ? 'on' : ''}" data-action="toggle-mute" title="${held && !muted ? `Muted while you hold ${esc(keyLabel(settings.pushToMuteKey))}` : `${muted ? 'Unmute' : 'Mute'} your mic`} (Ctrl/⌘+Shift+M)" aria-keyshortcuts="Control+Shift+M Meta+Shift+M" aria-pressed="${muted || held}">${icon(muted || held ? 'mic-off' : 'mic')}<span>${muted || held ? 'Muted' : 'Mute'}</span></button>
+      <button class="btn big-toggle ${settings.deafened ? 'on' : ''}" data-action="toggle-deafen" title="${settings.deafened ? 'Undeafen' : 'Deafen'}: hear nobody, and mute (Ctrl/⌘+Shift+D)" aria-keyshortcuts="Control+Shift+D Meta+Shift+D" aria-pressed="${settings.deafened}">${icon(settings.deafened ? 'headphones-off' : 'headphones')}<span>${settings.deafened ? 'Deafened' : 'Deafen'}</span></button>
     </div>`;
   if (state.sid) $('user-panel').querySelector('.me').classList.toggle('speaking', state.speaking.has(state.sid));
   refocus();

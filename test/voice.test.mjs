@@ -1,9 +1,10 @@
 // Voice logic that needs no browser: SDP tuning, codec order (RED) and the transmit gate.
 //   node test/voice.test.mjs
 import assert from 'node:assert/strict';
-import { orderAudioCodecs, orderCodecs, SCREEN_QUALITY, tuneOpus } from '../web/js/voice.js';
+import { orderAudioCodecs, orderCodecs, OwnConnection, panGains, SCREEN_QUALITY, tuneOpus } from '../web/js/voice.js';
+import { PAN, voicePan } from '../web/js/space-map.js';
 import { settings } from '../web/js/settings.js';
-import { Gate, GATE } from '../web/js/gate-worklet.js';
+import { CLIP, ClipWatch, Gate, GATE, MutedReminder, MUTED_REMINDER, PttLatch, PTT_LATCH_MS } from '../web/js/gate-worklet.js';
 
 const cases = [];
 const t = (name, fn) => cases.push([name, fn]);
@@ -300,6 +301,149 @@ t('gate: stereo (music mode) gates both channels alike', () => {
   g.process([l, r], out);
   assert.equal(out[0][100], 0.5);
   assert.equal(out[1][100], -0.25);
+});
+
+t('gate: says when you talk in every mode (the "You\'re muted" reminder), not only in voice activity', () => {
+  const x = noise(SR * 3, -75);
+  syllable(x, ms(1200), 300, -30);
+  for (const mode of ['vad', 'open', 'ptt']) {
+    const { reports } = run(x, { mode, threshold: -50 });
+    const talking = reports.filter((r) => r.voice).map((r) => r.t);
+    assert.ok(talking.length, `${mode}: talking is reported`);
+    assert.ok(talking[0] >= ms(1150) && talking[0] <= ms(1260), `${mode}: from the syllable on (${talking[0] / 48} ms)`);
+    assert.ok(talking.at(-1) <= ms(1500 + GATE.holdMs + 40), `${mode}: and its hold, then quiet again (${talking.at(-1) / 48} ms)`);
+    assert.ok(!reports.some((r) => r.voice && r.t < ms(1100)), `${mode}: never in the quiet room before`);
+  }
+  // Always-on sends everything, but only actual talking counts as talking.
+  const quiet = run(noise(SR * 2, -75), { mode: 'open' });
+  assert.ok(quiet.reports.every((r) => r.open && !r.voice), 'always-on: open, but nobody talking');
+});
+
+t('muted reminder: at most once every 5 s, never in the first second after muting', () => {
+  const r = new MutedReminder();
+  r.muted(0);
+  assert.equal(r.due(500), false, 'still finishing a word as you mute');
+  assert.equal(r.due(MUTED_REMINDER.graceMs), true, 'then the first reminder');
+  assert.equal(r.due(MUTED_REMINDER.graceMs + 20), false);
+  assert.equal(r.due(MUTED_REMINDER.graceMs + 4999), false, 'not again within 5 s');
+  assert.equal(r.due(MUTED_REMINDER.graceMs + 5000), true, 'again after 5 s');
+  r.muted(20_000);
+  assert.equal(r.due(20_400), false, 'muting again starts the grace again');
+  assert.equal(r.due(21_000), true);
+  assert.equal(MUTED_REMINDER.everyMs, 5000, 'the spec says 5 s');
+});
+
+t('gate: reports push-to-talk open until the tail ends (the closing click), never in a mic test', () => {
+  const x = new Float32Array(SR * 2).fill(0.25);
+  const press = ms(500);
+  const release = ms(800);
+  const { reports } = run(x, { mode: 'ptt' }, [{ at: press, set: { ptt: true } }, { at: release, set: { ptt: false } }]);
+  const open = reports.filter((r) => r.pttOpen).map((r) => r.t);
+  assert.ok(open[0] >= press - 128 && open[0] <= press + ms(25), `opens with the key (${open[0] / 48} ms)`);
+  const closed = open.at(-1);
+  assert.ok(closed >= release + ms(GATE.pttTailMs) - ms(25) && closed <= release + ms(GATE.pttTailMs) + ms(25), `closes after the 200 ms tail (${(closed - release) / 48} ms after release)`);
+  assert.ok(run(x, { mode: 'ptt', test: true }, [{ at: press, set: { ptt: true } }]).reports.every((r) => !r.pttOpen), 'a mic test: never');
+  assert.ok(run(x, { mode: 'open' }).reports.every((r) => !r.pttOpen), 'always-on: never');
+});
+
+t('push-to-talk double-tap: two presses within 400 ms stay live; the next press ends it (and is an ordinary press)', () => {
+  const p = new PttLatch();
+  p.down(0);
+  p.up();
+  assert.equal(p.open, false, 'one tap: closed after it');
+  p.down(PTT_LATCH_MS);
+  assert.equal(p.latched, true, 'second press 400 ms after the first: latched');
+  p.up();
+  assert.equal(p.open, true, 'stays open with the key up');
+  p.down(5000);
+  assert.equal(p.latched, false, 'the next press ends the latch…');
+  assert.equal(p.open, true, '…but is held, so nothing is cut off');
+  p.up();
+  assert.equal(p.open, false);
+  p.down(5200);
+  p.up();
+  assert.equal(p.latched, false, 'the press that ended it never counts as the first of a double-tap');
+  const slow = new PttLatch();
+  slow.down(0);
+  slow.up();
+  slow.down(PTT_LATCH_MS + 1);
+  assert.equal(slow.latched, false, '401 ms apart: no');
+  const long = new PttLatch();
+  long.down(0);
+  long.up();
+  long.down(2000);
+  assert.equal(long.latched, false, 'a long hold then a press: no');
+  long.reset();
+  assert.deepEqual([long.open, long.latched], [false, false]);
+});
+
+t('your own connection: shown when most people lose > 3 % of yours three rounds in a row; gone after three good ones', () => {
+  const own = new OwnConnection();
+  const bad = { fraction: 0.08, rtt: 40 };
+  const good = { fraction: 0.01, rtt: 40 };
+  assert.equal(own.round([bad]), false);
+  assert.equal(own.round([bad]), false);
+  assert.equal(own.round([bad]), true, 'the only one, three rounds: shown');
+  assert.deepEqual(own.weak, { lost: 0.08, rtt: 40 });
+  assert.equal(own.round([good]), false);
+  assert.equal(own.round([good]), false, 'still shown after two good rounds');
+  assert.equal(own.round([good]), true, 'gone after three');
+  assert.equal(own.weak, null);
+  // Two of three people losing it: most. One of two: not most (it's probably that person's network).
+  for (let i = 0; i < 3; i++) own.round([bad, bad, good]);
+  assert.ok(own.weak, '2 of 3');
+  const half = new OwnConnection();
+  for (let i = 0; i < 5; i++) half.round([bad, good]);
+  assert.equal(half.weak, null, '1 of 2 is not most');
+  // Exactly 3 % isn't "more than 3 %"; no reports at all (alone, or none yet) clears it.
+  const edge = new OwnConnection();
+  for (let i = 0; i < 4; i++) edge.round([{ fraction: 0.03, rtt: null }]);
+  assert.equal(edge.weak, null);
+  for (let i = 0; i < 3; i++) edge.round([bad]);
+  assert.ok(edge.weak);
+  assert.equal(edge.round([]), true, 'alone again: gone');
+  assert.equal(edge.weak, null);
+  assert.equal(edge.round([{ fraction: null }]), false, 'a report without a fraction is not judged');
+});
+
+t('Space left/right: pan = dx / 400 (clamped), the middle within 60; the far ear never under 1/4, both full in the middle', () => {
+  assert.equal(voicePan(0, 0), 0);
+  assert.equal(voicePan(59, 0), 0, 'within 60: the middle');
+  assert.equal(voicePan(40, 40), 0, '(by distance, not just across)');
+  assert.equal(voicePan(200, 0), 0.5);
+  assert.equal(voicePan(-400, 300), -1);
+  assert.equal(voicePan(2000, 0), 1, 'clamped');
+  assert.equal(voicePan(100, 900), 0.25, 'far up or down the screen: only across counts');
+  assert.deepEqual([PAN.width, PAN.middle], [400, 60], 'the spec\'s numbers');
+  assert.deepEqual(panGains(0), [1, 1], 'the middle: both ears full');
+  assert.deepEqual(panGains(1), [0.25, 1], 'all the way right: the left ear at 1/4');
+  assert.deepEqual(panGains(-1), [1, 0.25]);
+  assert.deepEqual(panGains(0.5), [0.625, 1]);
+  assert.deepEqual(panGains(-7), [1, 0.25], 'clamped');
+  for (let p = -1; p <= 1; p += 0.05) {
+    const [l, r] = panGains(p);
+    assert.ok(Math.min(l, r) / Math.max(l, r) >= 0.25 - 1e-9 && Math.max(l, r) === 1, `pan ${p.toFixed(2)}: near ear full, far ≥ 1/4`);
+  }
+});
+
+t('mic meter: each report carries its loudest sample (dBFS); "Too loud (clipping)" after three at −1 dBFS or more within 2 s, for 3 s', () => {
+  const x = noise(SR, -40);
+  x[ms(500)] = 0.95; // −0.4 dBFS, once
+  const { reports } = run(x, { mode: 'open' });
+  const loud = reports.filter((r) => r.peak >= -1);
+  assert.equal(loud.length, 1, 'one report with the pop in it');
+  assert.ok(Math.abs(loud[0].peak - 20 * Math.log10(0.95)) < 0.01, `its peak ${loud[0].peak.toFixed(2)} dBFS`);
+  assert.ok(reports.filter((r) => r.peak < -1).every((r) => r.peak < -25), 'the rest: the quiet room');
+  const w = new ClipWatch();
+  assert.equal(w.push(-0.5, 0), false, 'one pop: no');
+  assert.equal(w.push(-0.2, 500), false);
+  assert.equal(w.push(-6, 900), false, 'a loud word that stays under −1 dBFS: no');
+  assert.equal(w.push(0, 1500), true, 'the third within 2 s: clipping');
+  assert.equal(w.push(-20, 4400), true, 'shown for 3 s after…');
+  assert.equal(w.push(-20, 4600), false, '…then gone');
+  const spread = new ClipWatch();
+  for (const at of [0, 1500, 3000, 4500]) assert.equal(spread.push(-0.5, at), false, 'one every 1.5 s is never three in 2 s');
+  assert.equal(CLIP.db, -1);
 });
 
 let failed = 0;

@@ -148,6 +148,70 @@ fn hint_label(ui: &egui::Ui, p: &Pal, at: Pos2, max_w: f32, hint: &Hint) {
     ui.painter().galley(pos2(at.x, at.y - g.size().y / 2.0), g, color);
 }
 
+/// Your volume for someone, on their row when you've changed it (PROTOCOL.md ›
+/// Your volume, on the row): "60 %" / "150 %", or a muted speaker at 0.
+#[derive(Debug, PartialEq)]
+pub enum VolumeTag {
+    Level(String),
+    Off,
+}
+
+pub fn volume_tag(volume: f32) -> Option<VolumeTag> {
+    match (volume * 100.0).round() as i32 {
+        100 => None,
+        0 => Some(VolumeTag::Off),
+        v => Some(VolumeTag::Level(format!("{v}\u{a0}%"))),
+    }
+}
+
+/// Ctrl/⌘ + scroll over someone's row: their volume in 5 % steps (0–200 %).
+/// A mouse notch is one step; a trackpad's small deltas add up to one (50
+/// points), like the web's. Up is louder.
+#[derive(Default)]
+pub struct WheelVolume {
+    uid: String,
+    sum: f32,
+}
+
+impl WheelVolume {
+    /// Scroll over `uid`'s row (points, up positive): their new volume, when a step is taken.
+    pub fn scroll(&mut self, uid: &str, delta: f32, current: f32) -> Option<f32> {
+        if self.uid != uid {
+            *self = WheelVolume { uid: uid.to_string(), sum: 0.0 };
+        }
+        self.sum += delta;
+        if self.sum.abs() < 50.0 {
+            return None;
+        }
+        let step = if self.sum > 0.0 { 5 } else { -5 };
+        self.sum = 0.0;
+        let now = (current * 100.0).round() as i32;
+        let next = (((now + step) as f32 / 5.0).round() as i32 * 5).clamp(0, 200);
+        (next != now).then_some(next as f32 / 100.0)
+    }
+}
+
+/// How much Ctrl/⌘ + scroll moved this frame, in points (a mouse notch ≈ 33, like a browser's line).
+fn command_scroll(ui: &egui::Ui) -> f32 {
+    ui.input(|i| {
+        i.raw
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::MouseWheel { unit, delta, modifiers, .. } if modifiers.command || modifiers.ctrl => Some(match unit {
+                    egui::MouseWheelUnit::Point => delta.y,
+                    egui::MouseWheelUnit::Line => delta.y * 33.0,
+                    egui::MouseWheelUnit::Page => delta.y * 400.0,
+                }),
+                _ => None,
+            })
+            .sum()
+    })
+}
+
+/// What the row's tooltip says about the wheel.
+const SCROLL_HOW: &str = if cfg!(target_os = "macos") { "⌘ + scroll" } else { "Ctrl + scroll" };
+
 /// Who's in a voice channel, under it: speaking rings, "connecting", the
 /// LIVE badge, connection hints, mute / deafen marks; click someone for
 /// their volume. (Not OBS links: they listen without showing up, unless
@@ -163,10 +227,29 @@ pub fn voice_members(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, chann
         let connecting = joined && !me && !ghost && m.peer_states.get(&s.sid).map(String::as_str) != Some("connected");
         let hint = if joined && !me { m.hints.get(&s.sid) } else { None };
         let speaking = m.speaking.contains(&s.sid);
+        // Your volume for them (not on your own row), and room for it after the name.
+        let volume = m.config.volume_for(&s.uid);
+        let tag = if me { None } else { volume_tag(volume) };
+        let tag_font = theme::font(theme::small() - 1.0);
+        let tag_g = match &tag {
+            Some(VolumeTag::Level(t)) => Some(ui.painter().layout_no_wrap(t.clone(), tag_font.clone(), p.gray)),
+            _ => None,
+        };
+        let tag_w = match &tag {
+            Some(VolumeTag::Level(_)) => tag_g.as_ref().map_or(0.0, |g| g.size().x) + 5.0,
+            Some(VolumeTag::Off) => 16.0,
+            None => 0.0,
+        };
         // A long name ends in "…" before the mute / deafen mark.
         let flagged = s.voice.as_ref().is_some_and(|v| v.muted || v.deafened);
-        let name_w = rect.right() - if flagged { 26.0 } else { 6.0 } - (c.x + SUB_GAP);
-        super::avatar(ui, &app.images, &m.config.server, c, SUB_AVATAR, face(user), speaking, p);
+        let name_w = rect.right() - if flagged { 26.0 } else { 6.0 } - (c.x + SUB_GAP) - tag_w;
+        // Someone you've turned all the way down, talking: their ring, dimmed.
+        let ring = match (speaking, tag == Some(VolumeTag::Off)) {
+            (true, true) => Ring::Dim,
+            (true, false) => Ring::Speaking,
+            _ => Ring::None,
+        };
+        avatar_ring(ui, &app.images, &m.config.server, c, SUB_AVATAR, face(user), ring, p);
         let color = if connecting { p.gray } else { p.text };
         let g = fit(ui.painter(), name, theme::font(theme::ui()), name_w, color);
         let at = pos2(c.x + SUB_GAP, rect.center().y - g.size().y / 2.0);
@@ -176,7 +259,18 @@ pub fn voice_members(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, chann
             ui.painter().hline(at.x..=at.x + w, (rect.center().y + 7.0).round(), egui::Stroke::new(1.0, color));
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        let (name_right, red) = (at.x + w, p.danger);
+        let (mut name_right, red) = (at.x + w, p.danger);
+        match (&tag, tag_g) {
+            (Some(VolumeTag::Level(_)), Some(g)) => {
+                ui.painter().galley(pos2(name_right + 5.0, rect.center().y - g.size().y / 2.0), g.clone(), p.gray);
+                name_right += 5.0 + g.size().x;
+            }
+            (Some(VolumeTag::Off), _) => {
+                icons::paint(ui.painter(), Rect::from_center_size(pos2(name_right + 10.0, c.y), vec2(12.0, 12.0)), "volume-x", p.gray);
+                name_right += 16.0;
+            }
+            _ => {}
+        }
         // Sharing their screen: LIVE opens it here (ours: stop sharing, like the web).
         let mut after = name_right;
         if s.voice.as_ref().is_some_and(|v| v.screen) {
@@ -201,8 +295,25 @@ pub fn voice_members(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, chann
             Some(h) => h.title(name),
             None if connecting => "Connecting…".to_string(),
             None if me => "You".to_string(),
-            None => format!("{name} — click for volume"),
+            None => match &tag {
+                Some(VolumeTag::Off) => format!("{name}: you turned them all the way down (only for you) — click for volume, or {SCROLL_HOW}"),
+                Some(VolumeTag::Level(t)) => format!("{name} at {t} for you (only you hear it this way) — click for volume, or {SCROLL_HOW}"),
+                None => format!("{name} — click for volume, or {SCROLL_HOW}"),
+            },
         };
+        // Ctrl/⌘ + scroll over them: their volume, 5 % a step.
+        if resp.hovered() && !me {
+            let delta = command_scroll(ui);
+            if delta != 0.0
+                && let Some(v) = app.wheel_volume.scroll(&s.uid, delta, volume)
+            {
+                let uid = s.uid.clone();
+                acts.push(Act::Config(Box::new(move |c| {
+                    c.volumes.insert(uid, v);
+                })));
+                acts.push(Act::Cmd(Cmd::SetVolume { uid: s.uid.clone() }));
+            }
+        }
         let resp = theme::tip(resp, tip);
         // Click or right-click someone: their volume (+ Watch screen, mod actions). Not yourself.
         if (resp.clicked() || resp.secondary_clicked()) && !me {
@@ -620,19 +731,37 @@ pub fn typing_words(typers: &[String]) -> String {
     }
 }
 
+/// The ring around a buddy icon.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ring {
+    None,
+    /// Talking: the green LED ring.
+    Speaking,
+    /// Talking, but you've turned them all the way down: the same green, dimmed (45 %, like the web).
+    Dim,
+}
+
 /// Someone's picture (or colour + initial): a square buddy icon in a 1-pt
 /// frame, a green LED ring while talking.
 #[allow(clippy::too_many_arguments)]
 pub fn avatar(ui: &egui::Ui, images: &super::images::Images, server: &str, center: Pos2, size: f32, f: Face<'_>, speaking: bool, p: &Pal) {
+    avatar_ring(ui, images, server, center, size, f, if speaking { Ring::Speaking } else { Ring::None }, p);
+}
+
+/// [`avatar`] with any ring.
+#[allow(clippy::too_many_arguments)]
+pub fn avatar_ring(ui: &egui::Ui, images: &super::images::Images, server: &str, center: Pos2, size: f32, f: Face<'_>, ring: Ring, p: &Pal) {
     let painter = ui.painter();
     let pic = f.avatar.filter(|id| !id.is_empty()).and_then(|id| images.get_square(&format!("{server}/media/{id}")));
     let initial: String = f.name.trim().chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "?".into());
     let rect = theme::RoundRect::round(Rect::from_center_size(center, vec2(size, size)));
-    if speaking {
-        painter.rect_filled(rect.expand(3.0), 0.0, Color32::from_rgb(0, 0xe0, 0));
-        painter.rect_filled(rect.expand(1.0), 0.0, p.dk);
-    } else {
-        theme::outline(painter, rect.expand(1.0), p.shadow);
+    match ring {
+        Ring::Speaking | Ring::Dim => {
+            let green = if ring == Ring::Dim { Color32::from_rgba_unmultiplied(0, 0xe0, 0, 115) } else { Color32::from_rgb(0, 0xe0, 0) };
+            painter.rect_filled(rect.expand(3.0), 0.0, green);
+            painter.rect_filled(rect.expand(1.0), 0.0, p.dk);
+        }
+        Ring::None => theme::outline(painter, rect.expand(1.0), p.shadow),
     }
     painter.rect_filled(rect, 0.0, theme::hex_color(f.color));
     match pic {
@@ -665,10 +794,18 @@ pub fn toasts(ctx: &egui::Context, m: &Model) {
 }
 
 fn toast(ui: &mut egui::Ui, text: &str) {
+    balloon_frame(ui, 460.0, |ui| {
+        ui.label(egui::RichText::new(text).font(theme::font(theme::ui())).color(theme::INFO_TEXT));
+    });
+    ui.add_space(6.0);
+}
+
+/// A tooltip balloon's look (pale yellow, black ring, a small hard shadow) around `add`.
+pub fn balloon_frame(ui: &mut egui::Ui, max_w: f32, add: impl FnOnce(&mut egui::Ui)) {
     let bg = ui.painter().add(egui::Shape::Noop);
     let out = egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
-        ui.set_max_width(460.0);
-        ui.label(egui::RichText::new(text).font(theme::font(theme::ui())).color(theme::INFO_TEXT));
+        ui.set_max_width(max_w);
+        add(ui);
     });
     let r = theme::RoundRect::round(out.response.rect);
     ui.painter().set(
@@ -676,8 +813,31 @@ fn toast(ui: &mut egui::Ui, text: &str) {
         egui::Shape::Vec(vec![egui::Shape::rect_filled(r.translate(vec2(2.0, 2.0)), 0.0, Color32::from_black_alpha(90)), egui::Shape::rect_filled(r, 0.0, theme::INFO)]),
     );
     theme::outline(ui.painter(), r, Color32::BLACK);
-    ui.add_space(6.0);
 }
+
+/// "You're muted" by the Mute button for a moment after you talked while
+/// muted (PROTOCOL.md › Voice › Transmit gate); the first time on this
+/// device it also says what the blip meant.
+pub fn muted_balloon(ctx: &egui::Context, m: &Model, under: Rect) {
+    let Some((at, explain)) = m.muted_nudge else { return };
+    let left = if explain { 8.0 } else { 3.0 } - at.elapsed().as_secs_f32();
+    if left <= 0.0 || !(m.config.muted || m.config.deafened) {
+        return;
+    }
+    ctx.request_repaint_after(std::time::Duration::from_secs_f32(left.min(0.5)));
+    egui::Area::new(egui::Id::new("muted-nudge")).order(egui::Order::Tooltip).fixed_pos(under.left_bottom() + vec2(0.0, 4.0)).interactable(false).show(ctx, |ui| {
+        balloon_frame(ui, if explain { 260.0 } else { 200.0 }, |ui| {
+            ui.label(egui::RichText::new(MUTED_TEXT).font(theme::bold_font(theme::ui())).color(theme::INFO_TEXT));
+            if explain {
+                ui.label(egui::RichText::new(MUTED_EXPLAIN).font(theme::font(theme::ui())).color(theme::INFO_TEXT));
+            }
+        });
+    });
+}
+
+/// The spec's words (PROTOCOL.md › Voice › Transmit gate › Talking while muted).
+pub const MUTED_TEXT: &str = "You're muted";
+pub const MUTED_EXPLAIN: &str = "That sound means you're muted. Turn it off in Settings › Voice.";
 
 /// A quiet line of this session's own in the chat (PROTOCOL.md › Since you
 /// left): "Theo joined — invited by Priya", "You're in. Say hi 👋": small
@@ -742,4 +902,34 @@ pub fn channel_start(app: &mut App, ui: &mut egui::Ui, m: &Model, channel: &crat
         });
     });
     ui.add_space(8.0);
+}
+
+#[cfg(test)]
+mod row_tests {
+    use super::*;
+
+    #[test]
+    fn your_volume_on_the_row() {
+        assert_eq!(volume_tag(1.0), None, "unchanged: nothing");
+        assert_eq!(volume_tag(0.6), Some(VolumeTag::Level("60\u{a0}%".into())));
+        assert_eq!(volume_tag(1.5), Some(VolumeTag::Level("150\u{a0}%".into())));
+        assert_eq!(volume_tag(0.0), Some(VolumeTag::Off), "all the way down: a muted speaker");
+        assert_eq!(volume_tag(0.999), None);
+    }
+
+    /// The web's wheel: a notch (33 points) or two is a step only once they add up
+    /// to 50; up is louder; 5 % steps on the 5 % grid, 0–200 %.
+    #[test]
+    fn command_scroll_changes_their_volume_in_steps() {
+        let mut w = WheelVolume::default();
+        assert_eq!(w.scroll("ana", 33.0, 1.0), None, "one line isn't enough yet");
+        assert_eq!(w.scroll("ana", 33.0, 1.0), Some(1.05), "two add up: one step louder");
+        assert_eq!(w.scroll("ana", -100.0, 1.05), Some(1.0), "down");
+        assert_eq!(w.scroll("ben", 30.0, 0.5), None, "someone else starts over");
+        assert_eq!(w.scroll("ben", 30.0, 0.5), Some(0.55));
+        assert_eq!(w.scroll("ben", 60.0, 0.62), Some(0.65), "back onto the 5 % grid");
+        assert_eq!(w.scroll("cy", 60.0, 2.0), None, "200 % is the top");
+        assert_eq!(w.scroll("cy", -60.0, 0.0), None, "0 is the bottom");
+        assert_eq!(w.scroll("cy", -60.0, 0.05), Some(0.0));
+    }
 }

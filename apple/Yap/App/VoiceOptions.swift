@@ -27,6 +27,13 @@ enum VoiceOptions {
         return model.micCheck.phase == .recording ? model.micCheck.level : nil
     }
 
+    /// The same mic's peaks keep reaching −1 dBFS ("Too loud (clipping)").
+    @MainActor
+    static func meterTooLoud(_ model: AppModel) -> Bool {
+        if model.voice.isInVoice { return model.voice.engine.tooLoud }
+        return model.micCheck.phase == .recording && model.micCheck.tooLoud
+    }
+
     // Mic check (the web's wording).
     static let hearTitle = "Hear yourself"
     static let hearHeading = "Mic check"
@@ -64,6 +71,34 @@ enum VoiceOptions {
     }
 }
 
+/// Round 10's words (PROTOCOL.md › Voice › Transmit gate, Connection hints,
+/// Shared media, for yourself).
+enum TalkWords {
+    /// By the Mute button when you talk while muted.
+    static let youreMuted = "You're muted"
+    /// Said once per device, the first time the nudge plays.
+    static let explainNudge = "That sound means you're muted. Turn it off in Settings › Voice."
+    static let reminder = "Remind me when I talk while muted"
+    static let reminderNote = "A soft blip and “You're muted”, at most every 5 seconds."
+    static let pushToTalkClick = "Push-to-talk click"
+    static let pushToTalkClickNote = "A quiet click when it opens and closes (only you hear it)."
+    /// By the push-to-talk button after a double-tap.
+    static let live = "Live — tap to stop"
+    static let ownConnection = "Your connection is dropping some of your audio"
+    static func ownConnectionDetail(lost: Double) -> String {
+        let percent = max(1, Int((lost * 100).rounded()))
+        return "The others say about \(percent)% of what you send never reaches them, so it's your connection, not theirs: a busy Wi‑Fi or mobile network. It usually passes; a cable, or getting closer to the router, helps."
+    }
+    static let dip = "Lower shared media while friends talk"
+    static let dipNote = "A shared screen's sound goes to half while someone in your call speaks, then back. (Watch together plays in your browser, with its own volume.)"
+    static let tooLoud = "Too loud (clipping)"
+    #if os(iOS)
+    static let tooLoudDetail = "The loudest moments hit the top and distort for everyone. Hold the mic a little further away."
+    #else
+    static let tooLoudDetail = "The loudest moments hit the top and distort for everyone. Turn your mic's input level down (in System Settings › Sound), or sit a little further from it."
+    #endif
+}
+
 /// The call report (PROTOCOL.md › Voice › Call report), the web's words.
 enum CallReportWords {
     /// The call's ⋯ menu.
@@ -88,6 +123,8 @@ enum MicModeWords {
 /// the whole channel; the picker is under the call's ⋯.
 enum CallQuality {
     static let menuTitle = "Sound quality for everyone here"
+    /// Under 256k and 510k in the menu (short: a menu line).
+    static let menuWarning = "No dropout protection; several times the upload"
     static let menuLabel = "Call settings"
 
     /// "Sound: 256k for everyone", or nil while each person uses their own.
@@ -118,6 +155,10 @@ struct CallQualityMenuItems: View {
                         Label(title, systemImage: "checkmark")
                     } else {
                         Text(title)
+                    }
+                    // Next to 256 and 510 (the full words show under the call's quality line).
+                    if bitrate.flatMap(VoiceSettings.qualityWarning) != nil {
+                        Text(CallQuality.menuWarning)
                     }
                 }
             }

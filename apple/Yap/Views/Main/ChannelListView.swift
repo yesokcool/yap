@@ -427,17 +427,22 @@ struct VoiceMemberRow: View {
 
     var body: some View {
         let user = model.client.user(session.uid)
-        let speaking = model.voice.engine.speaking.contains(session.sid)
+        let speaking = model.voice.isSpeaking(session)
         let inMyCall = model.voice.channelId != nil && session.voice?.channelId == model.voice.channelId
+        let me = session.sid == model.voice.ownSid || session.uid == model.client.uid
         let hint = session.sid == model.voice.ownSid ? nil : model.voice.hint(for: session.sid)
         let connecting = inMyCall && hint == nil && session.sid != model.voice.ownSid && model.voice.engine.peerStates[session.sid] != .connected
+        // Your volume for them, on the row; someone at 0 % speaks with a dimmed ring.
+        let volume = me ? 1 : model.voice.settings.volumes[session.uid] ?? 1
+        let silenced = PersonVolume.isMuted(volume)
         return HStack(spacing: 5) {
-            Avatar(user: user, size: 14, speaking: speaking)
+            Avatar(user: user, size: 14, speaking: speaking, speakingDimmed: silenced)
             Text(user?.name ?? "Someone")
-                .font(speaking ? Theme.chromeBold : Theme.chrome)
+                .font(speaking && !silenced ? Theme.chromeBold : Theme.chrome)
                 .foregroundStyle(connecting ? Theme.grayText : Theme.text)
                 .lineLimit(1)
-            if speaking {
+            if !me { VolumeBadge98(volume: volume) }
+            if speaking, !silenced {
                 Image(systemName: "speaker.wave.2.fill").font(.system(size: 9)).foregroundStyle(Theme.ok)
             }
             if session.voice?.screen == true {
@@ -457,6 +462,7 @@ struct VoiceMemberRow: View {
         .padding(.trailing, 6)
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
+        .accessibilityValue(me ? "" : PersonVolume.spoken(volume) ?? "")
         .voiceHintHelp(hint, name: user?.name ?? "They")
         .liveBadgeAction(session)
         .voicePersonMenu(session)

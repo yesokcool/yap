@@ -9,6 +9,8 @@ struct Avatar: View {
     var user: User?
     var size: CGFloat = 32
     var speaking = false
+    /// They're speaking but I've turned them to 0 %: the ring shows, dimmed.
+    var speakingDimmed = false
 
     var body: some View {
         ZStack {
@@ -29,11 +31,11 @@ struct Avatar: View {
         .padding(2)
         .overlay {
             if speaking {
-                Rectangle().stroke(Theme.speaking, lineWidth: 2)
+                Rectangle().stroke(Theme.speaking.opacity(speakingDimmed ? 0.35 : 1), lineWidth: 2)
             }
         }
         .accessibilityLabel(user?.name ?? "Someone")
-        .accessibilityValue(speaking ? "Speaking" : "")
+        .accessibilityValue(speaking ? (speakingDimmed ? "Speaking, muted for you" : "Speaking") : "")
     }
 
     private var picture: PlatformImage? {

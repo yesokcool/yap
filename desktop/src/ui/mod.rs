@@ -65,14 +65,28 @@ pub fn run(cfg: Config, path: PathBuf) -> Result<(), String> {
     if debug_vault.is_some() {
         crate::vault::disable_keychain();
     }
-    // Screenshot aid (debug builds): YAP_DEBUG_AUDIO=silence never opens a real mic or speakers.
-    if cfg!(debug_assertions) && std::env::var("YAP_DEBUG_AUDIO").as_deref() == Ok("silence") {
-        *shared.audio_override.lock() = Some(("-".into(), None));
+    // Screenshot aid (debug builds): YAP_DEBUG_AUDIO=silence never opens a real mic or
+    // speakers; YAP_DEBUG_AUDIO=wav:<file> has that WAV (looped) as the mic instead.
+    if cfg!(debug_assertions) {
+        match std::env::var("YAP_DEBUG_AUDIO").as_deref() {
+            Ok("silence") => *shared.audio_override.lock() = Some(("-".into(), None)),
+            Ok(v) if v.starts_with("wav:") => *shared.audio_override.lock() = Some((v["wav:".len()..].into(), None)),
+            _ => {}
+        }
     }
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     let cmd = {
         let _guard = rt.enter();
         core::start_with_done(shared.clone(), None, Some(done_tx))
+    };
+    // `yap --remote mute` and friends (macOS, Linux): a private socket, as long as the window is open.
+    #[cfg(unix)]
+    let _remote = match crate::remote::listen(&crate::remote::socket_path(&shared.config_path), core::remote_handler(shared.clone(), cmd.clone())) {
+        Ok(l) => Some(l),
+        Err(e) => {
+            log::info!("remote: off ({e})");
+            None
+        }
     };
     // Screenshot aid (debug builds): a YAP_DEBUG_SHOT window never takes the focus.
     let shot = cfg!(debug_assertions) && std::env::var_os("YAP_DEBUG_SHOT").is_some();
@@ -108,6 +122,8 @@ const MIN_H: f32 = 440.0;
 /// Search's shortcut (Ctrl/⌘+K is the quick switcher now).
 /// The voice panel's warning when the mic sends nothing but digital silence (the web's words).
 pub const SILENT_TEXT: &str = "Your mic is sending silence";
+/// Push-to-talk latched open by a double-tap (the spec's words).
+pub const LIVE_TEXT: &str = "Live — tap to stop";
 pub const SILENT_TIP: &str = "Nothing at all is coming from your microphone. Check its mute switch, or pick another one in Settings › Voice.";
 pub const SEARCH_KEYS: &str = if cfg!(target_os = "macos") { "⌘F" } else { "Ctrl+Shift+F" };
 
@@ -252,6 +268,8 @@ pub struct App {
     pub notes_key: Option<crate::vault::Key>,
     /// The screen we're watching: its picture, full screen, popped out.
     pub screen: screen::ScreenUi,
+    /// Ctrl/⌘ + scroll over a voice row, adding up to a 5 % step.
+    pub wheel_volume: sections::WheelVolume,
 }
 
 /// Preview before sending: what's waiting in the tray above the composer.
@@ -376,6 +394,7 @@ impl App {
             zoom_still: 0,
             auto: None,
             screen: screen::ScreenUi::default(),
+            wheel_volume: Default::default(),
         };
         debug::stage(&mut app);
         app
@@ -615,29 +634,32 @@ impl App {
 
     fn handle_global_input(&mut self, ctx: &egui::Context) {
         self.apply_size(ctx);
-        // In-window push-to-talk (fallback where global polling can't see keys) and key binding.
+        // In-window keys (fallback where global polling can't see keys) and key binding.
         let ptt = self.shared.ptt.clone();
-        let key = ptt.key();
         ctx.input(|i| {
             for ev in &i.events {
-                if let egui::Event::Key { key: k, pressed, repeat: false, .. } = ev
+                if let egui::Event::Key { key: k, pressed, repeat: false, modifiers, .. } = ev
                     && let Some(name) = crate::ptt::from_egui(*k)
                 {
-                    if ptt.is_binding() && *pressed && *k != egui::Key::Escape {
-                        ptt.offer_bound(name);
-                    } else if name == key {
-                        ptt.set_focused_down(*pressed);
+                    if ptt.binding().is_some() && *pressed && *k != egui::Key::Escape {
+                        if let Some(combo) = crate::ptt::combo_from_egui(*k, *modifiers) {
+                            ptt.offer_bound(&combo);
+                        }
+                    } else {
+                        ptt.window_key(name, *pressed, *modifiers);
                     }
                 }
             }
-            if ptt.is_binding() && i.key_pressed(egui::Key::Escape) {
+            if ptt.binding().is_some() && i.key_pressed(egui::Key::Escape) {
                 ptt.cancel_binding();
             }
         });
-        if let Some(bound) = ptt.take_bound() {
+        if let Some((action, combo)) = ptt.take_bound() {
             let mut m = self.shared.model.lock();
-            m.config.ptt_key = bound;
-            m.config_dirty = true;
+            match crate::ptt::bind(&mut m.config, action, &combo) {
+                Ok(()) => m.config_dirty = true,
+                Err(why) => m.toast(why),
+            }
             drop(m);
             self.shared.apply_gate();
         }
@@ -645,7 +667,7 @@ impl App {
         if focused != self.was_focused {
             self.was_focused = focused;
             if !focused {
-                ptt.set_focused_down(false);
+                ptt.window_blurred();
             }
             if focused {
                 let _ = self.cmd.send(Cmd::Wake);
@@ -669,6 +691,19 @@ impl App {
         }
         self.poll_file_pick(ctx);
         self.poll_screen_pick();
+        // Mute and deafen from the keyboard in the window, like the web: Ctrl/⌘+Shift+M and
+        // Ctrl/⌘+Shift+D (unless a global key already is that combination: it toggles itself).
+        let (mute_free, deafen_free) = {
+            let m = self.shared.model.lock();
+            (crate::ptt::shortcut_free(&m.config, crate::ptt::MUTE_SHORTCUT), crate::ptt::shortcut_free(&m.config, crate::ptt::DEAFEN_SHORTCUT))
+        };
+        let both = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        if mute_free && ctx.input_mut(|i| i.consume_key(both, egui::Key::M)) {
+            let _ = self.cmd.send(Cmd::ToggleMute);
+        }
+        if deafen_free && ctx.input_mut(|i| i.consume_key(both, egui::Key::D)) {
+            let _ = self.cmd.send(Cmd::ToggleDeafen);
+        }
         // Ctrl/⌘+K: the quick switcher. Search: Ctrl/⌘+Shift+F (and ⌘F on a Mac).
         let online = self.shared.model.lock().status == Status::Online;
         if online && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)) {

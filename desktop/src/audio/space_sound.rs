@@ -1,6 +1,8 @@
-//! Space's instruments (web/js/space-sound.js), synthesized once into mono
-//! 48 kHz clips: the floor piano (C4–G5, black keys too) and four drum pads.
-//! Played through the clip bus at the web's output gain (0.22).
+//! Space's sound: its instruments (web/js/space-sound.js), synthesized once
+//! into mono 48 kHz clips — the floor piano (C4–G5, black keys too) and four
+//! drum pads, played through the clip bus at the web's output gain (0.22) —
+//! and where voices come from: left or right by where people stand
+//! (PROTOCOL.md › Space; the mixer pans each voice with `pan_gains`).
 
 use std::collections::HashMap;
 use std::f32::consts::TAU;
@@ -118,6 +120,29 @@ pub fn pad(kind: &str) -> Option<Arc<Vec<f32>>> {
     DRUMS.get(kind).cloned()
 }
 
+/// Space voice, left/right (PROTOCOL.md › Space): someone to your right on
+/// screen comes from the right. Pan = dx / 400, from −1 (left) to 1 (right);
+/// anyone within 60 units is in the middle (both ears full). The web's
+/// `voicePan`.
+pub const PAN_WIDTH: f32 = 400.0;
+pub const PAN_MIDDLE: f32 = 60.0;
+
+pub fn voice_pan(dx: f32, dy: f32) -> f32 {
+    if dx.hypot(dy) < PAN_MIDDLE {
+        return 0.0;
+    }
+    (dx / PAN_WIDTH).clamp(-1.0, 1.0)
+}
+
+/// A pan as a gain per ear, (left, right): the near ear stays full, the far
+/// one goes down to 1/4 of it at the edge (±1); the middle is full in both.
+/// The web's `panGains`.
+pub fn pan_gains(pan: f32) -> (f32, f32) {
+    let p = if pan.is_finite() { pan.clamp(-1.0, 1.0) } else { 0.0 };
+    let far = 1.0 - 0.75 * p.abs();
+    if p >= 0.0 { (far, 1.0) } else { (1.0, far) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +162,21 @@ mod tests {
             let peak = d.iter().fold(0f32, |a, x| a.max(x.abs()));
             assert!(peak > 0.05 && peak < 1.5, "{k} peak {peak}");
         }
+    }
+
+    #[test]
+    fn voices_come_from_where_people_stand() {
+        assert_eq!(voice_pan(0.0, 0.0), 0.0);
+        assert_eq!(voice_pan(50.0, 20.0), 0.0, "within 60 units: the middle");
+        assert_eq!(voice_pan(200.0, 0.0), 0.5, "to the right");
+        assert_eq!(voice_pan(-200.0, 300.0), -0.5, "to the left (only across counts)");
+        assert_eq!(voice_pan(900.0, 0.0), 1.0, "far right is all the way");
+        assert_eq!(voice_pan(-2000.0, 0.0), -1.0);
+        assert_eq!(pan_gains(0.0), (1.0, 1.0), "the middle: both ears full");
+        assert_eq!(pan_gains(1.0), (0.25, 1.0), "right: the left ear at a quarter, never less");
+        assert_eq!(pan_gains(-1.0), (1.0, 0.25));
+        assert_eq!(pan_gains(0.5), (0.625, 1.0));
+        assert_eq!(pan_gains(5.0), (0.25, 1.0));
+        assert_eq!(pan_gains(f32::NAN), (1.0, 1.0));
     }
 }

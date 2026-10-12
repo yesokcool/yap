@@ -274,6 +274,18 @@ final class VoiceInteropTests {
             voice.watch?.phase == .playing && voice.screenRenderer.counters.frames >= 30
         }
         try await waitUntil("its sound comes too", timeout: .seconds(10)) { voice.watchedHasSound }
+        // "Lower shared media while friends talk": while the web speaks, the
+        // share's sound plays at half my volume for it; off, back to it.
+        #expect(abs((voice.engine.screenSoundVolume(of: webSid) ?? 0) - 1) < 0.01, "my volume: 100 %")
+        voice.settings.dipSharedMedia = true
+        try await waitUntil("the web speaking", timeout: .seconds(10)) { voice.engine.speaking.contains(webSid) }
+        try await waitUntil("the share's sound at half", timeout: .seconds(3)) {
+            abs((voice.engine.screenSoundVolume(of: webSid) ?? 0) - 0.5) < 0.01
+        }
+        print("TALK dip: share sound at \(voice.engine.screenSoundVolume(of: webSid) ?? -1) while the web speaks, saved volume \(voice.screenVolume(for: voice.watch?.uid ?? ""))")
+        #expect(voice.screenVolume(for: voice.watch?.uid ?? "") == 1, "the saved volume never changes")
+        voice.settings.dipSharedMedia = false
+        try await waitUntil("back to my volume", timeout: .seconds(2)) { abs((voice.engine.screenSoundVolume(of: webSid) ?? 0) - 1) < 0.01 }
         try await Task.sleep(for: .seconds(2))
         let stats = try #require(await voice.engine.peerStats().first)
         let web = VoiceTestEnv.webStatus()?.scenarios["webShares"]
@@ -366,6 +378,12 @@ final class VoiceInteropTests {
         try await waitUntil("web speaking ring visible to native") { voice.engine.speaking.contains(webSid) }
         try await measureRed("nativeOffersToWeb", scenario: "webFirst")
 
+        // What the web reports receiving from us (remote-inbound-rtp): our own connection.
+        let own = try #require(await voice.engine.peerStats().first)
+        print("OWN the web receives from us: fraction lost \(own.remoteFractionLost ?? -1), lost \(own.remotePacketsLost) of \(own.packetsSent), rtt \(own.remoteRttMs ?? -1) ms, reports \(own.remoteReports), hint \(voice.ownConnectionWeak)")
+        #expect(own.remoteReports > 0 && own.remoteFractionLost != nil, "the web's reports about our voice arrive")
+        if VoiceTestEnv.impair == "none" { #expect(!voice.ownConnectionWeak, "nothing lost on localhost") }
+
         let webSide = try #require(VoiceTestEnv.webStatus()?.scenarios["webFirst"])
         print("VOICE web side (webFirst): connected=\(webSide.connected ?? false) bytes=\(webSide.maxBytesReceived ?? 0) packets=\(webSide.maxPacketsReceived ?? 0) level=\(webSide.maxLevel ?? 0) \(webSide.mime ?? "?") fmtp=\(webSide.fmtp ?? "")")
         #expect(webSide.connected == true)
@@ -375,6 +393,8 @@ final class VoiceInteropTests {
         #expect(webSide.remoteDescriptionHasTunedOpus == true, "native's SDP carries the Opus tuning")
 
         // Mute: the web sees the flag and the level drops.
+        var nudges: [(at: ContinuousClock.Instant, first: Bool)] = []
+        voice.onEvent = { if case .talkingWhileMuted(let first) = $0 { nudges.append((.now, first)) } }
         voice.toggleMute()
         try await waitUntil("web sees mute flag and silence", timeout: .seconds(8)) {
             guard let latest = VoiceTestEnv.webStatus()?.scenarios["webFirst"]?.latest else { return false }
@@ -383,7 +403,17 @@ final class VoiceInteropTests {
         // Voice activity measures the mic before the mute gate (so it can reopen).
         let muted = try #require(await voice.engine.peerStats().first)
         print("VOICE local level while muted: \(muted.localAudioLevel)")
+        // …so talking while muted is seen: "You're muted", a blip at most every 5 s.
+        try await waitUntil("a second nudge", timeout: .seconds(13)) { nudges.count >= 2 }
+        let gaps = zip(nudges.dropFirst(), nudges).map { ($0.at - $1.at) / .seconds(1) }
+        print("TALK muted: level \(Int(VoiceGate.dB(voice.engine.localLevel))) dBFS, nudges \(nudges.count), gaps \(gaps.map { String(format: "%.2f", $0) })")
+        #expect(VoiceGate.dB(voice.engine.localLevel) > -40, "the level before the mute")
+        #expect(nudges.first?.first == true && nudges.dropFirst().allSatisfy { !$0.first }, "explained once")
+        #expect(gaps.allSatisfy { $0 >= 4.95 }, "at most every 5 s: \(gaps)")
+        #expect(voice.mutedNudgeShown || nudges.count >= 2)
+        voice.onEvent = nil
         voice.toggleMute()
+        #expect(!voice.mutedNudgeShown, "unmuting takes \"You're muted\" away")
 
         voice.leave()
         #expect(voice.engine.peerCount == 0)
@@ -444,6 +474,7 @@ final class VoiceInteropTests {
         #expect(report.contains("Back in the call: it was kept, nothing to reconnect"))
         #expect(report.contains("\(webName) reconnected; the call kept going"))
         #expect(report.contains("reconnects kept: 1"))
+        #expect(report.contains("From you: they lost "), "what the web reported receiving from us")
         #expect(report.contains(VoiceTestEnv.redundancy ? "red+opus in" : "opus in"))
         #expect(report.contains("Ended: You left."))
         #expect(report.range(of: #"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}"#, options: .regularExpression) == nil, "no IP addresses")

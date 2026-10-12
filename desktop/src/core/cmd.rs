@@ -26,6 +26,8 @@ pub enum Cmd {
     LeaveVoice,
     ToggleMute,
     ToggleDeafen,
+    /// `yap --remote`: mute / unmute / deafen / undeafen / toggle either.
+    Remote(crate::remote::Remote),
     /// Profile edit (already saved in model.config by the UI).
     Profile { name: bool, color: bool },
     SetVolume { uid: String },
@@ -117,8 +119,9 @@ pub enum Cmd {
     SetLook(Option<String>),
     /// A Space mini-game update (`space.game`).
     SpaceGame { g: String, d: serde_json::Value },
-    /// Space voice: per-session volume factors (distance or room).
-    Proximity(Vec<(String, f32)>),
+    /// Space voice: per-session volume factors (distance or room) and where
+    /// each voice comes from (−1 left … 1 right; 0 = the middle).
+    Proximity(Vec<(String, f32, f32)>),
     /// Internal: a vault operation finished.
     VaultDone(Result<VaultResult, String>),
     /// Internal: earlier notes, sealed — hand them back (`personal.seal`), in

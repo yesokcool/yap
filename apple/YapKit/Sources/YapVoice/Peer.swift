@@ -53,10 +53,14 @@ final class Peer {
     private(set) var quality = LinkQuality()
     private var lastQuality: (at: Date, stats: PeerStats)?
     private var connectedAt: Date?
+    /// Our packets sent at the last own-connection reading.
+    private var lastSent: (at: Date, packets: Int)?
 
     /// Keeps a boost past 100 % from clipping.
     private var limiter = BoostLimiter()
     private var appliedVolume: Double = -1
+    /// A screen's sound, by its position among the audio sections.
+    private var appliedScreenVolumes: [Int: Double] = [:]
     private var limiterAt = Date()
 
     /// They asked for our screen (`{screen: "want"}`, until "stop"), and when.
@@ -387,22 +391,36 @@ final class Peer {
         let now = Date()
         let gain = limiter.update(wanted: engine.volume(forSid: sid), level: remoteLevel, seconds: now.timeIntervalSince(limiterAt))
         limiterAt = now
-        let voice = voiceTransceiver
-        for transceiver in pc.transceivers where transceiver.mediaType == .audio {
+        // The SDK hands out new transceiver, track and source wrappers on every
+        // call, so the voice is found by position (the first audio section),
+        // never by identity (`===` never matched: everyone's volume, the
+        // boost included, used to land on the share's setting instead), and
+        // what was applied is remembered: a fresh wrapper reads its volume as 0.
+        let audio = pc.transceivers.filter { $0.mediaType == .audio }
+        for (index, transceiver) in audio.enumerated() {
             guard let track = transceiver.receiver.track as? RTCAudioTrack else { continue }
             if track.isEnabled == engine.deafened { track.isEnabled = !engine.deafened }
-            if transceiver === voice {
+            if index == 0 {
                 let volume = max(0, min(10, gain))
                 if abs(volume - appliedVolume) > 0.005 {
                     track.source.volume = volume
                     appliedVolume = volume
                 }
             } else {
-                // WebRTC's remote source volume: 0…10, 1 = as sent.
-                let volume = max(0, min(1, engine.screenVolume(forSid: sid)))
-                if abs(track.source.volume - volume) > 0.005 { track.source.volume = volume }
+                // WebRTC's remote source volume: 0…10, 1 = as sent. "Lower
+                // shared media while friends talk" eases it on top of mine.
+                let volume = max(0, min(1, engine.screenVolume(forSid: sid))) * engine.mediaDip
+                if abs(volume - (appliedScreenVolumes[index] ?? -1)) > 0.005 {
+                    track.source.volume = volume
+                    appliedScreenVolumes[index] = volume
+                }
             }
         }
+    }
+
+    /// The volume a screen share's sound was last set to (tests; the SDK can't read it back).
+    var screenSoundVolume: Double? {
+        appliedScreenVolumes.sorted { $0.key < $1.key }.first?.value
     }
 
     /// Our mic's sender on this connection.
@@ -444,6 +462,17 @@ final class Peer {
             concealed: (stats.concealedSamples - stats.silentConcealedSamples) - (last.stats.concealedSamples - last.stats.silentConcealedSamples),
             rttMs: stats.rttMs,
             connectedFor: now.timeIntervalSince(connectedAt)))
+    }
+
+    /// What they lose of ours, for "Your connection is dropping some of your
+    /// audio": their latest report's share lost, while we're connected and
+    /// sending (≥ 30 packets/s since the last reading). Nil = no reading.
+    func ownLoss(_ stats: PeerStats, at now: Date) -> Double? {
+        defer { lastSent = (now, stats.packetsSent) }
+        guard state == .connected, let last = lastSent, stats.packetsSent >= last.packets else { return nil }
+        let seconds = now.timeIntervalSince(last.at)
+        guard seconds > 0, Double(stats.packetsSent - last.packets) / seconds >= LinkQuality.minPacketsPerSecond else { return nil }
+        return stats.remoteFractionLost
     }
 
     /// This peer's `getStats()`, boiled down (no addresses: `PeerStats.read`).

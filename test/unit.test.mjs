@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { renderBody, isJumbo, esc, plainText, plainHtml, clip } from '../web/js/format.js';
-import { youtubeId, clock } from '../web/js/watch.js';
+import { youtubeId, clock, WatchParty } from '../web/js/watch.js';
+import { Ducker, DUCK } from '../web/js/duck.js';
 import { tuneOpus } from '../web/js/voice.js';
 import { findMentions } from '../web/js/mentions.js';
 import { settings, keyProtocols, socketUrl } from '../web/js/settings.js';
@@ -166,6 +167,58 @@ t('Opus tuning: our fmtp asks for our bitrate, FEC, no DTX, full band; stereo se
   const noOpus = 'v=0\r\nm=audio 9 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n';
   assert.equal(tuneOpus(noOpus), noOpus);
   Object.assign(settings, { bitrate: 128000, music: false });
+});
+
+t('lower shared media while friends talk: to 50 % over ~150 ms, back over ~600 ms after 1 s of quiet; off = untouched', () => {
+  const d = new Ducker();
+  const run = (from, to, talking, on = true, step = 10) => {
+    let f;
+    for (let now = from; now <= to; now += step) f = d.step(now, talking, on);
+    return f;
+  };
+  assert.equal(run(0, 1000, false), 1, 'nobody talking: your volume');
+  assert.ok(Math.abs(run(1010, 1080, true) - 0.75) < 0.05, 'halfway down after ~75 ms');
+  assert.equal(run(1090, 1160, true), DUCK.level, 'at 50 % within ~150 ms');
+  assert.equal(run(1170, 3000, true), 0.5, 'and stays there while they talk');
+  assert.equal(run(3010, 3990, false), 0.5, 'still down in the first second of quiet');
+  const half = run(4000, 4300, false);
+  assert.ok(half > 0.7 && half < 0.8, `on its way back after ~300 ms (${half.toFixed(2)})`);
+  assert.equal(run(4310, 4700, false), 1, 'back to your volume within ~600 ms');
+  assert.equal(run(4710, 6000, true, false), 1, 'switched off: friends talking changes nothing');
+  run(6010, 6500, true);
+  assert.equal(d.factor, 0.5);
+  assert.equal(run(6510, 7200, true, false), 1, 'switching it off (or leaving the call) brings it back');
+});
+
+t('Watch together: a dip while friends talk never becomes "your volume"; what you set in the player during one is your volume over the dip', () => {
+  const sent = [];
+  const saved = [];
+  const party = Object.assign(Object.create(WatchParty.prototype), {
+    prefs: { volume: 70, muted: false }, duck: 1, sentVolume: null, sentMuted: null, volAt: -Infinity, touchedAt: -Infinity,
+    frame: {}, player: { ready: true },
+    cmd: (func, args = []) => sent.push([func, ...args]), savePrefs() { saved.push({ ...this.prefs }); }, renderTransport() {},
+  });
+  party.applyVolume();
+  assert.deepEqual(sent, [['setVolume', 70], ['unMute']]);
+  party.setDuck(0.5);
+  assert.deepEqual(sent.at(-1), ['setVolume', 35], 'the player goes to half');
+  party.setDuck(0.5);
+  assert.equal(sent.length, 3, 'nothing again for the same volume');
+  // The player tells us its volume much later, with the person's focus in it: still our dip, not theirs.
+  globalThis.document = { activeElement: party.frame };
+  party.volAt = performance.now() - 10_000;
+  party.onPlayerVolume({ volume: 35, muted: false });
+  assert.deepEqual(party.prefs, { volume: 70, muted: false }, 'the dip was not saved as your volume');
+  assert.equal(saved.length, 0);
+  // They turn YouTube's own slider to 30 during the dip: that's 60 % of theirs once the dip ends.
+  party.onPlayerVolume({ volume: 30, muted: false });
+  assert.deepEqual(party.prefs, { volume: 60, muted: false });
+  party.setDuck(1);
+  assert.deepEqual(sent.at(-1), ['setVolume', 60], 'back up to what they set');
+  party.volAt = performance.now() - 10_000;
+  party.onPlayerVolume({ volume: 60, muted: true });
+  assert.deepEqual(party.prefs, { volume: 60, muted: true }, 'muting in the player is theirs too');
+  delete globalThis.document;
 });
 
 let failed = 0;

@@ -108,7 +108,22 @@ public final class VoiceEngine {
     public private(set) var hasRelay = false
     public private(set) var muted = false
     public private(set) var deafened = false
+    /// Push to talk is down for the gate: held, or double-tapped to stay live.
     public private(set) var pushToTalkDown = false
+    /// Push to talk was double-tapped and stays live until the next press
+    /// ("Live — tap to stop").
+    public private(set) var pushToTalkLatched = false
+    /// "Your connection is dropping some of your audio": most people in the
+    /// call lose more than 3 % of what we send (PROTOCOL.md › Voice ›
+    /// Connection hints › Your own connection).
+    public private(set) var ownLinkWeak = false
+    /// What they lose of ours (the median person), 0…1, while that shows.
+    public private(set) var ownLinkLost = 0.0
+    /// The mic's peaks keep reaching −1 dBFS ("Too loud (clipping)").
+    public private(set) var tooLoud = false
+    /// "Lower shared media while friends talk": a screen share's sound eases
+    /// to half of my volume while someone else in the call speaks.
+    public var dipSharedMedia = false
     /// The transmit gate lets audio through (voice activity incl. its hold,
     /// push to talk incl. its tail, or always on).
     public private(set) var vadOpen = false
@@ -139,6 +154,18 @@ public final class VoiceEngine {
     @ObservationIgnored private var levelTask: Task<Void, Never>?
     @ObservationIgnored private var statsTask: Task<Void, Never>?
     @ObservationIgnored private var gate = VoiceGate()
+    /// Would voice activity open right now? Fed the same level as the gate in
+    /// every mode, so talking shows while muted or on always on.
+    @ObservationIgnored private var talkDetector = VoiceGate()
+    /// Push to talk's press, release and double-tap.
+    @ObservationIgnored private var latch = PushToTalkLatch()
+    /// Push to talk is live right now (for the click when it changes).
+    @ObservationIgnored private var pushToTalkLive = false
+    @ObservationIgnored private var ownQuality = OwnLinkQuality()
+    @ObservationIgnored private var clipWatch = ClipWatch()
+    @ObservationIgnored private var dip = MediaDip()
+    /// The dip's factor on a screen share's sound right now (1 = none).
+    @ObservationIgnored private(set) var mediaDip = 1.0
     /// Alone in the channel: the loopback that keeps the mic measured.
     @ObservationIgnored private var monitor: LevelMonitor?
     /// iPhone: an audio stream that lasts the whole call, so the sound never
@@ -168,6 +195,13 @@ public final class VoiceEngine {
     @ObservationIgnored public var screenVolumes: [String: Double] = [:]
     /// Someone started (true) or stopped (false) watching our screen.
     @ObservationIgnored public var onScreenViewers: ((_ joined: Bool) -> Void)?
+    /// We're muted (not deafened) and talking: the level measured before the
+    /// mute would open the gate, or push to talk is pressed. Called on every
+    /// level reading while it lasts and on each press; the controller keeps
+    /// it to one nudge every 5 s.
+    @ObservationIgnored public var onTalkWhileMuted: (() -> Void)?
+    /// Push to talk went live (true) or closed after its tail (false): the click.
+    @ObservationIgnored public var onPushToTalk: ((_ live: Bool) -> Void)?
     /// A connection moved to the far side's new session (old, new).
     @ObservationIgnored public var onRekey: ((String, String) -> Void)?
     /// What our screen share sends (frames come in through a `ScreenFeeder`).
@@ -225,6 +259,8 @@ public final class VoiceEngine {
             let source = factory.audioSource(with: RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil))
             audioTrack = factory.audioTrack(with: source, trackId: "yap-mic")
             gate = VoiceGate(mode: mode.gateMode, threshold: vadThreshold)
+            talkDetector = VoiceGate(mode: .voiceActivity, threshold: vadThreshold)
+            clipWatch.reset()
             micProgressAt = nil
         }
         holdAudio()
@@ -370,8 +406,18 @@ public final class VoiceEngine {
         localLevel = 0
         vadOpen = false
         pushToTalkDown = false
+        latch.reset()
+        pushToTalkLatched = false
+        pushToTalkLive = false
         micSilent = false
         micStalled = false
+        ownQuality.reset()
+        ownLinkWeak = false
+        ownLinkLost = 0
+        clipWatch.reset()
+        tooLoud = false
+        dip = MediaDip()
+        mediaDip = 1
     }
 
     @discardableResult
@@ -573,6 +619,9 @@ public final class VoiceEngine {
         for peer in peers.values { peer.applyOutput() }
     }
 
+    /// The volume their screen's sound plays at right now (tests).
+    func screenSoundVolume(of sid: String) -> Double? { peers[sid]?.screenSoundVolume }
+
     /// Is our screen going out on this connection (tests)?
     public func sendsScreen(to sid: String) -> Bool { peers[sid]?.sendsScreen ?? false }
 
@@ -595,10 +644,28 @@ public final class VoiceEngine {
         applyGate()
     }
 
+    /// The push-to-talk button (or key) went down or up. Twice within 400 ms
+    /// stays live until the next press (PROTOCOL.md › Voice › Transmit gate).
     public func setPushToTalk(_ down: Bool) {
-        guard pushToTalkDown != down else { return }
-        pushToTalkDown = down
-        gate.setPushToTalk(down, at: Self.now)
+        guard latch.held != down else { return }
+        if down { latch.press(at: Self.now) } else { latch.release() }
+        if down, mode == .pushToTalk, muted, !deafened { onTalkWhileMuted?() }
+        applyPushToTalk()
+    }
+
+    /// Nothing held, nothing latched (a new input mode).
+    public func resetPushToTalk() {
+        latch.reset()
+        applyPushToTalk()
+    }
+
+    private func applyPushToTalk() {
+        if latch.latched != pushToTalkLatched { pushToTalkLatched = latch.latched }
+        let down = latch.isDown
+        if down != pushToTalkDown {
+            pushToTalkDown = down
+            gate.setPushToTalk(down, at: Self.now)
+        }
         applyGate()
     }
 
@@ -625,6 +692,13 @@ public final class VoiceEngine {
         // Mute and deafen are certain, whatever the gate says.
         let on = transmitting
         if let audioTrack, audioTrack.isEnabled != on { audioTrack.isEnabled = on }
+        // Push to talk's click: live, and closed again after its tail (never
+        // for a switch to another mode).
+        let live = mode == .pushToTalk && on
+        if live != pushToTalkLive {
+            pushToTalkLive = live
+            if mode == .pushToTalk { onPushToTalk?(live) }
+        }
         updateSelfSpeaking()
     }
 
@@ -671,6 +745,8 @@ public final class VoiceEngine {
         var source: ObjectIdentifier
         var energy: Double
         var duration: Double
+        /// The loudest sample of the last ~110 ms (WebRTC's `audioLevel`), 0…1.
+        var peak: Double?
     }
 
     /// From a connected call (any: the counters are the mic's, not the
@@ -689,7 +765,8 @@ public final class VoiceEngine {
         for stat in report.statistics.values where stat.type == "media-source" && stat.values["kind"] as? String == "audio" {
             guard let energy = (stat.values["totalAudioEnergy"] as? NSNumber)?.doubleValue,
                   let duration = (stat.values["totalSamplesDuration"] as? NSNumber)?.doubleValue else { continue }
-            return MicEnergy(source: ObjectIdentifier(pc), energy: energy, duration: duration)
+            return MicEnergy(source: ObjectIdentifier(pc), energy: energy, duration: duration,
+                             peak: (stat.values["audioLevel"] as? NSNumber)?.doubleValue)
         }
         return nil
     }
@@ -719,6 +796,12 @@ public final class VoiceEngine {
                 if level != localLevel { localLevel = level }
                 gate.threshold = vadThreshold
                 gate.update(db: db, duration: sample.duration - last.duration, at: now)
+                talkDetector.threshold = vadThreshold
+                talkDetector.update(db: db, duration: sample.duration - last.duration, at: now)
+                if let peak = sample.peak {
+                    let loud = clipWatch.update(peakDb: VoiceGate.dB(peak), at: now)
+                    if loud != tooLoud { tooLoud = loud }
+                }
                 micProgressAt = now
             } else if energyBaseline?.source != sample.source {
                 micProgressAt = micProgressAt ?? now
@@ -738,12 +821,32 @@ public final class VoiceEngine {
         }
         let silent = audioTrack != nil && (gate.isSilent || quietFor > VoiceGate.silenceAfter)
         if silent != micSilent { micSilent = silent }
+        if sample == nil, tooLoud {
+            clipWatch.reset()
+            tooLoud = false
+        }
         applyGate()
+        // Talking while muted: the gate would open on the level before the
+        // mute (whatever the mode), or push to talk is down.
+        let talking = mode == .pushToTalk ? latch.isDown : (!micStalled && talkDetector.decide(at: now))
+        if talking, muted, !deafened, audioTrack != nil { onTalkWhileMuted?() }
+        updateDip(at: now)
+    }
+
+    /// "Lower shared media while friends talk": anyone else I can hear speaking
+    /// eases a screen share's sound to half (never the saved volume).
+    private func updateDip(at now: TimeInterval) {
+        let others = dipSharedMedia && peers.values.contains { speaking.contains($0.sid) && volume(forSid: $0.sid) > 0 }
+        let factor = dip.update(on: dipSharedMedia, othersSpeaking: others, at: now)
+        guard abs(factor - mediaDip) > 0.004 || (factor == 1 && mediaDip != 1) else { return }
+        mediaDip = factor
+        for peer in peers.values where peer.remoteScreenSound { peer.applyOutput() }
     }
 
     private func pollStats() async {
         var rtt: [Double] = []
         var all: [PeerStats] = []
+        var losses: [Double] = []
         let now = Date()
         for peer in peers.values {
             let stats = await peer.stats()
@@ -751,6 +854,7 @@ public final class VoiceEngine {
             if peer.state == .connected, let r = stats.rttMs { rtt.append(r) }
             guard peers[peer.sid] === peer else { continue }
             all.append(stats)
+            if let loss = peer.ownLoss(stats, at: now) { losses.append(loss) }
             let wasWeak = weak[peer.sid] != nil
             if peer.judgeQuality(stats, at: now) {
                 if let w = peer.quality.weak { weak[peer.sid] = w } else { weak.removeValue(forKey: peer.sid) }
@@ -759,6 +863,10 @@ public final class VoiceEngine {
             }
             if (weak[peer.sid] != nil) != wasWeak { onPeerEvent?(peer.sid, .weak(!wasWeak)) }
         }
+        // Our own connection: what most people lose of ours.
+        if peers.isEmpty { ownQuality.reset() } else { ownQuality.update(losses: losses) }
+        if ownQuality.weak != ownLinkWeak { ownLinkWeak = ownQuality.weak }
+        if ownQuality.lost != ownLinkLost { ownLinkLost = ownQuality.lost }
         if !all.isEmpty { onStats?(all) }
         guard !peers.isEmpty else {
             summary = nil

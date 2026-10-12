@@ -112,6 +112,12 @@ public struct ChimeTone: Sendable, Equatable, Identifiable {
     public static let unmute = ChimeTone(id: "_unmute", title: "", notes: [587.33], step: 0.075, length: 0.08, volume: 0.05, wave: .triangle)
     public static let ping = ChimeTone(id: "_ping", title: "", notes: [783.99, 1046.5, 1318.5, 1567.98], step: 0.09, length: 0.22, volume: 0.13, wave: .square)
     public static let mention = ChimeTone(id: "_mention", title: "", notes: [987.77, 1318.5], step: 0.08, length: 0.16, volume: 0.09, wave: .triangle)
+    /// Talking while muted: soft and low, two quick notes (the web's `mutedTalk`;
+    /// PROTOCOL.md › Voice › Transmit gate).
+    public static let mutedNudge = ChimeTone(id: "_mutedNudge", title: "", notes: [329.63, 329.63], step: 0.11, length: 0.07, volume: 0.035, wave: .sine)
+    /// Push to talk opens / closes: a quiet tick each way, for your own ears (the web's `pttOn` / `pttOff`).
+    public static let pushToTalkOn = ChimeTone(id: "_pttOn", title: "", notes: [1318.51], step: 0, length: 0.03, volume: 0.035, wave: .triangle)
+    public static let pushToTalkOff = ChimeTone(id: "_pttOff", title: "", notes: [987.77], step: 0, length: 0.03, volume: 0.03, wave: .triangle)
 
     /// Mono samples at `sampleRate`, like the web's WebAudio graph (each
     /// note: 0 → volume over 12 ms, exponential decay to 0.0001 at `length`,

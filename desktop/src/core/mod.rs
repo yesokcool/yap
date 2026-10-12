@@ -24,7 +24,8 @@ mod voice;
 pub use cmd::*;
 pub use model::*;
 pub use text::*;
-use health::{HearRun, HintTrack};
+use health::{HearRun, HintTrack, OwnTrack};
+pub use health::{OWN_WEAK_TEXT, own_weak_title};
 use resume::Resume;
 use voice::{Chime, VoiceMsg};
 
@@ -101,10 +102,14 @@ impl Shared {
         g.noise_suppression.store(m.config.noise_suppression, Ordering::Relaxed);
         g.auto_gain.store(m.config.auto_gain, Ordering::Relaxed);
         g.echo_cancellation.store(m.config.echo_cancellation, Ordering::Relaxed);
+        g.ptt_click.store(m.config.ptt_click, Ordering::Relaxed);
+        self.audio.mixer.lower_media.store(m.config.lower_media, Ordering::Relaxed);
         // Hear yourself with nobody listening: push-to-talk acts like always-on meanwhile.
         g.test.store(matches!(m.hear, HearState::Recording { hold_key: false }), Ordering::Relaxed);
-        self.ptt.set_key(&m.config.ptt_key);
-        self.ptt.set_active(m.config.mode == InputMode::Ptt && (m.voice_wanted.is_some() || m.mic_test));
+        let c = &m.config;
+        self.ptt.set_keys(&c.ptt_key, &c.mute_key, &c.deafen_key, &c.push_to_mute_key);
+        let in_call = m.voice_wanted.is_some();
+        self.ptt.set_active(c.mode == InputMode::Ptt && (in_call || m.mic_test), in_call);
     }
 
     /// Remember (or forget) this server's device token.
@@ -136,6 +141,23 @@ impl Shared {
     }
 }
 
+/// What `yap --remote` gets (remote.rs): the command goes to the core, and
+/// the answer says how things will be (mute and deafen, in a call or not).
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn remote_handler(shared: Arc<Shared>, cmd: mpsc::UnboundedSender<Cmd>) -> crate::remote::Handler {
+    Arc::new(move |r| {
+        let (muted, deafened, in_call) = {
+            let m = shared.model.lock();
+            (m.config.muted, m.config.deafened, m.voice_wanted.is_some())
+        };
+        let (muted, deafened) = crate::remote::next(r, muted, deafened);
+        if r != crate::remote::Remote::Status {
+            let _ = cmd.send(Cmd::Remote(r));
+        }
+        crate::remote::reply(muted, deafened, in_call)
+    })
+}
+
 pub fn start(shared: Arc<Shared>, observer: Option<mpsc::UnboundedSender<CoreEvent>>) -> mpsc::UnboundedSender<Cmd> {
     start_with_done(shared, observer, None)
 }
@@ -154,6 +176,15 @@ pub fn start_with_done(
     let voice = VoiceEngine::new(shared.audio.clone(), shared.screen.clone(), bitrate, signal_tx, voice_tx);
     let (share_tx, share_rx) = mpsc::unbounded_channel();
     shared.screen.share.set_events(share_tx);
+    // The mute and deafen keys (Settings › Voice) toggle like the buttons.
+    let keys_tx = cmd_tx.clone();
+    shared.ptt.set_on_toggle(Arc::new(move |a| {
+        let _ = keys_tx.send(match a {
+            crate::ptt::Action::Mute => Cmd::ToggleMute,
+            crate::ptt::Action::Deafen => Cmd::ToggleDeafen,
+            _ => return,
+        });
+    }));
     let core = Core {
         shared,
         observer,
@@ -180,10 +211,14 @@ pub fn start_with_done(
         handover_check: None,
         rejoining: false,
         hint_track: HashMap::new(),
+        own: OwnTrack::default(),
         last_hints: None,
         last_devices: None,
         devices_busy: Arc::new(AtomicBool::new(false)),
         hear: None,
+        nudge_seen: 0,
+        last_nudge: None,
+        ptt_latched: false,
         last_report: None,
         debug_fail: std::env::var("YAP_DEBUG_AUDIO_FAIL").ok().filter(|_| cfg!(debug_assertions)),
         seal_wait: None,
@@ -237,11 +272,18 @@ struct Core {
     rejoining: bool,
     /// Connection hints' numbers, per connection.
     hint_track: HashMap<u64, HintTrack>,
+    /// Your own connection (what the others report losing of your voice).
+    own: OwnTrack,
     last_hints: Option<Instant>,
     last_devices: Option<Instant>,
     devices_busy: Arc<AtomicBool>,
     /// Settings › Voice › Hear yourself, while it records.
     hear: Option<HearRun>,
+    /// Talking while muted: the gate's last report we looked at, and the last nudge.
+    nudge_seen: u64,
+    last_nudge: Option<Instant>,
+    /// Push-to-talk latched, as last noted in the call report.
+    ptt_latched: bool,
     /// The call report's last reading of the connections.
     last_report: Option<Instant>,
     /// Debug builds: `YAP_DEBUG_AUDIO_FAIL=mic|speakers[@secs]` fakes a stream error once.
@@ -419,6 +461,7 @@ impl Core {
         let mut m = self.shared.model.lock();
         m.ghosts.clear();
         m.hints.clear();
+        m.own_weak = None;
     }
 
     fn connect(&mut self) {
@@ -596,6 +639,7 @@ impl Core {
             if !kept {
                 m.peer_states.clear();
                 m.hints.clear();
+                m.own_weak = None;
             }
         }
         self.resume_key = None;
@@ -625,6 +669,13 @@ impl Core {
             }
         }
         let mut changed = false;
+        // Space: a voice that arrived after its pan was set (a new connection) comes from the right place too.
+        {
+            let m = self.shared.model.lock();
+            for (sid, pan) in &m.pan {
+                self.shared.audio.set_pan(sid, *pan);
+            }
+        }
         // Speaking rings: remote from decoded audio, local from the gate.
         let mut speaking: HashSet<String> = self.shared.audio.streams().iter().filter(|s| s.speaking()).map(|s| s.sid()).collect();
         let mut m = self.shared.model.lock();

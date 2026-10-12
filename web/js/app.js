@@ -18,7 +18,7 @@ import { postSound } from './app/uploads.js';
 import { bindUpdates, onBuild, reloadForUpdate, restoreAfterUpdate } from './app/updates.js';
 import { syncBrowserPush } from './app/push.js';
 import { VIEWS, boardCursors, drawBoard, setView, spaceWorld, watchParty, whenPlanner } from './app/places.js';
-import { adoptResumed, bindShareDialog, changeScreenShare, deferLeaveChime, dropGhost, holdGhost, joinVoice, leaveVoice, onSound, onVoice, openVoiceMore, renderSharePanel, renderVoicePanel, stopWatchingScreen, toggleDeafen, toggleMute, toggleScreenShare, voice, watchScreen } from './app/voice-ui.js';
+import { adoptResumed, bindShareDialog, onVoiceRowWheel, setVolumeFor, changeScreenShare, deferLeaveChime, dropGhost, holdGhost, joinVoice, leaveVoice, onSound, onVoice, openVoiceMore, renderSharePanel, renderVoicePanel, stopWatchingScreen, toggleDeafen, toggleMute, toggleScreenShare, voice, watchScreen } from './app/voice-ui.js';
 import { bindChannelDialog, bindLinkDialog, openChannelDialog, openLinkDialog, renderChannels, renderConn, renderHeader, renderLinks, renderRequests, renderUserPanel, showVersion, startMinecraft } from './app/sidebar.js';
 import { renderJumpPill, renderMessages, renderTyping, tapMessage } from './app/messages.js';
 import { addLocalNote, isQuietNow, jumpTo, loadLatest, loadOlder, markRead, onDeleted, onHistory, onMessage, onPing, onSendError, onSendsLost, openAndJump, openChannel, queueSend, rememberSince, sendOutbox, updateTitle, welcomeIn } from './app/chat.js';
@@ -29,7 +29,7 @@ import { askUnlock, bindVaultDialog, showVaultDialog, syncVault } from './app/pe
 import { bindSearch, onSearchResults, openSearch, openSwitcher, renderResultList, runSearch } from './app/search.js';
 import { doodlePad, markAllRead, onUnreadCounts, openCatchup, openDoodle, openPicture, openShelf, openSoundboard, renderHangs, renderShelf, requestUnreadCounts, sendQuiet, setAway, soundboard, viewDoodle } from './app/extras.js';
 import { bindCallReport, callNote, callSettingsChanged, copyCallReport } from './app/call-report-ui.js';
-import { bindPttKey, bindSettings, bindingPtt, copyInvite, copyMainLink, hearYourself, onMainKey, openSettings, renderAvatarSettings, renderAwaySettings, renderChimeSettings, renderInvites, renderModLog, renderNotifySettings, renderObsLink, renderStorage, showingAll, startMicTest } from './app/settings-ui.js';
+import { HIGH_BITRATE, bindKey, bindSettings, bindingKey, clearPushToMute, copyInvite, copyMainLink, hearYourself, onMainKey, openSettings, renderAvatarSettings, renderAwaySettings, renderChimeSettings, renderInvites, renderModLog, renderNotifySettings, renderObsLink, renderStorage, showingAll, startMicTest } from './app/settings-ui.js';
 
 // Console/debug handle (also used by test/e2e.test.mjs and the voice interop tests).
 globalThis.yap = {
@@ -682,17 +682,19 @@ export function renderAll() {
 
 function bindUi() {
   document.addEventListener('click', onClick);
-  // Per-person volume (People sheet and the voice popover).
+  // Per-person volume (People sheet and the voice popover; Ctrl/⌘ + scroll over their row in a voice channel).
   document.addEventListener('input', (e) => {
     const uid = e.target.dataset?.volumeUid;
     if (!uid) return;
     e.target.closest('.field')?.querySelector('output')?.replaceChildren(`${e.target.value}%`);
-    save({ volumes: { ...settings.volumes, [uid]: Number(e.target.value) / 100 } });
-    voice.applySettings();
+    setVolumeFor(uid, Number(e.target.value) / 100);
   });
+  $('voice-channels').addEventListener('wheel', onVoiceRowWheel, { passive: false });
   document.addEventListener('change', (e) => {
     if (!e.target.matches('.vp-quality')) return;
     const value = e.target.value;
+    const warn = e.target.closest('#popover')?.querySelector('.vp-quality-warn');
+    if (warn) warn.hidden = Number(value) < HIGH_BITRATE; // (256 and 510 kbps: no dropout protection, several times the upload)
     conn?.send({ t: 'channel.bitrate', channelId: e.target.dataset.channel, bitrate: value ? Number(value) : null });
   });
 
@@ -757,12 +759,31 @@ function bindUi() {
         (back?.isConnected ? back : $('input')).focus();
       }
     }
-    if (settings.mode === 'ptt' && e.code === settings.pttKey && !e.repeat && !typingTarget(e) && !bindingPtt) voice.setPtt(true);
+    if (settings.mode === 'ptt' && e.code === settings.pttKey && !e.repeat && !typingTarget(e) && !bindingKey) voice.setPtt(true);
+    // Push-to-mute ("cough button"): muted while held, whatever the mode.
+    if (settings.pushToMuteKey && e.code === settings.pushToMuteKey && !e.repeat && !typingTarget(e) && !bindingKey) voice.setPushToMute(true);
   });
   addEventListener('keyup', (e) => {
     if (e.code === settings.pttKey) voice.setPtt(false);
+    if (e.code === settings.pushToMuteKey) voice.setPushToMute(false);
   });
-  addEventListener('blur', () => voice.setPtt(false));
+  addEventListener('blur', () => {
+    voice.setPtt(false);
+    voice.setPushToMute(false);
+  });
+  // Mute and deafen from the keyboard, anywhere in Yap (typing too): Ctrl/⌘+Shift+M and Ctrl/⌘+Shift+D.
+  // (By the letter on the key; by its place where the layout has no Latin letters.)
+  document.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey || e.repeat || bindingKey) return;
+    const key = /^[a-z]$/i.test(e.key) ? e.key.toLowerCase() : { KeyM: 'm', KeyD: 'd' }[e.code];
+    if (key === 'm') {
+      e.preventDefault();
+      toggleMute();
+    } else if (key === 'd') {
+      e.preventDefault();
+      toggleDeafen();
+    }
+  });
 
   bindConfirmSheet();
   bindWelcome();
@@ -1090,7 +1111,9 @@ function onClick(e) {
     case 'toggle-emojis': return toggleEmojis();
     case 'mic-test': return startMicTest();
     case 'hear-yourself': return hearYourself();
-    case 'bind-ptt': return bindPttKey();
+    case 'bind-ptt': return bindKey('pttKey');
+    case 'bind-ptm': return bindKey('pushToMuteKey');
+    case 'clear-ptm': return clearPushToMute();
   }
 }
 

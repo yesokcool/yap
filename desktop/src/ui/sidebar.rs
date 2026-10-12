@@ -159,8 +159,19 @@ fn voice_panel(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
                 if let Some((text, tip)) = super::shared_quality(m) {
                     theme::tip(ui.label(egui::RichText::new(text).font(theme::font(theme::small())).color(p.text)), tip);
                 }
+                // Push-to-talk double-tapped: it stays open until the next tap.
+                // (Screenshot aid, debug builds: YAP_DEBUG_PTT=latched shows it as if double-tapped.)
+                let debug = cfg!(debug_assertions) && std::env::var("YAP_DEBUG_PTT").as_deref() == Ok("latched");
+                if m.config.mode == crate::config::InputMode::Ptt && (debug || app.shared.audio.gate.ptt_latched.load(std::sync::atomic::Ordering::Relaxed)) {
+                    let tip = format!("You double-tapped {}: push-to-talk stays on. Tap it again to stop.", crate::ptt::key_label(&m.config.ptt_key));
+                    theme::tip(ui.label(egui::RichText::new(super::LIVE_TEXT).font(theme::bold_font(theme::small())).color(p.ok)), tip);
+                }
                 if !m.mic_ok && m.voice_channel.is_some() {
                     ui.label(egui::RichText::new("Listening only — no mic").font(theme::font(theme::small())).color(p.danger));
+                }
+                // Most people lose more than 3 % of what we send: it's our connection.
+                if let Some(lost) = m.own_weak {
+                    theme::tip(ui.label(egui::RichText::new(crate::core::OWN_WEAK_TEXT).font(theme::font(theme::small())).color(p.warn)), crate::core::own_weak_title(lost));
                 }
                 if m.mic_silent {
                     theme::tip(ui.label(egui::RichText::new(super::SILENT_TEXT).font(theme::font(theme::small())).color(p.danger)), super::SILENT_TIP);
@@ -289,16 +300,22 @@ fn user_panel(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut V
     }
     ui.add_space(4.0);
     let muted = m.config.muted || m.config.deafened;
+    // The push-to-mute key, held right now: the button shows it (like the web's).
+    let held = app.shared.audio.gate.cough.load(std::sync::atomic::Ordering::Relaxed);
     let deaf = m.config.deafened;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let w = ((ui.available_width() - 4.0) / 2.0).floor();
-        let r = icon_button(ui, if muted { "mic-off" } else { "mic" }, p.text, if muted { "Muted" } else { "Mute" }, vec2(w, 36.0), muted, true, p);
-        if theme::tip(r, if muted { "Unmute your mic" } else { "Mute your mic" }).clicked() {
+        let shown = muted || held;
+        let r = icon_button(ui, if shown { "mic-off" } else { "mic" }, p.text, if shown { "Muted" } else { "Mute" }, vec2(w, 36.0), shown, true, p);
+        sections::muted_balloon(ui.ctx(), m, r.rect);
+        let keys = |s: &str| if crate::ptt::shortcut_free(&m.config, s) { format!(" ({})", crate::ptt::key_label(s)) } else { String::new() };
+        let tip = if held && !muted { format!("Muted while you hold {}", crate::ptt::key_label(&m.config.push_to_mute_key)) } else if muted { format!("Unmute your mic{}", keys(crate::ptt::MUTE_SHORTCUT)) } else { format!("Mute your mic{}", keys(crate::ptt::MUTE_SHORTCUT)) };
+        if theme::tip(r, tip).clicked() {
             acts.push(Act::Cmd(Cmd::ToggleMute));
         }
         let r = icon_button(ui, if deaf { "headphones-off" } else { "headphones" }, p.text, if deaf { "Deafened" } else { "Deafen" }, vec2(w, 36.0), deaf, true, p);
-        if theme::tip(r, if deaf { "Undeafen" } else { "Deafen: hear nobody, and mute" }).clicked() {
+        if theme::tip(r, format!("{}{}", if deaf { "Undeafen" } else { "Deafen: hear nobody, and mute" }, keys(crate::ptt::DEAFEN_SHORTCUT))).clicked() {
             acts.push(Act::Cmd(Cmd::ToggleDeafen));
         }
     });

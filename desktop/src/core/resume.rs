@@ -248,6 +248,7 @@ impl Core {
                 m.peer_states.clear();
                 m.speaking.clear();
                 m.hints.clear();
+                m.own_weak = None;
             }
             self.repaint();
         }

@@ -997,12 +997,20 @@ async function voiceScenario(label, nativeFirst) {
   await web.click('[data-action="leave-voice"]');
   await web.waitForFunction(() => yap.voice.peers.size === 0, null, { timeout: 5000 });
   const peer = summary?.peers?.[0] ?? {};
+  // Talking while muted (its WAV mic keeps going): "You're muted", at most every 5 s.
+  const at = (l) => Number(l.match(/^\[\+\s*([\d.]+)s\]/)?.[1] ?? NaN);
+  const mutedAt = at(n.lines.find((l) => /toggling mute/.test(l)) ?? '');
+  const nudges = n.lines.filter((l) => / NUDGE you're muted/.test(l)).map(at);
+  // Your own connection: what the web reports losing of ours (only an impaired network should say it's dropping).
+  const ownHints = n.lines.filter((l) => / HINT self /.test(l)).map((l) => l.replace(/^\[\+\s*[\d.]+s\]\s*/, ''));
   const pct = (x) => +((100 * (x ?? 0)) / Math.max(1, peer.frames ?? 0)).toFixed(2);
   const secs = (s3.at - s1.at) / 1000;
   evidence[label] = {
     web: { inbound: s2.mime, outbound: s2.outMime, voiceCodecs: { web: s2.localOrder, native: s2.remoteOrder }, opusFmtp: s2.opusFmtp, outFmtp: s2.outFmtp, recvKbps: Math.round(kbps), sentKbps: Math.round(sentKbps),
       wireKbpsFromNative: Math.round(((s3.bytes - s1.bytes) * 8) / 1000 / secs), wireKbpsToNative: Math.round(((s3.sentBytes - s1.sentBytes) * 8) / 1000 / secs),
       packets: s2.packets, lost: s3.lost, patchedPct: patchedPct(s1, s3), audioLevel: s2.level, rtpExtAudioLevel: s2.rtpExtLevel, speakingRing: ring, levelWhileNativeMuted: muted.level, muteFlagShown: flag },
+    nudge: { mutedAt, nudges },
+    ownConnection: ownHints,
     native: { recvKbps: summary?.recvKbps, maxRecvLevel: summary?.maxRecvLevel, bytesReceived: peer.bytesReceived, packetsReceived: peer.packetsReceived, bytesSent: peer.bytesSent, opusBytesSent: peer.opusBytesSent, sendRed: peer.sendRed, redPacketsReceived: peer.redPackets, sendBitrate: peer.sendBitrate, polite: peer.polite, localFmtp: peer.localFmtp, remoteFmtp: peer.remoteFmtp,
       frames: peer.frames, concealed: peer.concealed, fec: peer.fec, redRebuilt: peer.red, patchedPct: pct(peer.concealed), fecPct: pct(peer.fec), redPct: pct(peer.red), late: peer.late, underruns: peer.underruns, lostPct: +((100 * Math.max(0, (peer.expected ?? 0) - (peer.packetsReceived ?? 0) - (peer.padding ?? 0))) / Math.max(1, peer.expected ?? 0)).toFixed(2), jitterTargetMs: peer.targetMs, lossHint: peer.lossHint },
     ...(IMPAIR ? { impair: { profile: IMPAIR, red: RED, rtpThroughProxy: impairStats.rtp, dropped: impairStats.dropped, nativeRepairedPct: +((100 * ((peer.concealed ?? 0) + (peer.fec ?? 0))) / Math.max(1, peer.frames ?? 0)).toFixed(2),
@@ -1032,6 +1040,11 @@ async function voiceScenario(label, nativeFirst) {
   assert.ok(ring, 'web shows the native speaking ring (RTP audio-level extension)');
   assert.ok(muted.level < 0.001, `web level while native muted: ${muted.level}`);
   assert.ok(flag, 'web shows the native mute flag');
+  assert.ok(nudges.length >= 1 && nudges[0] - mutedAt < 2, `native, muted and still talking, gets "You're muted" at once (muted at ${mutedAt}, nudges ${nudges})`);
+  assert.ok(nudges.every((t, i) => i === 0 || t - nudges[i - 1] >= 4.9), `at most every 5 s: ${nudges}`);
+  assert.ok(nudges.every((t) => t >= mutedAt), 'never before muting');
+  if (IMPAIR === 'loss5') assert.ok(ownHints.includes('HINT self dropping'), `5 % of native's packets lost on the way: native says its connection drops audio (${ownHints})`);
+  if (!IMPAIR) assert.ok(!ownHints.includes('HINT self dropping'), `a clean network: no "Your connection is dropping…" (${ownHints})`);
   assert.ok((peer.packetsReceived ?? 0) > 100, `native received packets: ${peer.packetsReceived}`);
   assert.ok((summary?.maxRecvLevel ?? 0) > 0.01, `native decoded level: ${summary?.maxRecvLevel}`);
   assert.ok((summary?.recvKbps ?? 0) > (BITRATE / 1000) * 0.6, `native received ${summary?.recvKbps} kbps from web`);
@@ -1039,12 +1052,14 @@ async function voiceScenario(label, nativeFirst) {
   // The call report (PROTOCOL.md › Voice › Call report): the call as native saw it, no IP addresses.
   await new Promise((r) => setTimeout(r, 500));
   const report = fs.existsSync(reportFile) ? fs.readFileSync(reportFile, 'utf8') : '';
-  evidence[label].callReport = report.split('\n').filter((l) => /^(App|Channel|Lasted|  (Connection|Codec|Lost|Audio patched|Rebuilt|Jitter)):?/.test(l) || /Call ended/.test(l));
+  evidence[label].callReport = report.split('\n').filter((l) => /^(App|Channel|Lasted|  (Connection|Codec|Lost|Audio patched|Rebuilt|Jitter|From you)):?/.test(l) || /Call ended|Your connection/.test(l));
   const webName = `Web${RUN}`;
   for (const want of [/^Yap call report\nApp: Yap desktop \d+\.\d+\.\d+ /, /\nChannel: Lounge\n/, /\nSettings:\n  Quality: \d+ kbps/, /\nAudio devices:\n  Microphone: /,
     /\nPeople \(1\)\n/, new RegExp(`\\n${webName}\\n  Connection: (direct|relay) \\((host|srflx|prflx|relay) ↔ (host|srflx|prflx|relay)\\)`),
     new RegExp(`  Codec: ${RED ? 'red\\+opus out, red\\+opus in' : 'opus out, opus in'}\\n`), /  Opus fmtp sent: .*useinbandfec=1/, /  Lost packets: \d+\.\d % /, /  Audio patched over: \d+\.\d %/,
-    /\nTimeline\n\+00:00 You joined Lounge; /, /: connected\n/, /\+00:10 .*: rtt \d+ ms, lost /, /You muted\n/, /Call ended: you quit Yap\n$/]) {
+    /\nTimeline\n\+00:00 You joined Lounge; /, /: connected\n/, /\+00:10 .*: rtt \d+ ms, lost /, /You muted\n/, /Call ended: you quit Yap\n$/,
+    // What the web reports losing of ours (PROTOCOL.md › Call report).
+    new RegExp(`\\n  Weak connection shown: [^\\n]*\\n  From you: they lost \\d+\\.\\d % of yours \\(their round trip (\\d+ ms|n/a) median\\)\\n`)]) {
     assert.match(report, want, `call report: ${want}`);
   }
   assert.doesNotMatch(report, /\b\d{1,3}(\.\d{1,3}){3}\b|[0-9a-f]{0,4}::[0-9a-f]|([0-9a-f]{1,4}:){5}/i, 'the call report holds no IP address');
@@ -1052,6 +1067,53 @@ async function voiceScenario(label, nativeFirst) {
 
 await test('voice: native joins first, web offers, native answers; audio both ways', () => voiceScenario('nativeFirst', true));
 await test('voice: web joins first, native offers, web answers; audio both ways', () => voiceScenario('webFirst', false));
+
+// `yap --remote` (macOS, Linux): a script mutes, deafens and unmutes the
+// running app over its private socket; the web sees each in the native row's
+// flag; talking while muted gets the nudge; nothing answers once it's gone.
+await test('remote: `yap --remote` mutes, deafens and unmutes the running app (the web sees each); muted and talking, it says "You\'re muted"; nothing answers once it quits', async () => {
+  if (process.platform === 'win32') return; // (not on Windows yet)
+  const sock = path.join(os.tmpdir(), `yap-r-${RUN}.sock`);
+  const env = { YAP_REMOTE: sock };
+  const n = native(`Remote${RUN}`, null, ['--join-voice', 'lounge', '--listen-remote', '--duration', '60'], env);
+  await n.waitFor(/REMOTE listening/, 15000);
+  await n.waitFor(/voice joined lounge/, 15000);
+  await web.click('button.channel.voice:has-text("Lounge")');
+  await web.waitForFunction(() => [...yap.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'), null, { timeout: 20000 });
+  const remote = (cmd) => new Promise((resolve) => {
+    const c = spawn(BIN, ['--remote', cmd], { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    c.stdout.on('data', (d) => { out += d; });
+    c.stderr.on('data', (d) => { out += d; });
+    c.on('exit', (code) => resolve({ code, out: out.trim() }));
+  });
+  const row = () => {
+    const s = [...yap.state.sessions.values()].find((x) => x.client === 'desktop' && x.voice);
+    return s ? document.querySelector(`.voice-member[data-voice-sid="${CSS.escape(s.sid)}"] .flags`) : null;
+  };
+  const flagIs = (want) => web.waitForFunction(`((${row})()?.getAttribute('aria-label') ?? 'none') === ${JSON.stringify(want)}`, null, { timeout: 6000 });
+  const answers = {};
+  answers.mute = await remote('mute');
+  await flagIs('muted');
+  await n.waitFor(/NUDGE you're muted/, 4000); // its WAV mic keeps talking
+  answers.status = await remote('status');
+  answers.deafen = await remote('deafen');
+  await flagIs('deafened');
+  answers.unmute = await remote('unmute');
+  await flagIs('none');
+  answers.junk = await remote('sing');
+  n.child.kill('SIGTERM');
+  await n.done;
+  await web.click('[data-action="leave-voice"]');
+  await web.waitForFunction(() => yap.voice.peers.size === 0, null, { timeout: 5000 }).catch(() => {});
+  answers.gone = await remote('status');
+  // (Killed, the bot leaves its socket behind, as a crash would: the next app replaces it. Tidy up here.)
+  fs.rmSync(sock, { force: true });
+  evidence.remote = { answers, log: n.lines.filter((l) => /REMOTE|NUDGE/.test(l)).map((l) => l.replace(/^\[\+\s*[\d.]+s\]\s*/, '')) };
+  assert.deepEqual([answers.mute, answers.status, answers.deafen, answers.unmute].map((a) => [a.code, a.out]), [[0, 'muted, in a call'], [0, 'muted, in a call'], [0, 'deafened, in a call'], [0, 'unmuted, in a call']]);
+  assert.equal(answers.junk.code, 2, `an unknown command is refused before it's sent (${answers.junk.out})`);
+  assert.equal(answers.gone.code, 1, `nobody answers once the app is gone (${answers.gone.out})`);
+});
 
 // An OBS link (the web's /obs page, listen-only) listens without showing up
 // while its account is in the call: native still connects to it and sends it
@@ -1183,7 +1245,7 @@ await test("screen: the desktop watches a browser's share (H.264, the pictures d
   // (Sharp: the web keeps the size and drops frames when short of bandwidth,
   // so the size can be checked; its codec list puts VP9 first, but H.264 is
   // all the desktop takes).
-  const n = native(`Watch${RUN}`, null, ['--join-voice', 'lounge', '--watch-screen', '--duration', '34']);
+  const n = native(`Watch${RUN}`, null, ['--join-voice', 'lounge', '--watch-screen', '--lower-media', '--duration', '34']);
   await n.waitFor(/voice joined lounge/, 15000);
   await sweb.click('button.channel.voice:has-text("Lounge")');
   await sweb.waitForFunction(() => [...yap.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'), null, { timeout: 20000 });
@@ -1208,12 +1270,14 @@ await test("screen: the desktop watches a browser's share (H.264, the pictures d
   await n.waitFor(new RegExp(`SCREEN stopped watching ${webSid}`), 5000);
   const summary = await n.done;
   await leaveVoice(sweb);
-  evidence.screenToNative = { webSent: out, audioSections: orders, native: { frames: summary?.screenFrames, size: summary?.screenSize, soundBytes: summary?.screenSoundBytes }, log: n.lines.filter((l) => /SCREEN (watching|stopped|frames 1\d\d )|screen's/.test(l)).slice(0, 8) };
+  evidence.screenToNative = { webSent: out, audioSections: orders, native: { frames: summary?.screenFrames, size: summary?.screenSize, soundBytes: summary?.screenSoundBytes, minDuck: summary?.minDuck }, log: n.lines.filter((l) => /SCREEN (watching|stopped|frames 1\d\d )|screen's/.test(l)).slice(0, 8) };
   assert.equal(out?.codec, 'video/H264', `the web sends H.264 (${JSON.stringify(out)})`);
   assertRedOnVoiceOnly(orders);
   assert.ok((summary?.screenFrames ?? 0) > 60, `native decoded ${summary?.screenFrames} pictures`);
   assert.deepEqual(summary?.screenSize, [1280, 720]);
   assert.ok((summary?.screenSoundBytes ?? 0) > 2000, `the share's sound reached native on its own track (${summary?.screenSoundBytes} bytes)`);
+  // Lower shared media while friends talk (--lower-media): the sharer's voice (its WebAudio mic) dips the share's sound to half.
+  assert.ok(Math.abs((summary?.minDuck ?? 1) - 0.5) < 0.01, `the share's sound dipped to 50 % while the web user talked (minDuck ${summary?.minDuck})`);
 });
 
 await test("screen: a browser watches the desktop's share (LIVE badge; H.264 pictures at the pattern's size, the share's sound on its own track; Stop watching stops the encoder)", async () => {

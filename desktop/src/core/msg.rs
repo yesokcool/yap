@@ -826,6 +826,9 @@ impl Core {
                             let v = m.session_volume(&sid);
                             self.shared.audio.set_volume(&sid, v);
                         }
+                        if m.pan.remove(&sid).is_some() {
+                            self.shared.audio.set_pan(&sid, 0.0);
+                        }
                     }
                 }
                 self.repaint();

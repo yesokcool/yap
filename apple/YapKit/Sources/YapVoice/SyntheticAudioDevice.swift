@@ -46,6 +46,9 @@ public final class SyntheticAudioDevice: NSObject, RTCAudioDevice, @unchecked Se
 
     /// Silence instead of the chord (to check the far side's level drops).
     public let silent = OSAllocatedUnfairLock(initialState: false)
+    /// The chord four times too loud, clipped at full scale (the meter's
+    /// "Too loud (clipping)").
+    public let loud = OSAllocatedUnfairLock(initialState: false)
 
     public override init() {}
 
@@ -198,6 +201,7 @@ public final class SyntheticAudioDevice: NSObject, RTCAudioDevice, @unchecked Se
 
         if recording {
             let silent = self.silent.withLock { $0 }
+            let gain = self.loud.withLock { $0 } ? 4.0 : 1.0
             var (start, seed) = lock.withLock { ($0.sampleIndex, $0.seed) }
             var samples = [Int16](repeating: 0, count: frames)
             for i in 0..<frames {
@@ -208,7 +212,7 @@ public final class SyntheticAudioDevice: NSObject, RTCAudioDevice, @unchecked Se
                 seed = seed &* 1_103_515_245 &+ 12345
                 v += (Double(seed >> 16 & 0x7FFF) / 16384 - 1) * 0.12
                 v *= 0.6 + 0.4 * sin(2 * .pi * 0.5 * t)
-                samples[i] = silent ? 0 : Int16(max(-1, min(1, v)) * 30_000)
+                samples[i] = silent ? 0 : Int16(max(-1, min(1, v * gain)) * (gain > 1 ? 32_767 : 30_000))
             }
             start += frames
             let newSeed = seed, newStart = start

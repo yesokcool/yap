@@ -1,6 +1,9 @@
-//! Global push-to-talk by polling key state (~100 Hz) — works while Yap is in
-//! the background and sees both key down and key up, without hooks or
-//! grabbing the key away from other apps.
+//! Global keys by polling key state (~100 Hz): push-to-talk (double-tap to
+//! stay live), mute, deafen and push-to-mute (PROTOCOL.md › Voice › Transmit
+//! gate). Works while Yap is in the background and sees both key down and key
+//! up, without hooks or grabbing the key away from other apps. A key can come
+//! with modifiers held ("Ctrl+Shift+KeyM"), so a mute key needn't be a key you
+//! type with.
 //!
 //! * Windows: `GetAsyncKeyState` (keys and mouse buttons).
 //! * Linux: evdev `EVIOCGKEY` on /dev/input/event* when readable (X11 *and*
@@ -16,7 +19,7 @@ use crate::audio::Gate;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// (name, windows VK, X11 keysym, evdev code, macOS keycode)
 #[allow(dead_code)] // each platform reads its own column
@@ -148,7 +151,8 @@ pub fn key_def(name: &str) -> Option<&'static KeyDef> {
     KEYS.iter().find(|k| k.name == name)
 }
 
-pub fn key_label(name: &str) -> String {
+/// One key's own label ("` (backtick)", "Left Shift", "M").
+fn single_label(name: &str) -> String {
     match name {
         "Backquote" => "` (backtick)".into(),
         "CapsLock" => "Caps Lock".into(),
@@ -156,8 +160,8 @@ pub fn key_label(name: &str) -> String {
         "ShiftRight" => "Right Shift".into(),
         "ControlLeft" => "Left Ctrl".into(),
         "ControlRight" => "Right Ctrl".into(),
-        "AltLeft" => "Left Alt".into(),
-        "AltRight" => "Right Alt".into(),
+        "AltLeft" => if cfg!(target_os = "macos") { "Left Option" } else { "Left Alt" }.into(),
+        "AltRight" => if cfg!(target_os = "macos") { "Right Option" } else { "Right Alt" }.into(),
         "MetaLeft" => if cfg!(target_os = "macos") { "Left ⌘" } else { "Left Super" }.into(),
         "MetaRight" => if cfg!(target_os = "macos") { "Right ⌘" } else { "Right Super" }.into(),
         "Mouse3" => "Middle mouse".into(),
@@ -165,6 +169,129 @@ pub fn key_label(name: &str) -> String {
         "Mouse5" => "Mouse 5 (forward)".into(),
         n => n.trim_start_matches("Key").trim_start_matches("Digit").to_string(),
     }
+}
+
+/// A key's (or a combination's) label for Settings: "` (backtick)", "Ctrl+Shift+M"
+/// ("⇧⌘M" on a Mac), "None" when nothing is set.
+pub fn key_label(name: &str) -> String {
+    if name.is_empty() {
+        return "None".into();
+    }
+    Combo::parse(name).map(|c| c.label()).unwrap_or_else(|| single_label(name))
+}
+
+/// Modifiers a combination can ask for (either side counts): bit, name, the two keys.
+const MODS: [(u8, &str, [&str; 2]); 4] = [
+    (CTRL, "Ctrl", ["ControlLeft", "ControlRight"]),
+    (ALT, "Alt", ["AltLeft", "AltRight"]),
+    (SHIFT, "Shift", ["ShiftLeft", "ShiftRight"]),
+    (META, "Meta", ["MetaLeft", "MetaRight"]),
+];
+const CTRL: u8 = 1;
+const ALT: u8 = 2;
+const SHIFT: u8 = 4;
+const META: u8 = 8;
+
+/// Which modifier a key is (Left/Right Shift…), if it is one.
+fn modifier_bit(name: &str) -> Option<u8> {
+    MODS.iter().find(|(_, _, keys)| keys.contains(&name)).map(|(bit, ..)| *bit)
+}
+
+/// A key, maybe with modifiers held: "Backquote", "Mouse4", "Ctrl+Shift+KeyM".
+/// The last part is a key from `KEYS` (it may be a modifier on its own, like
+/// "ShiftLeft" for push-to-talk); the ones before it are "Ctrl", "Alt",
+/// "Shift" or "Meta", either side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Combo {
+    mods: u8,
+    key: &'static KeyDef,
+}
+
+impl PartialEq for KeyDef {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+impl Eq for KeyDef {}
+impl std::fmt::Debug for KeyDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name)
+    }
+}
+
+impl Combo {
+    pub fn parse(s: &str) -> Option<Combo> {
+        let mut parts: Vec<&str> = s.split('+').map(str::trim).collect();
+        let key = key_def(parts.pop()?)?;
+        let mut mods = 0;
+        for p in parts {
+            mods |= MODS.iter().find(|(_, n, _)| n.eq_ignore_ascii_case(p))?.0;
+        }
+        Some(Combo { mods, key })
+    }
+
+    /// The name kept in config.json ("Ctrl+Shift+KeyM").
+    pub fn name(&self) -> String {
+        let mut out = String::new();
+        for (bit, n, _) in MODS {
+            if self.mods & bit != 0 {
+                out.push_str(n);
+                out.push('+');
+            }
+        }
+        out.push_str(self.key.name);
+        out
+    }
+
+    /// "Ctrl+Shift+M" ("⌘+Shift+M", "Option+…" on a Mac, ⌘ first the way
+    /// people say it; in words, since the UI font has no ⌃ or ⇧).
+    pub fn label(&self) -> String {
+        let key = single_label(self.key.name);
+        let order: [(u8, &str); 4] = if cfg!(target_os = "macos") {
+            [(META, "⌘"), (CTRL, "Ctrl"), (ALT, "Option"), (SHIFT, "Shift")]
+        } else {
+            [(CTRL, "Ctrl"), (ALT, "Alt"), (SHIFT, "Shift"), (META, if cfg!(windows) { "Win" } else { "Super" })]
+        };
+        let mut out: Vec<&str> = Vec::new();
+        for (bit, n) in order {
+            if self.mods & bit != 0 {
+                out.push(n);
+            }
+        }
+        out.push(&key);
+        out.join("+")
+    }
+
+    /// Held right now, by a key-state reader (extra modifiers don't matter:
+    /// push-to-talk still works while you hold Shift to run in a game).
+    fn down(&self, is_down: impl Fn(&KeyDef) -> bool) -> bool {
+        is_down(self.key)
+            && MODS.iter().filter(|(bit, ..)| self.mods & bit != 0).all(|(_, _, keys)| keys.iter().filter_map(|k| key_def(k)).any(&is_down))
+    }
+}
+
+/// egui key + modifiers -> our combination name (the in-window fallback and binding).
+pub fn combo_from_egui(key: eframe::egui::Key, m: eframe::egui::Modifiers) -> Option<String> {
+    let mut mods = 0;
+    if m.ctrl {
+        mods |= CTRL;
+    }
+    if m.alt {
+        mods |= ALT;
+    }
+    if m.shift {
+        mods |= SHIFT;
+    }
+    if m.mac_cmd {
+        mods |= META;
+    }
+    Some(Combo { mods, key: key_def(from_egui(key)?)? }.name())
+}
+
+/// Does an in-window key event (key + modifiers held) press this combination?
+fn egui_matches(c: &Combo, name: &str, m: eframe::egui::Modifiers) -> bool {
+    let held = (if m.ctrl { CTRL } else { 0 }) | (if m.alt { ALT } else { 0 }) | (if m.shift { SHIFT } else { 0 }) | (if m.mac_cmd { META } else { 0 });
+    c.key.name == name && c.mods & held == c.mods
 }
 
 /// egui key -> our key name, for the in-window fallback and binding.
@@ -209,17 +336,207 @@ pub fn from_egui(key: eframe::egui::Key) -> Option<&'static str> {
     })
 }
 
+/// What a global key does (Settings › Voice, next to each other).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Push to talk (held; double-tap to stay live).
+    Talk,
+    /// Toggle mute.
+    Mute,
+    /// Toggle deafen.
+    Deafen,
+    /// Push to mute (held: muted, whatever the mode — a "cough button").
+    Cough,
+}
+
+impl Action {
+    pub const ALL: [Action; 4] = [Action::Talk, Action::Mute, Action::Deafen, Action::Cough];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The row's label in Settings › Voice.
+    pub fn label(self) -> &'static str {
+        match self {
+            Action::Talk => "Push-to-talk key:",
+            Action::Mute => "Mute key:",
+            Action::Deafen => "Deafen key:",
+            Action::Cough => "Push-to-mute key:",
+        }
+    }
+
+    /// What it's called in "that's already your … key".
+    pub fn noun(self) -> &'static str {
+        match self {
+            Action::Talk => "push-to-talk",
+            Action::Mute => "mute",
+            Action::Deafen => "deafen",
+            Action::Cough => "push-to-mute",
+        }
+    }
+}
+
+/// The config field an action's key lives in.
+pub fn config_key(c: &crate::config::Config, a: Action) -> &str {
+    match a {
+        Action::Talk => &c.ptt_key,
+        Action::Mute => &c.mute_key,
+        Action::Deafen => &c.deafen_key,
+        Action::Cough => &c.push_to_mute_key,
+    }
+}
+
+/// Bind `combo` to `a` ("" clears it; push-to-talk always has a key). A key
+/// that's already another action's is refused, in words for a toast.
+pub fn bind(c: &mut crate::config::Config, a: Action, combo: &str) -> Result<(), String> {
+    if combo.is_empty() && a == Action::Talk {
+        return Err("Push-to-talk needs a key.".into());
+    }
+    if !combo.is_empty()
+        && let Some(other) = Action::ALL.into_iter().find(|o| *o != a && Combo::parse(config_key(c, *o)).is_some_and(|k| Some(k) == Combo::parse(combo)))
+    {
+        return Err(format!("{} is already your {} key.", key_label(combo), other.noun()));
+    }
+    let slot = match a {
+        Action::Talk => &mut c.ptt_key,
+        Action::Mute => &mut c.mute_key,
+        Action::Deafen => &mut c.deafen_key,
+        Action::Cough => &mut c.push_to_mute_key,
+    };
+    *slot = combo.to_string();
+    Ok(())
+}
+
+/// The window's own mute and deafen shortcuts (like the web's): Ctrl+Shift+M
+/// and Ctrl+Shift+D, ⌘+Shift+M and ⌘+Shift+D on a Mac.
+pub const MUTE_SHORTCUT: &str = if cfg!(target_os = "macos") { "Meta+Shift+KeyM" } else { "Ctrl+Shift+KeyM" };
+pub const DEAFEN_SHORTCUT: &str = if cfg!(target_os = "macos") { "Meta+Shift+KeyD" } else { "Ctrl+Shift+KeyD" };
+
+/// Is a window shortcut free, i.e. not also one of the global keys (which
+/// would then toggle twice)?
+pub fn shortcut_free(c: &crate::config::Config, shortcut: &str) -> bool {
+    let s = Combo::parse(shortcut);
+    !Action::ALL.into_iter().any(|a| Combo::parse(config_key(c, a)) == s)
+}
+
+/// A second mute or deafen press closer than this is the same press seen
+/// twice (the poller and the window both see a quick tap), not a second toggle.
+const TOGGLE_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Two presses of push-to-talk this close together keep it open.
+pub const DOUBLE_TAP: Duration = Duration::from_millis(400);
+
+/// Double-tap to stay live (PROTOCOL.md › Voice › Transmit gate): a second
+/// press within 400 ms of the first latches push-to-talk open; the next
+/// press unlatches it (and works as an ordinary hold until it's let go).
+#[derive(Default, Debug)]
+pub struct Latch {
+    last_press: Option<Instant>,
+    pub on: bool,
+}
+
+impl Latch {
+    /// The key went down.
+    pub fn press(&mut self, now: Instant) {
+        if self.on {
+            // Tap to stop; that press doesn't count as the first of another double-tap.
+            self.on = false;
+            self.last_press = None;
+        } else if self.last_press.is_some_and(|t| now.duration_since(t) <= DOUBLE_TAP) {
+            self.on = true;
+            self.last_press = None;
+        } else {
+            self.last_press = Some(now);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        *self = Latch::default();
+    }
+}
+
+/// Catching the next key pressed (Settings' "Press a key…"), from global key
+/// scans: a key with whatever modifiers are held, or a modifier alone once
+/// it's let go without anything else (so Shift can be a push-to-talk key, and
+/// Ctrl+Shift+M can be a mute key).
+#[derive(Default)]
+struct Binder {
+    prev: Vec<bool>,
+    /// The modifier pressed first (None after a second one joined it).
+    lone: Option<usize>,
+    mixed: bool,
+}
+
+impl Binder {
+    /// Start over: keys already held when binding starts don't count.
+    fn reset(&mut self) {
+        self.prev = vec![true; KEYS.len()];
+        self.lone = None;
+        self.mixed = false;
+    }
+
+    fn scan(&mut self, down: &[bool]) -> Option<String> {
+        if self.prev.len() != down.len() {
+            self.reset();
+        }
+        let mut found = None;
+        for (i, k) in KEYS.iter().enumerate() {
+            let (was, is) = (self.prev[i], down[i]);
+            if is && !was && found.is_none() {
+                if modifier_bit(k.name).is_some() {
+                    if self.lone.is_some() {
+                        self.mixed = true;
+                    } else {
+                        self.lone = Some(i);
+                    }
+                } else {
+                    let mods = KEYS.iter().zip(down).filter(|(_, d)| **d).filter_map(|(k, _)| modifier_bit(k.name)).fold(0, |a, b| a | b);
+                    found = Some(Combo { mods, key: k }.name());
+                }
+            } else if !is && was && self.lone == Some(i) && found.is_none() {
+                if !self.mixed {
+                    found = Some(k.name.to_string());
+                }
+                self.lone = None;
+                self.mixed = false;
+            }
+        }
+        self.prev.copy_from_slice(down);
+        found
+    }
+}
+
+/// Per action: down in the window (fallback), down globally, and what was
+/// last acted on.
+#[derive(Default)]
+struct KeyState {
+    focused: [bool; 4],
+    global: [bool; 4],
+    level: [bool; 4],
+    latch: Latch,
+    /// When each toggle last fired (mute, deafen).
+    toggled: [Option<Instant>; 4],
+}
+
+type OnToggle = Arc<dyn Fn(Action) + Send + Sync>;
+
+/// The global keys: push-to-talk, mute, deafen and push-to-mute.
 pub struct Ptt {
     gate: Arc<Gate>,
     repaint: Arc<dyn Fn() + Send + Sync>,
-    key: Mutex<String>,
-    active: AtomicBool,
-    binding: AtomicBool,
-    bound: Mutex<Option<String>>,
-    /// Pressed according to the window's own key events (fallback).
-    focused_down: AtomicBool,
-    global_down: AtomicBool,
+    keys: Mutex<[Option<Combo>; 4]>,
+    /// Push-to-talk can matter (its mode, in a call or a mic test).
+    talk_active: AtomicBool,
+    /// In a call: the mute, deafen and push-to-mute keys work.
+    keys_active: AtomicBool,
+    /// Settings is waiting for a key for this action.
+    binding: Mutex<Option<Action>>,
+    bound: Mutex<Option<(Action, String)>>,
+    state: Mutex<KeyState>,
     started: AtomicBool,
+    /// Mute / deafen pressed: the core toggles them.
+    on_toggle: Mutex<Option<OnToggle>>,
     /// Human-readable backend status, for the settings screen.
     pub status: Mutex<String>,
 }
@@ -229,71 +546,130 @@ impl Ptt {
         Arc::new(Self {
             gate,
             repaint,
-            key: Mutex::new("Backquote".into()),
-            active: AtomicBool::new(false),
-            binding: AtomicBool::new(false),
+            keys: Mutex::new([Combo::parse("Backquote"), None, None, None]),
+            talk_active: AtomicBool::new(false),
+            keys_active: AtomicBool::new(false),
+            binding: Mutex::new(None),
             bound: Mutex::new(None),
-            focused_down: AtomicBool::new(false),
-            global_down: AtomicBool::new(false),
+            state: Mutex::new(KeyState::default()),
             started: AtomicBool::new(false),
+            on_toggle: Mutex::new(None),
             status: Mutex::new(String::new()),
         })
     }
 
-    pub fn key(&self) -> String {
-        self.key.lock().clone()
+    /// What the mute and deafen keys do (the core's toggles).
+    pub fn set_on_toggle(&self, f: OnToggle) {
+        *self.on_toggle.lock() = Some(f);
     }
 
-    pub fn set_key(self: &Arc<Self>, name: &str) {
-        *self.key.lock() = name.to_string();
-    }
-
-    /// Poll only while push-to-talk can matter (PTT mode and in voice).
-    pub fn set_active(self: &Arc<Self>, on: bool) {
-        self.active.store(on, Ordering::Relaxed);
-        if on {
-            self.ensure_thread();
-        } else {
-            self.focused_down.store(false, Ordering::Relaxed);
+    /// The four keys, by name ("" = none).
+    pub fn set_keys(&self, talk: &str, mute: &str, deafen: &str, cough: &str) {
+        let parse = |s: &str| if s.is_empty() { None } else { Combo::parse(s) };
+        let keys = [parse(talk), parse(mute), parse(deafen), parse(cough)];
+        let changed = *self.keys.lock() != keys;
+        if changed {
+            *self.keys.lock() = keys;
+            // A key that changed while held mustn't stay held.
+            let mut st = self.state.lock();
+            st.focused = [false; 4];
+            st.global = [false; 4];
+            drop(st);
             self.update();
         }
     }
 
-    /// Start capturing the next pressed key (keyboard or mouse 3-5).
-    pub fn start_binding(self: &Arc<Self>) {
+    /// Poll only while the keys can matter: push-to-talk (`talk`: its mode,
+    /// in a call or a mic test) and the others (`keys`: in a call, and only
+    /// when one is set, so nobody who never set one is asked for Input
+    /// Monitoring on a Mac).
+    pub fn set_active(self: &Arc<Self>, talk: bool, keys: bool) {
+        self.talk_active.store(talk, Ordering::Relaxed);
+        self.keys_active.store(keys, Ordering::Relaxed);
+        if self.polling() {
+            self.ensure_thread();
+        }
+        if !talk {
+            let mut st = self.state.lock();
+            st.focused[Action::Talk.index()] = false;
+            st.latch.reset();
+        }
+        if !keys {
+            self.state.lock().focused = [false; 4];
+        }
+        self.update();
+    }
+
+    fn polling(&self) -> bool {
+        let keys = self.keys.lock();
+        self.talk_active.load(Ordering::Relaxed) || (self.keys_active.load(Ordering::Relaxed) && keys[1..].iter().any(Option::is_some)) || self.binding.lock().is_some()
+    }
+
+    fn active(&self, a: Action) -> bool {
+        match a {
+            Action::Talk => self.talk_active.load(Ordering::Relaxed),
+            _ => self.keys_active.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Start capturing the next pressed key (keyboard or mouse 3-5) for `action`.
+    pub fn start_binding(self: &Arc<Self>, action: Action) {
         *self.bound.lock() = None;
-        self.binding.store(true, Ordering::Relaxed);
+        *self.binding.lock() = Some(action);
         self.ensure_thread();
     }
 
     pub fn cancel_binding(&self) {
-        self.binding.store(false, Ordering::Relaxed);
+        *self.binding.lock() = None;
     }
 
-    pub fn is_binding(&self) -> bool {
-        self.binding.load(Ordering::Relaxed)
+    pub fn binding(&self) -> Option<Action> {
+        *self.binding.lock()
     }
 
     /// The key captured by `start_binding`, once.
-    pub fn take_bound(&self) -> Option<String> {
+    pub fn take_bound(&self) -> Option<(Action, String)> {
         self.bound.lock().take()
     }
 
     /// Binding fallback from the window's key events (when global polling can't see keys).
-    pub fn offer_bound(&self, name: &str) {
-        if self.binding.swap(false, Ordering::Relaxed) {
-            *self.bound.lock() = Some(name.to_string());
+    pub fn offer_bound(&self, combo: &str) {
+        if let Some(a) = self.binding.lock().take() {
+            *self.bound.lock() = Some((a, combo.to_string()));
         }
     }
 
-    /// In-window key events (fallback for Wayland / no permission).
-    pub fn set_focused_down(&self, down: bool) {
-        if self.focused_down.swap(down, Ordering::Relaxed) != down {
+    /// In-window key events (fallback for Wayland / no permission): `name`
+    /// went down (with these modifiers held) or up.
+    pub fn window_key(&self, name: &str, pressed: bool, mods: eframe::egui::Modifiers) {
+        let keys = *self.keys.lock();
+        let mut changed = false;
+        {
+            let mut st = self.state.lock();
+            for a in Action::ALL {
+                let Some(c) = keys[a.index()] else { continue };
+                if c.key.name != name {
+                    continue;
+                }
+                let down = pressed && egui_matches(&c, name, mods);
+                changed |= st.focused[a.index()] != down;
+                st.focused[a.index()] = down;
+            }
+        }
+        if changed {
             self.update();
         }
     }
 
-    /// What global push-to-talk can do here (the poller's own finding once it ran).
+    /// The window lost the focus: nothing is held in it any more.
+    pub fn window_blurred(&self) {
+        let any = std::mem::take(&mut self.state.lock().focused).iter().any(|d| *d);
+        if any {
+            self.update();
+        }
+    }
+
+    /// What global keys can do here (the poller's own finding once it ran).
     pub fn describe(&self) -> String {
         let found = self.status.lock().clone();
         if !found.is_empty() {
@@ -306,16 +682,53 @@ impl Ptt {
         } else if std::fs::read_dir("/dev/input").map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with("event") && std::fs::File::open(e.path()).is_ok())).unwrap_or(false) {
             "Works everywhere (reading /dev/input).".into()
         } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            "On Wayland, push-to-talk outside the Yap window needs read access to /dev/input: run `sudo usermod -aG input $USER`, then log out and back in.".into()
+            "On Wayland, keys outside the Yap window need read access to /dev/input: run `sudo usermod -aG input $USER`, then log out and back in. (Or use `yap --remote`.)".into()
         } else {
             "Works everywhere (X11).".into()
         }
     }
 
+    /// Work out what's held now and act on it: push-to-talk (with the latch)
+    /// and push-to-mute go straight to the gate; mute and deafen toggle on
+    /// the way down.
     fn update(&self) {
-        let down = self.active.load(Ordering::Relaxed)
-            && (self.focused_down.load(Ordering::Relaxed) || self.global_down.load(Ordering::Relaxed));
-        if self.gate.ptt_down.swap(down, Ordering::Relaxed) != down {
+        let now = Instant::now();
+        let keys = *self.keys.lock();
+        let mut toggles = Vec::new();
+        let (talk, cough, latched) = {
+            let mut st = self.state.lock();
+            for a in Action::ALL {
+                let i = a.index();
+                let level = keys[i].is_some() && self.active(a) && (st.focused[i] || st.global[i]);
+                if level && !st.level[i] {
+                    match a {
+                        Action::Talk => st.latch.press(now),
+                        Action::Mute | Action::Deafen if st.toggled[i].is_none_or(|t| now.duration_since(t) >= TOGGLE_DEBOUNCE) => {
+                            st.toggled[i] = Some(now);
+                            toggles.push(a);
+                        }
+                        _ => {}
+                    }
+                }
+                st.level[i] = level;
+            }
+            if !self.active(Action::Talk) {
+                st.latch.reset();
+            }
+            (st.level[0] || st.latch.on, st.level[3], st.latch.on)
+        };
+        let mut repaint = self.gate.ptt_down.swap(talk, Ordering::Relaxed) != talk;
+        repaint |= self.gate.cough.swap(cough, Ordering::Relaxed) != cough;
+        repaint |= self.gate.ptt_latched.swap(latched, Ordering::Relaxed) != latched;
+        if !toggles.is_empty() {
+            let f = self.on_toggle.lock().clone();
+            if let Some(f) = f {
+                for a in toggles {
+                    f(a);
+                }
+            }
+        }
+        if repaint {
             (self.repaint)();
         }
     }
@@ -331,39 +744,51 @@ impl Ptt {
     fn poll_loop(self: Arc<Self>) {
         let mut backend = backend::Backend::open();
         *self.status.lock() = backend.describe();
-        let mut prev_scan: Vec<bool> = vec![true; KEYS.len()]; // treat everything as held at start
+        let mut binder = Binder::default();
+        binder.reset();
+        let mut scan = vec![false; KEYS.len()];
         loop {
-            let active = self.active.load(Ordering::Relaxed);
-            let binding = self.binding.load(Ordering::Relaxed);
-            if !active && !binding {
-                self.global_down.store(false, Ordering::Relaxed);
+            let binding = self.binding.lock().is_some();
+            if !self.polling() {
+                let had = std::mem::take(&mut self.state.lock().global).iter().any(|d| *d);
+                if had {
+                    self.update();
+                }
                 std::thread::sleep(Duration::from_millis(150));
-                prev_scan.iter_mut().for_each(|x| *x = true);
+                binder.reset();
                 continue;
             }
             backend.refresh();
             if binding {
-                for (i, k) in KEYS.iter().enumerate() {
-                    let down = backend.is_down(k);
-                    if down && !prev_scan[i] && self.binding.swap(false, Ordering::Relaxed) {
-                        *self.bound.lock() = Some(k.name.to_string());
+                for (d, k) in scan.iter_mut().zip(KEYS) {
+                    *d = backend.is_down(k);
+                }
+                if let Some(combo) = binder.scan(&scan) {
+                    let mut b = self.binding.lock();
+                    if let Some(a) = b.take() {
+                        *self.bound.lock() = Some((a, combo));
                         (self.repaint)();
                     }
-                    prev_scan[i] = down;
                 }
             } else {
-                prev_scan.iter_mut().for_each(|x| *x = true);
+                binder.reset();
             }
-            if active {
-                let key = self.key.lock().clone();
-                let down = key_def(&key).is_some_and(|k| backend.is_down(k));
-                self.global_down.store(down, Ordering::Relaxed);
+            let keys = *self.keys.lock();
+            let global: [bool; 4] = std::array::from_fn(|i| self.active(Action::ALL[i]) && keys[i].is_some_and(|c| c.down(|k| backend.is_down(k))));
+            let changed = {
+                let mut st = self.state.lock();
+                let changed = st.global != global;
+                st.global = global;
+                changed
+            };
+            if changed {
                 self.update();
             }
             std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
+
 
 #[cfg(target_os = "windows")]
 mod backend {
@@ -568,5 +993,190 @@ mod backend {
         pub fn is_down(&self, _k: &KeyDef) -> bool {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combos_parse_and_print() {
+        // Old configs: one key.
+        assert_eq!(Combo::parse("Backquote").map(|c| c.name()).as_deref(), Some("Backquote"));
+        assert_eq!(Combo::parse("ShiftLeft").map(|c| c.name()).as_deref(), Some("ShiftLeft"));
+        // Modifiers in a fixed order, whatever order they came in.
+        assert_eq!(Combo::parse("Shift+Ctrl+KeyM").map(|c| c.name()).as_deref(), Some("Ctrl+Shift+KeyM"));
+        assert_eq!(Combo::parse("Meta+Alt+F13").map(|c| c.name()).as_deref(), Some("Alt+Meta+F13"));
+        assert!(Combo::parse("").is_none());
+        assert!(Combo::parse("Hyper+KeyM").is_none());
+        assert!(Combo::parse("Ctrl+NotAKey").is_none());
+        assert_eq!(key_label(""), "None");
+        assert_eq!(key_label("Backquote"), "` (backtick)");
+        assert_eq!(key_label("Ctrl+Shift+KeyM"), "Ctrl+Shift+M");
+        if cfg!(target_os = "macos") {
+            assert_eq!(key_label("Meta+Shift+KeyD"), "⌘+Shift+D");
+        }
+    }
+
+    #[test]
+    fn a_combo_is_held_with_either_side_and_extra_modifiers() {
+        let c = Combo::parse("Ctrl+Shift+KeyM").unwrap();
+        let held = |names: &'static [&'static str]| move |k: &KeyDef| names.contains(&k.name);
+        assert!(c.down(held(&["ControlLeft", "ShiftRight", "KeyM"])));
+        assert!(c.down(held(&["ControlRight", "ShiftLeft", "AltLeft", "KeyM"])), "an extra modifier doesn't stop it");
+        assert!(!c.down(held(&["ControlLeft", "KeyM"])), "Shift is missing");
+        assert!(!c.down(held(&["ControlLeft", "ShiftLeft"])), "M isn't down");
+        let ptt = Combo::parse("Backquote").unwrap();
+        assert!(ptt.down(held(&["ShiftLeft", "Backquote"])), "push-to-talk while running (Shift held)");
+    }
+
+    #[test]
+    fn in_window_events_match_combos() {
+        use eframe::egui::Modifiers;
+        let c = Combo::parse("Ctrl+Shift+KeyM").unwrap();
+        assert!(egui_matches(&c, "KeyM", Modifiers { ctrl: true, shift: true, ..Default::default() }));
+        assert!(!egui_matches(&c, "KeyM", Modifiers { ctrl: true, ..Default::default() }));
+        assert!(!egui_matches(&c, "KeyN", Modifiers { ctrl: true, shift: true, ..Default::default() }));
+        assert_eq!(combo_from_egui(eframe::egui::Key::D, Modifiers { ctrl: true, shift: true, ..Default::default() }).as_deref(), Some("Ctrl+Shift+KeyD"));
+        assert_eq!(combo_from_egui(eframe::egui::Key::F13, Modifiers::default()).as_deref(), Some("F13"));
+    }
+
+    fn scan_of(names: &[&str]) -> Vec<bool> {
+        KEYS.iter().map(|k| names.contains(&k.name)).collect()
+    }
+
+    #[test]
+    fn binding_takes_a_key_with_its_modifiers_or_a_modifier_alone() {
+        let mut b = Binder::default();
+        b.reset();
+        // Something held when binding starts doesn't count.
+        assert_eq!(b.scan(&scan_of(&["KeyA"])), None);
+        assert_eq!(b.scan(&scan_of(&[])), None);
+        // Ctrl, then Shift, then M: Ctrl+Shift+M at M's press.
+        assert_eq!(b.scan(&scan_of(&["ControlLeft"])), None);
+        assert_eq!(b.scan(&scan_of(&["ControlLeft", "ShiftLeft"])), None);
+        assert_eq!(b.scan(&scan_of(&["ControlLeft", "ShiftLeft", "KeyM"])).as_deref(), Some("Ctrl+Shift+KeyM"));
+        // A modifier on its own: bound when it's let go.
+        let mut b = Binder::default();
+        b.reset();
+        b.scan(&scan_of(&[]));
+        assert_eq!(b.scan(&scan_of(&["ShiftLeft"])), None);
+        assert_eq!(b.scan(&scan_of(&[])).as_deref(), Some("ShiftLeft"));
+        // Two modifiers let go without a key: nothing (ambiguous).
+        let mut b = Binder::default();
+        b.reset();
+        b.scan(&scan_of(&[]));
+        b.scan(&scan_of(&["ControlLeft"]));
+        b.scan(&scan_of(&["ControlLeft", "AltLeft"]));
+        assert_eq!(b.scan(&scan_of(&["ControlLeft"])), None);
+        assert_eq!(b.scan(&scan_of(&[])), None);
+        // A mouse button, plainly.
+        assert_eq!(b.scan(&scan_of(&["Mouse4"])).as_deref(), Some("Mouse4"));
+    }
+
+    #[test]
+    fn binding_refuses_a_key_thats_taken() {
+        let mut c = crate::config::Config::default();
+        assert!(bind(&mut c, Action::Mute, "Ctrl+Shift+KeyM").is_ok());
+        assert_eq!(c.mute_key, "Ctrl+Shift+KeyM");
+        let err = bind(&mut c, Action::Deafen, "Shift+Ctrl+KeyM").unwrap_err();
+        assert!(err.ends_with("is already your mute key."), "{err}");
+        assert!(bind(&mut c, Action::Cough, "Backquote").unwrap_err().ends_with("is already your push-to-talk key."));
+        assert!(bind(&mut c, Action::Talk, "").is_err(), "push-to-talk keeps a key");
+        assert!(bind(&mut c, Action::Mute, "").is_ok());
+        assert_eq!(c.mute_key, "");
+        assert!(bind(&mut c, Action::Deafen, "Ctrl+Shift+KeyM").is_ok(), "free again");
+    }
+
+    #[test]
+    fn window_shortcuts_step_aside_for_a_global_key() {
+        let mut c = crate::config::Config::default();
+        assert!(shortcut_free(&c, MUTE_SHORTCUT) && shortcut_free(&c, DEAFEN_SHORTCUT));
+        c.deafen_key = MUTE_SHORTCUT.into();
+        assert!(!shortcut_free(&c, MUTE_SHORTCUT), "a global key on the same keys: the window's shortcut stands aside");
+        assert!(shortcut_free(&c, DEAFEN_SHORTCUT));
+    }
+
+    #[test]
+    fn double_tap_latches_and_the_next_press_lets_go() {
+        let t0 = Instant::now();
+        let ms = |v: u64| t0 + Duration::from_millis(v);
+        let mut l = Latch::default();
+        l.press(ms(0));
+        assert!(!l.on, "one press is an ordinary push-to-talk");
+        l.press(ms(300));
+        assert!(l.on, "a second within 400 ms latches it");
+        l.press(ms(2000));
+        assert!(!l.on, "the next press unlatches");
+        l.press(ms(2200));
+        assert!(!l.on, "…and that press isn't the first of another double-tap");
+        let mut slow = Latch::default();
+        slow.press(ms(0));
+        slow.press(ms(500));
+        assert!(!slow.on, "500 ms apart: two ordinary presses");
+        slow.press(ms(800));
+        assert!(slow.on, "but the 2nd and 3rd were close enough");
+    }
+
+    /// The keys, end to end through the in-window path: push-to-talk holds,
+    /// double-taps and lets go; mute and deafen toggle once per press, and
+    /// only in a call; push-to-mute holds the gate's cough switch.
+    #[test]
+    fn keys_drive_the_gate_and_the_toggles() {
+        use eframe::egui::Modifiers;
+        let gate = Arc::new(crate::audio::Gate::new());
+        let toggles = Arc::new(Mutex::new(Vec::new()));
+        let p = Ptt::new(gate.clone(), Arc::new(|| {}));
+        let t = toggles.clone();
+        p.set_on_toggle(Arc::new(move |a| t.lock().push(a)));
+        p.set_keys("Backquote", "Ctrl+Shift+KeyM", "F13", "KeyC");
+        let none = Modifiers::default();
+        let cs = Modifiers { ctrl: true, shift: true, ..Default::default() };
+        // Not in a call: nothing happens.
+        p.window_key("KeyM", true, cs);
+        p.window_key("KeyM", false, cs);
+        assert!(toggles.lock().is_empty());
+        // In a call, push-to-talk mode.
+        p.talk_active.store(true, Ordering::Relaxed);
+        p.keys_active.store(true, Ordering::Relaxed);
+        p.window_key("Backquote", true, none);
+        assert!(gate.ptt_down.load(Ordering::Relaxed));
+        p.window_key("Backquote", false, none);
+        assert!(!gate.ptt_down.load(Ordering::Relaxed));
+        p.window_key("Backquote", true, none);
+        p.window_key("Backquote", false, none);
+        assert!(gate.ptt_down.load(Ordering::Relaxed) && gate.ptt_latched.load(Ordering::Relaxed), "double-tapped: live");
+        p.window_key("Backquote", true, none);
+        p.window_key("Backquote", false, none);
+        assert!(!gate.ptt_down.load(Ordering::Relaxed) && !gate.ptt_latched.load(Ordering::Relaxed), "tapped again: off");
+        // Mute: Ctrl+Shift+M toggles once per press; M alone doesn't.
+        p.window_key("KeyM", true, none);
+        p.window_key("KeyM", false, none);
+        p.window_key("KeyM", true, cs);
+        p.window_key("KeyM", true, cs); // (a repeat)
+        p.window_key("KeyM", false, cs);
+        p.window_key("F13", true, none);
+        p.window_key("F13", false, none);
+        assert_eq!(*toggles.lock(), vec![Action::Mute, Action::Deafen]);
+        // The same quick tap seen twice (the poller, then the window): one toggle.
+        p.window_key("F13", true, none);
+        p.window_key("F13", false, none);
+        assert_eq!(*toggles.lock(), vec![Action::Mute, Action::Deafen], "within 250 ms: the same press");
+        std::thread::sleep(Duration::from_millis(260));
+        p.window_key("F13", true, none);
+        p.window_key("F13", false, none);
+        assert_eq!(*toggles.lock(), vec![Action::Mute, Action::Deafen, Action::Deafen], "a real second press");
+        // Push-to-mute: held.
+        p.window_key("KeyC", true, none);
+        assert!(gate.cough.load(Ordering::Relaxed));
+        p.window_key("KeyC", false, none);
+        assert!(!gate.cough.load(Ordering::Relaxed));
+        // Out of the call, a held key lets go.
+        p.window_key("KeyC", true, none);
+        p.talk_active.store(false, Ordering::Relaxed);
+        p.keys_active.store(false, Ordering::Relaxed);
+        p.update();
+        assert!(!gate.cough.load(Ordering::Relaxed));
     }
 }

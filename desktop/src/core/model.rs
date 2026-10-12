@@ -137,6 +137,12 @@ pub struct Model {
     pub resuming: bool,
     /// The mic has sent nothing but digital silence for 5 s while unmuted.
     pub mic_silent: bool,
+    /// Most people in the call lose more than 3 % of your audio (the middle
+    /// of what they report): "Your connection is dropping some of your audio".
+    pub own_weak: Option<f32>,
+    /// "You're muted" by the Mute button since then (you talked while muted);
+    /// true: the first time on this device, so say what the blip means.
+    pub muted_nudge: Option<(Instant, bool)>,
     pub hear: HearState,
     pub toasts: VecDeque<(String, Instant)>,
     pub scroll: Option<ScrollHint>,
@@ -214,6 +220,8 @@ pub struct Model {
     pub watch: Option<crate::protocol::WatchState>,
     /// Space voice: how loud each session is by distance or room (1 = normal).
     pub proximity: HashMap<String, f32>,
+    /// Space: where each voice comes from (sid → −1 … 1), when not the middle.
+    pub pan: HashMap<String, f32>,
     // ── Extras (v0.36) ──
     /// Soundboard clips and the uploaded chimes people use.
     pub sounds: Vec<Sound>,
@@ -479,6 +487,8 @@ impl Model {
             hints: HashMap::new(),
             resuming: false,
             mic_silent: false,
+            muted_nudge: None,
+            own_weak: None,
             hear: HearState::Idle,
             toasts: VecDeque::new(),
             scroll: None,
@@ -522,6 +532,7 @@ impl Model {
             space: SpaceModel::default(),
             watch: None,
             proximity: HashMap::new(),
+            pan: HashMap::new(),
             sounds: Vec::new(),
             last_sound: None,
             hangs: Vec::new(),

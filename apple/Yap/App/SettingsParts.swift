@@ -48,9 +48,9 @@ enum SettingsText {
     static let clipsNote = "Short clips anyone in a voice channel can play for everyone in it: two at most at once, never while you're deafened or from someone you've turned all the way down."
 
     static let sensitivity = "Sensitivity"
-    static let pushToTalkNote = "Push to talk adds a hold-to-talk button to the call."
+    static let pushToTalkNote = "Push to talk adds a hold-to-talk button to the call. Double-tap it to stay live; tap it again to stop."
     static let quality = "Quality"
-    static let qualityNote = "Voice goes straight between you and your friends, so better quality costs nothing. A call uses the lower of the two people's settings."
+    static let qualityNote = "Voice goes straight between you and your friends, so better quality costs the server nothing. Your voice goes out at your setting, and each friend's at theirs."
 
     #if os(iOS)
     static let deviceNote = "While Yap is open, or in a call in the background, @mentions, pings and hangs show as notifications here, with a chime."

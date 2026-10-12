@@ -53,6 +53,11 @@ export const sounds = {
   ping: () => play([783.99, 1046.5, 1318.5, 1567.98], { step: 0.09, length: 0.22, volume: 0.13, type: 'square' }),
   mention: () => play([987.77, 1318.5], { step: 0.08, length: 0.16, volume: 0.09, type: 'triangle' }),
   unmute: () => play([587.33], { length: 0.08, volume: 0.05, type: 'triangle' }),
+  // Push-to-talk opening and closing: a quiet tick each way, for your ears only (its own setting).
+  pttOn: () => play([1318.51], { length: 0.03, volume: 0.035, type: 'triangle' }, true),
+  pttOff: () => play([987.77], { length: 0.03, volume: 0.03, type: 'triangle' }, true),
+  // Talking while muted: soft and low, two quick notes (its own setting, so it plays even with the others off).
+  mutedTalk: () => play([329.63, 329.63], { step: 0.11, length: 0.07, volume: 0.035, type: 'sine' }, true),
 };
 
 /** Built-in join chimes: identical notes in every Yap client (PROTOCOL.md › Join chimes). */
