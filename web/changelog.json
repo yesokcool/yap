@@ -1,6 +1,14 @@
 {
-  "current": "0.46.0",
+  "current": "0.47.0",
   "releases": [
+    {
+      "version": "0.47.0",
+      "date": "2026-10-12",
+      "title": "A simpler icon",
+      "items": [
+        "A simpler Yap icon: the pixel speech bubble on teal, the same on the web, iPhone, Mac and desktop."
+      ]
+    },
     {
       "version": "0.46.0",
       "date": "2026-10-12",
@@ -875,6 +883,13 @@
     }
   ],
   "highlights": [
+    {
+      "date": "2026-10-12",
+      "emoji": "💬",
+      "title": "A simpler Yap icon",
+      "text": "Yap has one icon everywhere now: the little pixel speech bubble on teal. It shows on the web and in browser tabs right away, and on the iPhone, Mac and desktop apps with their next update.",
+      "where": "Everywhere"
+    },
     {
       "date": "2026-10-08",
       "emoji": "🧹",

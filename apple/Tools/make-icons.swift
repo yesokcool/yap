@@ -1,6 +1,8 @@
-// Draws Yap's app icons (iOS full-bleed + macOS, App Store + Dev) into
-// Yap/Assets.xcassets, in the Windows 98 / AIM look: a gray beveled window
-// with a navy title bar and a white sunken well holding a speech bubble.
+// Draws every raster Yap icon from one picture, the pixel speech bubble with
+// sound bars (web/icon.svg) on the teal desktop:
+//   - the iPhone + Mac app icons (App Store + Dev) and the in-app YapIcon in Yap/Assets.xcassets;
+//   - the web app's icon-192.png, icon-512.png and apple-touch-icon.png.
+// The desktop app draws the same pixels itself (desktop/src/ui/mod.rs › app_icon).
 //   swift apple/Tools/make-icons.swift
 import AppKit
 import CoreText
@@ -18,22 +20,6 @@ func font(_ size: CGFloat) -> CTFont {
     return (CTFontCopyFamilyName(tahoma) as String) == "Tahoma" ? tahoma : CTFontCreateWithName("Helvetica-Bold" as CFString, size, nil)
 }
 
-/// Two-ring bevel inside `r`, `t` = ring thickness.
-func bevel(_ ctx: CGContext, _ r: CGRect, _ t: CGFloat, raised: Bool) {
-    let rings: [(CGColor, CGColor)] = raised
-        ? [(color(0xffffff), color(0x000000)), (color(0xdfdfdf), color(0x808080))]
-        : [(color(0x808080), color(0xffffff)), (color(0x000000), color(0xdfdfdf))]
-    for (i, (tl, br)) in rings.enumerated() {
-        let rr = r.insetBy(dx: CGFloat(i) * t, dy: CGFloat(i) * t)
-        ctx.setFillColor(br)
-        ctx.fill(CGRect(x: rr.minX, y: rr.minY, width: rr.width, height: t))     // bottom (CG is y-up)
-        ctx.fill(CGRect(x: rr.maxX - t, y: rr.minY, width: t, height: rr.height)) // right
-        ctx.setFillColor(tl)
-        ctx.fill(CGRect(x: rr.minX, y: rr.maxY - t, width: rr.width - t, height: t)) // top
-        ctx.fill(CGRect(x: rr.minX, y: rr.minY + t, width: t, height: rr.height - t)) // left
-    }
-}
-
 func text(_ ctx: CGContext, _ string: String, size: CGFloat, color c: CGColor, at point: CGPoint, center: Bool = false) {
     let line = CTLineCreateWithAttributedString(NSAttributedString(string: string, attributes: [
         NSAttributedString.Key(kCTFontAttributeName as String): font(size),
@@ -44,76 +30,60 @@ func text(_ ctx: CGContext, _ string: String, size: CGFloat, color c: CGColor, a
     CTLineDraw(line, ctx)
 }
 
-func draw(size: Int, dev: Bool, mac: Bool) -> Data {
+/// Yap's icon: the pixel speech bubble with sound bars from `web/icon.svg`, on the teal desktop.
+/// Drawn on that file's 32-unit grid (y down, like the SVG), so every copy is the same picture.
+let bubbleRects: [(x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat, color: UInt32, alpha: CGFloat)] = [
+    (4, 6, 28, 19, 0x000000, 0.35),  // drop shadow
+    (2, 4, 28, 19, 0x000000, 1),     // outline
+    (4, 6, 24, 15, 0xffffff, 1),     // inside
+    (4, 6, 24, 2, 0xdfdfdf, 1),      // top shade
+    (8, 23, 8, 2, 0x000000, 1),      // tail
+    (8, 25, 5, 2, 0x000000, 1),
+    (8, 27, 2, 2, 0x000000, 1),
+    (10, 21, 4, 2, 0xffffff, 1),
+    (10, 23, 2, 2, 0xffffff, 1),
+    (7, 12, 2, 3, 0x000080, 1),      // sound bars
+    (11, 10, 2, 7, 0x000080, 1),
+    (15, 8, 2, 11, 0x000080, 1),
+    (19, 10, 2, 7, 0x000080, 1),
+    (23, 12, 2, 3, 0x000080, 1),
+]
+
+/// Fills `rect` (in 1024 space, y down) with the bubble, its 30x25-unit drawing centered.
+func drawBubble(_ ctx: CGContext, in rect: CGRect) {
+    let unit = min(rect.width / 30, rect.height / 25)
+    let ox = rect.midX - 17 * unit, oy = rect.midY - 16.5 * unit
+    for r in bubbleRects {
+        ctx.setFillColor(color(r.color).copy(alpha: r.alpha)!)
+        // CG is y-up: flip the SVG's y.
+        ctx.fill(CGRect(x: ox + r.x * unit, y: 1024 - (oy + (r.y + r.h) * unit), width: r.w * unit, height: r.h * unit))
+    }
+}
+
+/// `web`: the bubble a little smaller, so a circular "maskable" crop never cuts it.
+func draw(size: Int, dev: Bool, mac: Bool, web: Bool = false) -> Data {
     let s = CGFloat(size)
-    // iOS icons must be opaque (App Store Connect rejects an alpha channel);
-    // the Mac's keep theirs (the window floats on a transparent margin).
+    // iOS and web icons must be opaque (App Store Connect rejects an alpha channel);
+    // the Mac's keep theirs (the tile floats on a transparent margin).
     let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
                         space: CGColorSpace(name: CGColorSpace.sRGB)!,
                         bitmapInfo: (mac ? CGImageAlphaInfo.premultipliedLast : CGImageAlphaInfo.noneSkipLast).rawValue)!
     ctx.scaleBy(x: s / 1024, y: s / 1024)
     ctx.setShouldAntialias(false)
-    // iOS: the window fills the icon on a teal desktop; Mac: the window alone with a margin.
-    let window = mac ? CGRect(x: 92, y: 120, width: 840, height: 784) : CGRect(x: 72, y: 96, width: 880, height: 832)
-    if !mac {
+    if mac {
+        // macOS: a rounded teal tile with the standard margin.
+        let tile = CGRect(x: 100, y: 100, width: 824, height: 824)
+        ctx.setShouldAntialias(true)
+        ctx.addPath(CGPath(roundedRect: tile, cornerWidth: 185, cornerHeight: 185, transform: nil))
+        ctx.setFillColor(color(0x008080))
+        ctx.fillPath()
+        // Hard pixel edges blur into a blob at Finder sizes (16-64 px); smooth those.
+        ctx.setShouldAntialias(size < 128)
+        drawBubble(ctx, in: CGRect(x: 222, y: 252, width: 580, height: 520))
+    } else {
         ctx.setFillColor(color(0x008080))
         ctx.fill(CGRect(x: 0, y: 0, width: 1024, height: 1024))
-    }
-    let t: CGFloat = 12
-    ctx.setFillColor(color(0xc0c0c0))
-    ctx.fill(window)
-    bevel(ctx, window, t, raised: true)
-
-    // Title bar: navy → light blue, "Yap", a close button.
-    let bar = CGRect(x: window.minX + 3 * t, y: window.maxY - 3 * t - 150, width: window.width - 6 * t, height: 150)
-    let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: [color(0x000080), color(0x1084d0)] as CFArray, locations: [0, 1])!
-    ctx.saveGState()
-    ctx.clip(to: bar)
-    ctx.drawLinearGradient(gradient, start: CGPoint(x: bar.minX, y: 0), end: CGPoint(x: bar.maxX, y: 0), options: [])
-    ctx.restoreGState()
-    ctx.setShouldAntialias(true)
-    text(ctx, "Yap", size: 104, color: color(0xffffff), at: CGPoint(x: bar.minX + 34, y: bar.minY + 34))
-    ctx.setShouldAntialias(false)
-    let close = CGRect(x: bar.maxX - 128, y: bar.minY + 22, width: 106, height: 106)
-    ctx.setFillColor(color(0xc0c0c0))
-    ctx.fill(close)
-    bevel(ctx, close, 8, raised: true)
-    ctx.setStrokeColor(color(0x000000))
-    ctx.setLineWidth(16)
-    ctx.move(to: CGPoint(x: close.minX + 30, y: close.minY + 30)); ctx.addLine(to: CGPoint(x: close.maxX - 30, y: close.maxY - 30))
-    ctx.move(to: CGPoint(x: close.minX + 30, y: close.maxY - 30)); ctx.addLine(to: CGPoint(x: close.maxX - 30, y: close.minY + 30))
-    ctx.strokePath()
-
-    // The white sunken well with a chat bubble.
-    let well = CGRect(x: window.minX + 3 * t + 8, y: window.minY + 3 * t + 8, width: window.width - 6 * t - 16, height: bar.minY - window.minY - 3 * t - 24)
-    ctx.setFillColor(color(0xffffff))
-    ctx.fill(well)
-    bevel(ctx, well, t, raised: false)
-
-    ctx.setShouldAntialias(true)
-    let bubble = CGRect(x: well.minX + 92, y: well.minY + 150, width: well.width - 184, height: well.height - 260)
-    let path = CGMutablePath()
-    path.addRoundedRect(in: bubble, cornerWidth: 70, cornerHeight: 70)
-    path.move(to: CGPoint(x: bubble.minX + 110, y: bubble.minY + 2))
-    path.addLine(to: CGPoint(x: bubble.minX + 70, y: bubble.minY - 110))
-    path.addLine(to: CGPoint(x: bubble.minX + 250, y: bubble.minY + 2))
-    ctx.addPath(path)
-    ctx.setFillColor(color(0xffffe1))
-    ctx.fillPath()
-    ctx.addPath(path)
-    ctx.setStrokeColor(color(0x000000))
-    ctx.setLineWidth(18)
-    ctx.setLineJoin(.round)
-    ctx.strokePath()
-    // Cover the seam between bubble and tail.
-    ctx.setFillColor(color(0xffffe1))
-    ctx.fill(CGRect(x: bubble.minX + 118, y: bubble.minY - 6, width: 120, height: 18))
-    // "..." typing dots in navy.
-    for i in 0..<3 {
-        let d: CGFloat = 70
-        let x = bubble.midX - d * 1.5 - 40 + CGFloat(i) * (d + 40)
-        ctx.setFillColor(color(0x000080))
-        ctx.fill(CGRect(x: x, y: bubble.midY - d / 2, width: d, height: d))
+        drawBubble(ctx, in: web ? CGRect(x: 212, y: 262, width: 600, height: 500) : CGRect(x: 152, y: 212, width: 720, height: 600))
     }
 
     if dev {
@@ -122,6 +92,7 @@ func draw(size: Int, dev: Bool, mac: Bool) -> Data {
         ctx.fill(band)
         ctx.setFillColor(color(0x000000))
         ctx.fill(CGRect(x: 0, y: band.maxY, width: 1024, height: 10))
+        ctx.setShouldAntialias(true)
         text(ctx, "DEV", size: 140, color: color(0x000000), at: CGPoint(x: 512, y: band.midY), center: true)
     }
 
@@ -146,3 +117,14 @@ for dev in [false, true] {
     try JSONSerialization.data(withJSONObject: contents, options: [.prettyPrinted, .sortedKeys]).write(to: dir.appending(path: "Contents.json"))
     print("wrote \(name)")
 }
+
+// The in-app icon (DebugLaunch) is the iOS icon.
+try draw(size: 1024, dev: false, mac: false).write(to: assets.appending(path: "YapIcon.imageset/yap-icon.png"))
+print("wrote YapIcon")
+
+// The web app (repo root is three levels up from Yap/Assets.xcassets).
+let web = assets.appending(path: "../../../web").standardized
+try draw(size: 192, dev: false, mac: false, web: true).write(to: web.appending(path: "icon-192.png"))
+try draw(size: 512, dev: false, mac: false, web: true).write(to: web.appending(path: "icon-512.png"))
+try draw(size: 180, dev: false, mac: false).write(to: web.appending(path: "apple-touch-icon.png"))
+print("wrote web icons")

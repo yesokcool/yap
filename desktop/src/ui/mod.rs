@@ -925,31 +925,37 @@ fn quiet_shots(_shot: bool) -> Option<eframe::EventLoopBuilderHook> {
     None
 }
 
-/// The window icon: a white speech bubble with a black outline on a
-/// title-bar-blue square (drawn, no assets).
+/// The window icon: Yap's pixel speech bubble with sound bars on the teal
+/// desktop, the same picture as `web/icon.svg` and the app icons (drawn, no assets).
 fn app_icon() -> egui::IconData {
-    let n = 64usize;
-    let mut rgba = vec![0u8; n * n * 4];
-    let (a, b) = ([0x00 as f32, 0x00 as f32, 0x80 as f32], [0x10 as f32, 0x84 as f32, 0xd0 as f32]);
-    let bubble = |fx: f32, fy: f32, grow: f32| -> bool {
-        let (ex, ey) = ((fx - 32.0) / (21.0 + grow), (fy - 28.0) / (16.0 + grow));
-        let tail = fx > 16.0 - grow && fx < 30.0 + grow && fy > 36.0 && fy < 53.0 + grow && (fy - 36.0) < (30.0 + grow - fx) * 1.2;
-        ex * ex + ey * ey <= 1.0 || tail
-    };
-    for y in 0..n {
-        for x in 0..n {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let i = (y * n + x) * 4;
-            let px = if bubble(fx, fy, 0.0) {
-                [255, 255, 255, 255]
-            } else if bubble(fx, fy, 3.0) {
-                [0, 0, 0, 255]
-            } else {
-                let t = fx / n as f32;
-                let c = |k: usize| (a[k] + (b[k] - a[k]) * t) as u8;
-                [c(0), c(1), c(2), 255]
-            };
-            rgba[i..i + 4].copy_from_slice(&px);
+    // (x, y, w, h, rgb, alpha) on web/icon.svg's 32-unit grid, drawn in order.
+    const RECTS: [(usize, usize, usize, usize, [u8; 3], f32); 14] = [
+        (4, 6, 28, 19, [0x00, 0x00, 0x00], 0.35), // drop shadow
+        (2, 4, 28, 19, [0x00, 0x00, 0x00], 1.0),  // outline
+        (4, 6, 24, 15, [0xff, 0xff, 0xff], 1.0),  // inside
+        (4, 6, 24, 2, [0xdf, 0xdf, 0xdf], 1.0),   // top shade
+        (8, 23, 8, 2, [0x00, 0x00, 0x00], 1.0),   // tail
+        (8, 25, 5, 2, [0x00, 0x00, 0x00], 1.0),
+        (8, 27, 2, 2, [0x00, 0x00, 0x00], 1.0),
+        (10, 21, 4, 2, [0xff, 0xff, 0xff], 1.0),
+        (10, 23, 2, 2, [0xff, 0xff, 0xff], 1.0),
+        (7, 12, 2, 3, [0x00, 0x00, 0x80], 1.0),   // sound bars
+        (11, 10, 2, 7, [0x00, 0x00, 0x80], 1.0),
+        (15, 8, 2, 11, [0x00, 0x00, 0x80], 1.0),
+        (19, 10, 2, 7, [0x00, 0x00, 0x80], 1.0),
+        (23, 12, 2, 3, [0x00, 0x00, 0x80], 1.0),
+    ];
+    // 72 px, 2 px per unit, the 30x25-unit drawing centered on teal.
+    let (n, unit, ox, oy) = (72usize, 2usize, 2usize, 3usize);
+    let mut rgba = [0x00, 0x80, 0x80, 0xff].repeat(n * n);
+    for (x, y, w, h, c, a) in RECTS {
+        for py in oy + y * unit..oy + (y + h) * unit {
+            for px in ox + x * unit..ox + (x + w) * unit {
+                let i = (py * n + px) * 4;
+                for k in 0..3 {
+                    rgba[i + k] = (rgba[i + k] as f32 * (1.0 - a) + c[k] as f32 * a).round() as u8;
+                }
+            }
         }
     }
     egui::IconData { rgba, width: n as u32, height: n as u32 }
