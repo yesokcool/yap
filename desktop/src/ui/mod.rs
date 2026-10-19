@@ -925,36 +925,36 @@ fn quiet_shots(_shot: bool) -> Option<eframe::EventLoopBuilderHook> {
     None
 }
 
-/// The window icon: Yap's pixel speech bubble with sound bars on the teal
-/// desktop, the same picture as `web/icon.svg` and the app icons (drawn, no assets).
+/// The window icon: Yap's pixel speech bubble (Pixelarticons' "message-text", MIT;
+/// README › Credits) in white on the teal desktop, the same picture as `web/icon.svg`
+/// and the app icons (drawn, no assets).
 fn app_icon() -> egui::IconData {
-    // (x, y, w, h, rgb, alpha) on web/icon.svg's 32-unit grid, drawn in order.
-    const RECTS: [(usize, usize, usize, usize, [u8; 3], f32); 14] = [
-        (4, 6, 28, 19, [0x00, 0x00, 0x00], 0.35), // drop shadow
-        (2, 4, 28, 19, [0x00, 0x00, 0x00], 1.0),  // outline
-        (4, 6, 24, 15, [0xff, 0xff, 0xff], 1.0),  // inside
-        (4, 6, 24, 2, [0xdf, 0xdf, 0xdf], 1.0),   // top shade
-        (8, 23, 8, 2, [0x00, 0x00, 0x00], 1.0),   // tail
-        (8, 25, 5, 2, [0x00, 0x00, 0x00], 1.0),
-        (8, 27, 2, 2, [0x00, 0x00, 0x00], 1.0),
-        (10, 21, 4, 2, [0xff, 0xff, 0xff], 1.0),
-        (10, 23, 2, 2, [0xff, 0xff, 0xff], 1.0),
-        (7, 12, 2, 3, [0x00, 0x00, 0x80], 1.0),   // sound bars
-        (11, 10, 2, 7, [0x00, 0x00, 0x80], 1.0),
-        (15, 8, 2, 11, [0x00, 0x00, 0x80], 1.0),
-        (19, 10, 2, 7, [0x00, 0x00, 0x80], 1.0),
-        (23, 12, 2, 3, [0x00, 0x00, 0x80], 1.0),
+    // (x, y, w, h) on the glyph's 24-unit grid; the drawing spans 2..22.
+    const RECTS: [(usize, usize, usize, usize); 7] = [
+        (2, 2, 20, 2),  // top
+        (2, 4, 2, 18),  // left, down into the tail
+        (20, 4, 2, 14), // right
+        (6, 16, 14, 2), // bottom
+        (4, 18, 2, 2),  // the tail's step
+        (6, 7, 12, 2),  // text lines
+        (6, 11, 8, 2),
     ];
-    // 72 px, 2 px per unit, the 30x25-unit drawing centered on teal.
-    let (n, unit, ox, oy) = (72usize, 2usize, 2usize, 3usize);
-    let mut rgba = [0x00, 0x80, 0x80, 0xff].repeat(n * n);
-    for (x, y, w, h, c, a) in RECTS {
-        for py in oy + y * unit..oy + (y + h) * unit {
-            for px in ox + x * unit..ox + (x + w) * unit {
+    // 72 px, 2 px per unit: the 20-unit drawing is 40 px, centered (grid origin at 12 px).
+    let (n, unit, o) = (72usize, 2usize, 12usize);
+    let (top, bottom) = ([0x0bu8, 0x8f, 0x8f], [0x00u8, 0x6b, 0x6b]);
+    let mut rgba = Vec::with_capacity(n * n * 4);
+    for y in 0..n {
+        let t = y as f32 / (n - 1) as f32;
+        let row: [u8; 3] = std::array::from_fn(|k| (top[k] as f32 + (bottom[k] as f32 - top[k] as f32) * t).round() as u8);
+        for _ in 0..n {
+            rgba.extend_from_slice(&[row[0], row[1], row[2], 0xff]);
+        }
+    }
+    for (x, y, w, h) in RECTS {
+        for py in o + y * unit..o + (y + h) * unit {
+            for px in o + x * unit..o + (x + w) * unit {
                 let i = (py * n + px) * 4;
-                for k in 0..3 {
-                    rgba[i + k] = (rgba[i + k] as f32 * (1.0 - a) + c[k] as f32 * a).round() as u8;
-                }
+                rgba[i..i + 3].copy_from_slice(&[0xff, 0xff, 0xff]);
             }
         }
     }

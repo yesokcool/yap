@@ -62,6 +62,10 @@ import UIKit
 ///   YAP_DEMO_CALL_ENDED=soundTaken | soundFailed | stopped | offline | channelGone
 ///                                                  once in the call (YAP_AUTOJOIN + YAP_SYNTHETIC_AUDIO), end it as
 ///                                                  if that had happened off screen: you leave, and Yap says why
+///   YAP_DEMO_LIVE_CALL=1 | muted,deafened,leaving,more,stale
+///                                                  iPhone: a pretend call's Live Activity (no server needed),
+///                                                  shown by iOS as an alert 8 s later (the island opens, or a
+///                                                  banner): screenshots of it without touching the simulator
 ///   YAP_DEMO_BURST=N                               once online, send N numbered messages to the open channel at once
 ///   YAP_DEMO_SHARE=1                               once in the call, share a moving test card (the sharing UI
 ///                                                  on iPhone without the broadcast extension; nothing is captured)
@@ -116,6 +120,7 @@ struct DebugLaunch {
     var demoCallEnded: BackgroundCall.Reason?
     var demoBurst: Int?
     var demoShare = false
+    var demoLiveCall: String?
 
     var usesMemoryStore: Bool { invite != nil }
     var isScripted: Bool { invite != nil }
@@ -164,6 +169,7 @@ struct DebugLaunch {
         launch.demoCallEnded = env["YAP_DEMO_CALL_ENDED"].flatMap(BackgroundCall.Reason.init(rawValue:))
         launch.demoBurst = env["YAP_DEMO_BURST"].flatMap(Int.init)
         launch.demoShare = env["YAP_DEMO_SHARE"] == "1"
+        launch.demoLiveCall = env["YAP_DEMO_LIVE_CALL"]
         return launch
         #else
         return DebugLaunch()
@@ -280,6 +286,9 @@ struct DebugLaunch {
     func apply(to model: AppModel) {
         #if DEBUG
         if let appearance { UserDefaults.standard.set(appearance, forKey: Appearance.storageKey) }
+        #if os(iOS)
+        if let demoLiveCall { model.demoLiveCall(demoLiveCall) }
+        #endif
         guard let invite else { return }
         model.client.useInvite(invite)
         if fakeKlipy { FakeKlipy.install() }

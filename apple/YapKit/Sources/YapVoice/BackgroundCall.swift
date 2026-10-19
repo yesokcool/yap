@@ -4,8 +4,8 @@ import Foundation
 /// `audio` background mode running only while its sound runs; the call's
 /// anchor (`LevelMonitor`) keeps it running through the call, but a few
 /// things are still outside Yap's hands: a phone call, an alarm or another
-/// app can take the sound, iOS may refuse to give it back, and iOS can still
-/// stop Yap. When that ends the call, the person should hear it from Yap
+/// app can take the sound, the sound may not start again afterwards, and iOS
+/// can still stop Yap. When that ends the call, the person should hear it from Yap
 /// (a notification "You left Lounge" with the reason; one tap brings them
 /// back) instead of finding out from their friends.
 ///
@@ -17,7 +17,7 @@ public struct BackgroundCall: Sendable, Equatable {
     public enum Reason: String, Sendable, Equatable, CaseIterable {
         /// A phone call, an alarm or another app took the sound and kept it.
         case soundTaken
-        /// iOS didn't give the sound back after an interruption.
+        /// The sound stopped and wouldn't start again (`VoiceController` kept trying).
         case soundFailed
         /// iOS stopped Yap in the background (we find out afterwards).
         case stopped
@@ -30,7 +30,7 @@ public struct BackgroundCall: Sendable, Equatable {
         public var text: String {
             switch self {
             case .soundTaken: "A phone call or another app took over the sound."
-            case .soundFailed: "iOS didn't give Yap the sound back after an interruption."
+            case .soundFailed: "Yap lost the mic and speaker and couldn't get them back."
             case .stopped: "iOS stopped Yap in the background."
             case .offline: "Yap lost its connection for over a minute."
             case .channelGone: "The channel was archived."
@@ -57,8 +57,9 @@ public struct BackgroundCall: Sendable, Equatable {
         case leave(Reason, notify: Bool)
     }
 
-    /// How long an interruption may hold the sound before we leave (iOS
-    /// gives a background task about 30 s).
+    /// How long an interruption may hold the sound, or the sound may stay
+    /// stopped while `VoiceController` tries to start it again, before we
+    /// leave (iOS gives a background task about 30 s).
     public static let soundGrace: TimeInterval = 20
     /// How long without the server before we leave (the call itself keeps
     /// going for 20 s; after that we'd only rejoin as a newcomer, much later).
@@ -71,6 +72,8 @@ public struct BackgroundCall: Sendable, Equatable {
     public private(set) var inCall = false
     public private(set) var active = true
     public private(set) var interruptedAt: TimeInterval?
+    /// The sound couldn't be started again, since (nil once it runs again).
+    public private(set) var soundLostAt: TimeInterval?
     public private(set) var offlineSince: TimeInterval?
     /// The last time we were alive in the background (nil: on screen, or not in a call).
     public private(set) var lastTick: TimeInterval?
@@ -98,7 +101,7 @@ public struct BackgroundCall: Sendable, Equatable {
         }
         lastTick = now
         var effects: [Effect] = [.armNote]
-        if interruptedAt != nil, !awake {
+        if soundStopped, !awake {
             awake = true
             effects.append(.keepAwake)
         }
@@ -110,6 +113,7 @@ public struct BackgroundCall: Sendable, Equatable {
         inCall = nowInCall
         if !nowInCall {
             interruptedAt = nil
+            soundLostAt = nil
             offlineSince = nil
             return quiet()
         }
@@ -134,11 +138,22 @@ public struct BackgroundCall: Sendable, Equatable {
     }
 
     /// The sound couldn't be started again (the session wouldn't activate,
-    /// the audio unit wouldn't start). On screen the "Your mic is sending
-    /// silence" warning covers it; off screen we leave and say so.
+    /// the audio unit wouldn't start). Often only for a moment (dictation or
+    /// Siri still letting go of the mic): `VoiceController` tries again, and
+    /// off screen we stay awake meanwhile and leave only if it's still
+    /// stopped after `soundGrace`. On screen the "Your mic is sending
+    /// silence" warning covers it.
     public mutating func soundFailed(at now: TimeInterval) -> [Effect] {
-        guard watching else { return [] }
-        return [.leave(.soundFailed, notify: true)]
+        soundLostAt = soundLostAt ?? now
+        guard watching, !awake else { return [] }
+        awake = true
+        return [.keepAwake]
+    }
+
+    /// The sound runs again (the mic is measured again).
+    public mutating func soundRecovered(at now: TimeInterval) -> [Effect] {
+        soundLostAt = nil
+        return []
     }
 
     public mutating func connection(online: Bool, at now: TimeInterval) -> [Effect] {
@@ -163,11 +178,14 @@ public struct BackgroundCall: Sendable, Equatable {
         if let interruptedAt, now - interruptedAt >= Self.soundGrace {
             return [.leave(.soundTaken, notify: true)]
         }
+        if let soundLostAt, now - soundLostAt >= Self.soundGrace {
+            return [.leave(.soundFailed, notify: true)]
+        }
         if let offlineSince, now - offlineSince >= Self.offlineGrace {
             return [.leave(.offline, notify: true)]
         }
         var effects: [Effect] = [.armNote]
-        if awake, interruptedAt == nil {
+        if awake, !soundStopped {
             awake = false
             effects.append(.letSleep)
         }
@@ -178,9 +196,13 @@ public struct BackgroundCall: Sendable, Equatable {
     public mutating func timeRunningOut(at now: TimeInterval) -> [Effect] {
         guard awake else { return [] }
         if watching, interruptedAt != nil { return [.leave(.soundTaken, notify: true)] }
+        if watching, soundLostAt != nil { return [.leave(.soundFailed, notify: true)] }
         awake = false
         return [.letSleep]
     }
+
+    /// An interruption holds the sound, or it couldn't be started again.
+    private var soundStopped: Bool { interruptedAt != nil || soundLostAt != nil }
 
     /// Back on screen or out of the call: nothing scheduled, no extra time.
     private mutating func quiet() -> [Effect] {

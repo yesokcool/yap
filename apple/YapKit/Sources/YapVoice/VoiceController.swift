@@ -114,8 +114,10 @@ public enum AudioSessionEvent: Sendable, Equatable {
     case interruptionEnded
     /// The sound couldn't be started again (the session wouldn't
     /// activate, the audio unit wouldn't start, a media-server reset we
-    /// couldn't recover from).
+    /// couldn't recover from). `VoiceController` keeps trying.
     case failed
+    /// After `failed`: the sound runs again.
+    case recovered
 }
 
 /// A quiet word next to someone in my call, only when something's off
@@ -222,6 +224,10 @@ public final class VoiceController: VoiceCoordinator {
     @ObservationIgnored private let requestsMicPermission: Bool
     #if os(iOS)
     @ObservationIgnored private var sessionWatch: AudioSessionWatch?
+    /// An interruption holds the sound (nothing to start until it ends).
+    @ObservationIgnored private var audioInterrupted = false
+    /// Getting the sound back after it couldn't be started again.
+    @ObservationIgnored private var soundRecovery: Task<Void, Never>?
     #endif
 
     /// `requestsMicPermission: false` for tests on a synthetic audio device.
@@ -275,16 +281,7 @@ public final class VoiceController: VoiceCoordinator {
             let watch = AudioSessionWatch()
             watch.isInCall = { [weak self] in self?.isInVoice == true }
             watch.highQualityBluetooth = { [weak self] in self?.settings.highQualityBluetooth == true }
-            watch.onEvent = { [weak self] event in
-                guard let self, self.isInVoice else { return }
-                let words = switch event {
-                case .interruptionBegan: "Sound interrupted (a phone call, an alarm, Siri or another app)"
-                case .interruptionEnded: "Interruption over"
-                case .failed: "The sound couldn't be started again"
-                }
-                self.notes.note(words)
-                self.onAudioSession?(event)
-            }
+            watch.onEvent = { [weak self] event in self?.audioSessionEvent(event) }
             watch.onNote = { [weak self] text in self?.notes.note(text) }
             RTCAudioSession.sharedInstance().add(watch)
             sessionWatch = watch
@@ -990,6 +987,69 @@ extension VoiceController {
 }
 
 #if os(iOS)
+// MARK: Getting the sound back (iPhone)
+
+extension VoiceController {
+    /// After the sound couldn't be started again: when to try again
+    /// (seconds after it failed), then every `soundRetryEvery`.
+    static let soundRetries: [TimeInterval] = [1, 2, 4, 8]
+    static let soundRetryEvery: TimeInterval = 10
+
+    /// What iOS did to the call's audio: into the call report, and on to
+    /// the app (`BackgroundCall`).
+    private func audioSessionEvent(_ event: AudioSessionEvent) {
+        switch event {
+        case .interruptionBegan: audioInterrupted = true
+        case .interruptionEnded: audioInterrupted = false
+        case .failed, .recovered: break
+        }
+        guard isInVoice else { return }
+        let words = switch event {
+        case .interruptionBegan: "Sound interrupted (a phone call, an alarm, Siri or another app)"
+        case .interruptionEnded: "Interruption over"
+        case .failed: "The sound couldn't be started again"
+        case .recovered: "The sound is back"
+        }
+        notes.note(words)
+        if event == .failed { recoverSound() }
+        onAudioSession?(event)
+    }
+
+    /// The sound couldn't be started again, often only for a moment
+    /// (dictation or Siri still letting go of the mic). Nothing in WebRTC
+    /// tries again until the next interruption or until Yap comes back on
+    /// screen, so we do what it does then (`AudioSessionWatch.restartSound`)
+    /// now and then, until the mic's counters move again or the call ends.
+    private func recoverSound() {
+        guard soundRecovery == nil else { return }
+        let lostAt = VoiceEngine.now
+        soundRecovery = Task { [weak self] in
+            var tries = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard let self, self.isInVoice else { break }
+                let now = VoiceEngine.now
+                // (Half a second: the counters may still show the last moment before it stopped.)
+                if let ran = self.engine.micRanAt, ran > lostAt + 0.5 {
+                    self.soundRecovery = nil
+                    self.audioSessionEvent(.recovered)
+                    return
+                }
+                let due = tries < Self.soundRetries.count
+                    ? Self.soundRetries[tries]
+                    : Self.soundRetries[Self.soundRetries.count - 1] + Double(tries - Self.soundRetries.count + 1) * Self.soundRetryEvery
+                guard now - lostAt >= due, !self.audioInterrupted else { continue }
+                tries += 1
+                self.notes.note("Starting the sound again (try \(tries))")
+                self.sessionWatch?.restartSound()
+            }
+            self?.soundRecovery = nil
+        }
+    }
+}
+#endif
+
+#if os(iOS)
 /// `.playAndRecord` + `.voiceChat` (Apple's echo cancellation and AGC),
 /// Bluetooth headsets allowed, speaker by default when nothing's plugged in
 /// (a phone in hand, not at the ear). WebRTC's audio unit activates the
@@ -1022,8 +1082,9 @@ enum AudioSessionSetup {
 /// object reacts first (reactivates the session after an interruption and,
 /// with the `WebRTC-Audio-iOS-Holding` field trial, restarts its audio
 /// unit); this logs it and, if the media server was reset, puts our
-/// configuration back. A mic that still delivers nothing shows as "Your mic
-/// is sending silence" (`VoiceEngine.micSilent`).
+/// configuration back. When the sound won't start again, `VoiceController`
+/// tries again (`restartSound`); a mic that still delivers nothing shows as
+/// "Your mic is sending silence" (`VoiceEngine.micSilent`).
 final class AudioSessionWatch: NSObject, RTCAudioSessionDelegate, @unchecked Sendable {
     /// Read and written on the main thread only.
     nonisolated(unsafe) var isInCall: (@MainActor () -> Bool)?
@@ -1032,6 +1093,21 @@ final class AudioSessionWatch: NSObject, RTCAudioSessionDelegate, @unchecked Sen
     nonisolated(unsafe) var onEvent: (@MainActor (AudioSessionEvent) -> Void)?
     /// Route changes and resets, in words (the call report), on the main thread.
     nonisolated(unsafe) var onNote: (@MainActor (String) -> Void)?
+    /// `restartSound` is going through WebRTC's interruption handling (main thread).
+    nonisolated(unsafe) private var restarting = false
+
+    /// Start the sound again the way WebRTC does when an interruption ends
+    /// or Yap comes back on screen: activate the session and restart the
+    /// voice-processing unit (`WebRTC-Audio-iOS-Holding`). WebRTC has no
+    /// public call for that, so its session gets the notice iOS would post.
+    @MainActor func restartSound() {
+        restarting = true
+        defer { restarting = false }
+        NotificationCenter.default.post(name: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(), userInfo: [
+            AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.ended.rawValue,
+            AVAudioSessionInterruptionOptionKey: AVAudioSession.InterruptionOptions.shouldResume.rawValue,
+        ])
+    }
 
     private func note(_ text: String) {
         DispatchQueue.main.async { [weak self] in
@@ -1052,18 +1128,32 @@ final class AudioSessionWatch: NSObject, RTCAudioSessionDelegate, @unchecked Sen
     }
 
     func audioSessionDidEndInterruption(_ session: RTCAudioSession, shouldResumeSession: Bool) {
+        // (Delivered right away while `restartSound` posts, on the main thread.)
+        if Thread.isMainThread, restarting { return }
         log.info("audio interruption ended (resume: \(shouldResumeSession))")
         tell(.interruptionEnded)
     }
 
     func audioSession(_ audioSession: RTCAudioSession, failedToSetActive active: Bool, error: any Error) {
         log.error("audio session didn't \(active ? "activate" : "deactivate", privacy: .public): \(error.localizedDescription, privacy: .public)")
-        if active { tell(.failed) }
+        guard active else { return }
+        note("The audio session wouldn't start: \(Self.describe(error))")
+        tell(.failed)
     }
 
     func audioSession(_ audioSession: RTCAudioSession, audioUnitStartFailedWithError error: any Error) {
         log.error("the audio unit didn't start: \(error.localizedDescription, privacy: .public)")
+        note("The audio unit wouldn't start: \(Self.describe(error))")
         tell(.failed)
+    }
+
+    /// An audio error for the call report: its code, and the four letters
+    /// Core Audio codes stand for ('!pri': another app has priority).
+    static func describe(_ error: any Error) -> String {
+        let code = (error as NSError).code
+        let bytes = withUnsafeBytes(of: UInt32(truncatingIfNeeded: code).bigEndian, Array.init)
+        let letters = bytes.allSatisfy { (0x20...0x7e).contains($0) } ? " '\(String(decoding: bytes, as: UTF8.self))'" : ""
+        return "error \(code)\(letters)"
     }
 
     func audioSessionDidChangeRoute(_ session: RTCAudioSession, reason: AVAudioSession.RouteChangeReason, previousRoute: AVAudioSessionRouteDescription) {

@@ -10,12 +10,13 @@ app and a native macOS app from the same code. The wire protocol is
 
 | Path | What |
 |---|---|
-| `Yap.xcodeproj` | One app target `Yap` (iphoneos + iphonesimulator + macosx), `YapTests`, and `YapBroadcast` (the iPhone/iPad screen-broadcast extension, embedded in the iOS app only). Schemes: **Yap** (Debug), **Yap DEV** (Dev sandbox), **Yap RELEASE**. |
+| `Yap.xcodeproj` | One app target `Yap` (iphoneos + iphonesimulator + macosx), `YapTests`, `YapBroadcast` (the iPhone/iPad screen-broadcast extension) and `YapLive` (the widget extension that draws the call's Live Activity), both embedded in the iOS app only. Schemes: **Yap** (Debug), **Yap DEV** (Dev sandbox), **Yap RELEASE**. |
 | `Config/` | `Yap.xcconfig`: the team and bundle id behind every target and configuration, with neutral defaults. Your own values go in `Local.xcconfig` (git ignores it; copy `Local.example.xcconfig`). |
 | `ExportOptions.example.plist` | Upload settings for TestFlight. Copy it to `ExportOptions.plist` (git ignores it). |
 | `Yap/` | The app. Synced folder: new files join the target automatically. |
 | `YapBroadcast/` | The ReplayKit broadcast upload extension (`SampleHandler`): iPhone and iPad screen sharing. Links only `YapScreenLink`. |
-| `Yap/App/` | What the screens share: `AppModel`, `Theme`, `AppIdentity`, `Look` (one look; the status bar); `CallWatch` (a call ending off screen on iPhone: "You left Lounge"), `Notifier`, `BroadcastPicker` (iOS's screen-broadcast sheet); `ChannelController` (an open channel's behaviour: opening, jumps, edit/reply/staged picture, Send/Esc/↑, the channel menu's sheets), `SuggestionEngine`, `MessageMenu` and `ChannelMenuItems`, `InlineText` (message text), `GifSearch` / `EmojiBrowser` (the pickers' logic), `Prompts` (Ping everyone, Sign out others, copy), wording (`VoiceOptions`, `Stamps` for dates, `ColorNames`), `MediaViews` (looping GIF video, animated images), `SystemControls` (Paste, date pickers, `FlowLayout`). |
+| `YapLive/` | The widget extension (`YapLiveBundle`): the voice call's Live Activity (Lock Screen + Dynamic Island). `CallActivityAttributes`, `CallButtonIntent` and `CallActivityViews` are in the app target too (a membership exception); the extension borrows `Yap/App/Theme.swift` the same way. |
+| `Yap/App/` | What the screens share: `AppModel`, `Theme`, `AppIdentity`, `Look` (one look; the status bar); `CallWatch` (a call ending off screen on iPhone: "You left Lounge"), `LiveCall` (the call's Live Activity), `Notifier`, `BroadcastPicker` (iOS's screen-broadcast sheet); `ChannelController` (an open channel's behaviour: opening, jumps, edit/reply/staged picture, Send/Esc/↑, the channel menu's sheets), `SuggestionEngine`, `MessageMenu` and `ChannelMenuItems`, `InlineText` (message text), `GifSearch` / `EmojiBrowser` (the pickers' logic), `Prompts` (Ping everyone, Sign out others, copy), wording (`VoiceOptions`, `Stamps` for dates, `ColorNames`), `MediaViews` (looping GIF video, animated images), `SystemControls` (Paste, date pickers, `FlowLayout`). |
 | `Yap/Views/`, `Yap/Components/` | The screens and their **Windows 98** building blocks (`Views/Voice/TalkCues98`: the tooltip, the warning line and the volume badge round 10 added). |
 | `YapKit/` | Local Swift package, everything that isn't a view. |
 | `YapKit/Sources/YapCore` | Protocol models and frames, `YapConnection` (WebSocket + heartbeat + backoff + network changes), `SendLine` (sends the server turns away), `YapClient` (identity and all the state screens read; `YapClient+Account/Events/Messages/People/Search/Vault/Extras.swift` by topic), `Mentions` (the server's mention rule), emoji codec and catalog, message formatter, KLIPY client, Keychain. No WebRTC. |
@@ -56,6 +57,9 @@ Every bundle id comes from `YAP_BUNDLE_ID`:
 | **Yap** | Debug | `<id>` | `<id>.tests` |
 | **Yap DEV** | Dev | `<id>.dev` | `<id>.dev.tests` |
 | **Yap RELEASE** | Release | `<id>` | `<id>.tests` |
+
+The iPhone app's extensions add a suffix: `<id>.broadcast` and `<id>.live`
+(`<id>.dev.broadcast` and `<id>.dev.live` under Yap DEV).
 
 **Yap DEV** installs beside the real app as `<id>.dev` ("Yap Dev", the
 DEV-banded icon) with its own Keychain items, so testing never signs the
@@ -469,7 +473,10 @@ after she leaves ("Ada's OBS is still listening");
 `YAP_DEMO_CALL_ENDED=soundTaken|soundFailed|stopped|offline|channelGone` (with `YAP_AUTOJOIN` and
 `YAP_SYNTHETIC_AUDIO=1`) ends the call as if that had happened off screen; `YAP_DEMO_BURST=N` sends N
 numbered messages to the open channel at once; `YAP_DEMO_SHARE=1` shares a moving test card once in the
-call (the sharing UI on iPhone without the extension). The seed also posts a spoiler, a YouTube link, a poll with votes,
+call (the sharing UI on iPhone without the extension); `YAP_DEMO_LIVE_CALL=1` (or
+`muted,deafened,leaving,more,stale`) puts up a pretend call's Live Activity, no server needed, and
+has iOS show it as an alert 8 s later (send Yap to the background first, e.g. `simctl launch` Settings;
+a banner on an iPhone without a Dynamic Island is the Lock Screen view). The seed also posts a spoiler, a YouTube link, a poll with votes,
 `/roll` and `/flip`, three soundboard clips, Ada's `tada` chime, Cleo's away
 message, a hang in three hours and a doodle reaction. On the Mac, `YAP_SNAPSHOT=name` saves each
 window after 8 s and quits — ScreenCaptureKit's current-process capture (no
@@ -840,6 +847,42 @@ volume, their row (channel list and call sheet) says it: "60%", "150%", or
 a muted speaker at 0 %; someone at 0 % who talks gets a dimmed ring
 (PROTOCOL.md › Voice › Your volume, on the row).
 
+## The call on the Lock Screen (iPhone Live Activity)
+
+While you're in a voice call, the iPhone shows it as a Live Activity
+(`LiveCall` runs it, `YapLive` draws it, `CallActivityViews`): a little
+Windows 98 window on the teal desktop, in Settings › Look's scheme. The navy
+title bar has the channel, how long you've been in (or "Connecting…" /
+"Reconnecting…") and a **×**. Under it, an AIM buddy line: you in red,
+friends in blue, whoever's talking in bold with a green speaker, the first
+six A–Z and "+2" for the rest (OBS links left out, like the call sheet).
+Then **Mute** and **Deafen**, pushed in while on (deafened is muted too, so
+Mute reads "Unmute"), and "4 in call". The Dynamic Island: a speaker (green
+while someone talks) and the head count, or a red slashed mic/speaker when
+you're muted or deafened; held open, the channel, the clock, the × and the
+same buddy line and buttons.
+
+- **The × asks first.** A Live Activity can only be tapped, never held, so
+  the × turns the buttons into "Leave Lounge?" **Leave** / **Stay** for 5 s;
+  a stray tap can't end the call.
+- **The buttons are `CallButtonIntent`** (a `LiveActivityIntent`): it
+  performs in the app's process, where the call is, through
+  `CallButtons.press`. The same toggles as the call sheet.
+- **Starts and ends with the call** (`voice.onInVoiceChanged`); iOS starts
+  one only for an app on screen, so a call joined off screen gets it the
+  next time Yap is in front. It follows the call about once a second, only
+  when something changed.
+- **If iOS stops Yap**, the window can't be taken down, so every update
+  says it's stale after 2 minutes (re-sent every minute while nothing
+  changes): it greys out with "Yap isn't answering. The call may have
+  ended." Tapping its × wakes Yap, which closes it; a Yap that starts closes
+  any left over.
+- The Lock Screen shows who's in the call without unlocking (iOS's Settings ›
+  Yap › Live Activities turns it off). Nothing goes to the server.
+- `YAP_DEMO_LIVE_CALL` (DEBUG) puts up a pretend one and has iOS show it as
+  an alert 8 s later, for screenshots. Simulator screenshots never show the
+  Dynamic Island, so its views are only checked on a phone.
+
 ## Watch together (on the web)
 
 - **Watch together** (PROTOCOL.md › Watch together): a **Watch** row in
@@ -1161,13 +1204,22 @@ estimator sends probe padding through an audio-only call. Video keeps it.
   so the call dropped with the screen off. The engine now keeps an
   **anchor** for the whole call on iOS (a receive-only audio stream between
   two in-app peer connections, nothing encoded), so the sound never stops
-  mid-call (`AudioAnchorTests`). What Yap can't prevent (a phone call or an
-  alarm keeping the sound, iOS refusing it back, a minute without the
-  server, iOS stopping Yap) ends the call for real and says so: a "You
-  left Lounge" notification with the reason, one tap to rejoin
-  (`BackgroundCall`, `CallWatch`; an interruption gets ~20 s of background
-  time first; a note scheduled 40 s ahead and pushed back every 5 s fires by
-  itself if Yap is stopped, and Yap leaves when it wakes up after that).
+  mid-call (`AudioAnchorTests`). When the sound won't start again after an
+  interruption (dictation or Siri often still hold the mic for a moment),
+  `VoiceController` starts it again itself after 1, 2, 4 and 8 s, then every
+  10 s, until the mic's counters move (`VoiceEngine.micRanAt`): WebRTC only
+  restarts its unit when an interruption ends or the app becomes active, so
+  `AudioSessionWatch.restartSound` hands its session that same notice. The
+  call report names each failure's Core Audio code (`'!pri'`, `'!int'`…).
+  What Yap can't prevent (a phone call or an alarm keeping the sound, sound
+  that still won't start, a minute without the server, iOS stopping Yap)
+  ends the call for real and says so: a "You left Lounge" notification with
+  the reason, one tap to rejoin (`BackgroundCall`, `CallWatch`; an
+  interruption or stopped sound gets ~20 s of background time first; a note
+  scheduled 40 s ahead and pushed back every 5 s fires by itself if Yap is
+  stopped, and Yap leaves when it wakes up after that). Only the background
+  counts as off screen: `.inactive` (Siri, dictation, Control Center, a
+  notification pulled down) is still on screen.
   Outside calls the app's session is `.ambient`, so muted GIF videos never
   stop someone's music. **High-quality headphone audio** (Settings › Voice › Mic & output,
   off by default) keeps Bluetooth headphones in A2DP (stereo, full band;

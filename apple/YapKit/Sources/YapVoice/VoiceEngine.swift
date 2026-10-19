@@ -175,6 +175,8 @@ public final class VoiceEngine {
     @ObservationIgnored private var energyBaseline: MicEnergy?
     /// When the mic last delivered audio, and since when we expect it to.
     @ObservationIgnored private var micProgressAt: TimeInterval?
+    /// When the mic's counters last moved (`now`): its sound is running.
+    @ObservationIgnored private(set) var micRanAt: TimeInterval?
     @ObservationIgnored private var iceFetchedAt: TimeInterval = -.infinity
     @ObservationIgnored public var onSignal: ((String, SignalData) -> Void)?
     /// uid for a sid (for per-person volume, and to check a resume).
@@ -715,7 +717,7 @@ public final class VoiceEngine {
 
     // MARK: Levels + stats
 
-    private static var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
+    static var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
     private func startLoops() {
         // Each loop ends with the engine (not only on stop()).
@@ -803,6 +805,7 @@ public final class VoiceEngine {
                     if loud != tooLoud { tooLoud = loud }
                 }
                 micProgressAt = now
+                micRanAt = now
             } else if energyBaseline?.source != sample.source {
                 micProgressAt = micProgressAt ?? now
             }

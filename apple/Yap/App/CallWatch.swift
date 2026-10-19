@@ -9,7 +9,7 @@ import UIKit
 /// iPhone: a call while Yap is off screen (`BackgroundCall` has the rules).
 /// The call's anchor keeps Yap running in the background; this covers what
 /// Yap can't prevent: an interruption that keeps the sound (a phone call, an
-/// alarm), sound iOS won't give back, a long loss of connection, iOS
+/// alarm), sound that won't start again, a long loss of connection, iOS
 /// stopping Yap anyway. Then we leave the call for real (nobody keeps
 /// talking to a frozen phone, and Yap never pops back into a call hours
 /// later) and say so: "You left Lounge", the reason, one tap to rejoin.
@@ -67,6 +67,7 @@ final class CallWatch {
         case .interruptionBegan: apply(rules.interruptionBegan(at: now))
         case .interruptionEnded: apply(rules.interruptionEnded(at: now))
         case .failed: apply(rules.soundFailed(at: now))
+        case .recovered: apply(rules.soundRecovered(at: now))
         }
     }
 

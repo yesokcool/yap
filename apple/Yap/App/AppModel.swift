@@ -190,6 +190,10 @@ final class AppModel {
 
     /// iPhone: a call ending while Yap is off screen says so ("You left Lounge").
     @ObservationIgnored private(set) var callWatch: CallWatch?
+    #if os(iOS)
+    /// iPhone: the call on the Lock Screen and in the Dynamic Island.
+    @ObservationIgnored private var liveCall: LiveCall?
+    #endif
     @ObservationIgnored private var minecraftTask: Task<Void, Never>?
     @ObservationIgnored private var configTask: Task<Void, Never>?
 
@@ -227,7 +231,12 @@ final class AppModel {
         voice.onEvent = { [weak self] event in self?.voiceEvent(event) }
         voice.onAudioSession = { [weak self] event in self?.callWatch?.audio(event) }
         voice.onEndedByServer = { [weak self] in self?.callWatch?.endedByServer() }
-        voice.onInVoiceChanged = { [weak self] in self?.callWatch?.callChanged() }
+        voice.onInVoiceChanged = { [weak self] in
+            self?.callWatch?.callChanged()
+            #if os(iOS)
+            self?.liveCall?.callChanged()
+            #endif
+        }
         notifier.onRejoin = { [weak self] channelId in self?.rejoin(channelId) }
         screenPiP.renderer = voice.screenRenderer
         screenPiP.onRestore = { [weak self] in self?.showScreen() }
@@ -246,6 +255,7 @@ final class AppModel {
         }
         callWatch = CallWatch(model: self)
         #if os(iOS)
+        liveCall = LiveCall(model: self)
         // Screen sharing: the broadcast extension finds Yap at this socket while it's in a call.
         voice.broadcastSocketPath = AppIdentity.appGroup.flatMap(BroadcastScreenFeeder.socketPath(appGroup:))
         #endif
@@ -329,8 +339,18 @@ final class AppModel {
     /// Quitting: a goodbye to the call, so nobody keeps it waiting for us.
     func willTerminate() {
         callWatch?.willTerminate()
+        #if os(iOS)
+        liveCall?.willTerminate()
+        #endif
         voice.goodbye()
     }
+
+    #if DEBUG && os(iOS)
+    /// `YAP_DEMO_LIVE_CALL`: a pretend call's Live Activity.
+    func demoLiveCall(_ variant: String) {
+        liveCall?.demo(variant)
+    }
+    #endif
 
     /// "You left Lounge… Tap to rejoin.": back into that call (once we're connected).
     func rejoin(_ channelId: String) {
@@ -343,8 +363,14 @@ final class AppModel {
 
     func scenePhaseChanged(_ phase: ScenePhase) {
         client.isAppActive = phase == .active
-        callWatch?.scene(active: phase == .active)
+        // Inactive is still on screen (Siri, dictation, Control Center, a
+        // notification pulled down): only the background is off screen.
+        callWatch?.scene(active: phase != .background)
         if phase == .active {
+            #if os(iOS)
+            // A call joined off screen gets its Live Activity now.
+            liveCall?.callChanged()
+            #endif
             client.reconnectNow()
             if config == nil { refreshConfig() } else { Task { await refreshMinecraft() } }
         }

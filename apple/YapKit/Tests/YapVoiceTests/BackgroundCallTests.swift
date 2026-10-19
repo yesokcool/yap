@@ -80,11 +80,43 @@ struct BackgroundCallTests {
         #expect(rules.tick(at: 30) == [.leave(.soundTaken, notify: true)])
     }
 
-    @Test func soundThatWontComeBackEndsTheCallAtOnce() {
+    @Test func soundThatComesBackKeepsTheCall() {
         var rules = offScreen()
-        _ = rules.interruptionBegan(at: 110)
-        _ = rules.interruptionEnded(at: 112)
-        #expect(rules.soundFailed(at: 113) == [.leave(.soundFailed, notify: true)])
+        // Dictation in another app: an interruption, then the sound won't start at first.
+        #expect(rules.interruptionBegan(at: 110) == [.keepAwake])
+        #expect(rules.interruptionEnded(at: 112).isEmpty)
+        #expect(rules.soundFailed(at: 113).isEmpty, "not at once: VoiceController tries again (and we're already awake)")
+        #expect(rules.tick(at: 115) == [.armNote], "still awake while the sound is stopped")
+        #expect(rules.soundFailed(at: 116).isEmpty, "a try that failed again changes nothing")
+        #expect(rules.soundRecovered(at: 118).isEmpty)
+        #expect(rules.tick(at: 120) == [.armNote, .letSleep])
+        #expect(ticks(&rules, from: 125, to: 400).allSatisfy { $0 == .armNote })
+    }
+
+    @Test func soundThatWontComeBackEndsTheCallAfterTheGrace() {
+        var rules = offScreen()
+        #expect(rules.soundFailed(at: 113) == [.keepAwake], "the sound is what keeps Yap running: ask for time")
+        let effects = ticks(&rules, from: 115, to: 135)
+        #expect(effects.last == .leave(.soundFailed, notify: true), "\(effects)")
+        #expect(effects.filter { if case .leave = $0 { true } else { false } }.count == 1)
+        #expect(rules.call(false, at: 135) == [.disarmNote, .letSleep])
+    }
+
+    @Test func soundLostOnScreenIsGivenTimeOffScreen() {
+        var rules = Rules()
+        _ = rules.call(true, at: 0)
+        #expect(rules.soundFailed(at: 10).isEmpty)
+        #expect(rules.scene(active: false, at: 12) == [.armNote, .keepAwake])
+        #expect(rules.timeRunningOut(at: 40) == [.leave(.soundFailed, notify: true)])
+    }
+
+    @Test func soundBackOnScreenIsForgotten() {
+        var rules = Rules()
+        _ = rules.call(true, at: 0)
+        _ = rules.soundFailed(at: 10)
+        _ = rules.soundRecovered(at: 11)
+        #expect(rules.scene(active: false, at: 100) == [.armNote])
+        #expect(ticks(&rules, from: 105, to: 200).allSatisfy { $0 == .armNote })
     }
 
     @Test func stoppedByIOSTheNoteSaysItAndWakingUpMakesItTrue() {
@@ -142,6 +174,7 @@ struct BackgroundCallTests {
             #expect(!reason.text.isEmpty)
         }
         #expect(Rules.Reason.soundTaken.text == "A phone call or another app took over the sound.")
+        #expect(Rules.Reason.soundFailed.text == "Yap lost the mic and speaker and couldn't get them back.")
         #expect(!Rules.Reason.channelGone.canRejoin)
         #expect(Rules.Reason.stopped.canRejoin)
     }

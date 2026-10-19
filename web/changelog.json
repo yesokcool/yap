@@ -1,6 +1,17 @@
 {
-  "current": "0.47.2",
+  "current": "0.48.0",
   "releases": [
+    {
+      "version": "0.48.0",
+      "date": "2026-10-19",
+      "title": "A new icon",
+      "items": [
+        "iPhone: Dictation, Siri or Control Center no longer drop you from a call; if the sound stops, Yap starts it again by itself.",
+        "iPhone: Tapping one of Yap's notifications no longer crashes the app.",
+        "iPhone: your voice call shows on the Lock Screen and in the Dynamic Island, with Mute, Deafen and a × to leave.",
+        "A new Yap icon: a cleaner pixel speech bubble on teal, everywhere (on iPhone it follows dark and tinted Home Screens too)."
+      ]
+    },
     {
       "version": "0.47.2",
       "date": "2026-10-12",
@@ -899,6 +910,13 @@
     }
   ],
   "highlights": [
+    {
+      "date": "2026-10-18",
+      "emoji": "💬",
+      "title": "A new Yap icon",
+      "text": "A cleaner pixel speech bubble on teal. It shows on the web and in browser tabs right away, and on the iPhone, Mac and desktop apps with their next update. On iPhone it follows dark and tinted Home Screens too.",
+      "where": "Everywhere"
+    },
     {
       "date": "2026-10-12",
       "emoji": "💬",

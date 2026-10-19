@@ -100,18 +100,30 @@ final class Notifier {
 
 /// Taps on Yap's notifications. UserNotifications calls it off the main
 /// actor; a rejoin hops back.
+///
+/// Completion handlers, not the `async` versions: Swift calls an `async`
+/// one's handler wherever the method finished (a background thread here),
+/// and UIKit aborts when a tap's handler runs off the main thread (build 10
+/// crashed on taps, 2026-10-17).
 nonisolated final class NotificationTaps: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
     /// Read and written on the main thread only.
     nonisolated(unsafe) var onRejoin: (@MainActor (String) -> Void)?
 
-    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier,
-              let channelId = response.notification.request.content.userInfo[Notifier.rejoinKey] as? String else { return }
-        await MainActor.run { [weak self] in self?.onRejoin?(channelId) }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        let channelId = response.actionIdentifier == UNNotificationDefaultActionIdentifier
+            ? response.notification.request.content.userInfo[Notifier.rejoinKey] as? String : nil
+        // Called on the main thread only.
+        nonisolated(unsafe) let done = completionHandler
+        DispatchQueue.main.async { [weak self] in
+            if let channelId { self?.onRejoin?(channelId) }
+            done()
+        }
     }
 
     /// While Yap is on screen its own notices say it: no banners (as before).
-    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        []
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([])
     }
 }

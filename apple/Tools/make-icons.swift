@@ -1,8 +1,10 @@
-// Draws every raster Yap icon from one picture, the pixel speech bubble with
-// sound bars (web/icon.svg) on the teal desktop:
-//   - the iPhone + Mac app icons (App Store + Dev) and the in-app YapIcon in Yap/Assets.xcassets;
+// Draws every raster Yap icon from one picture, the pixel speech bubble
+// (Pixelarticons' "message-text", MIT; README › Credits) in white on the teal desktop:
+//   - the iPhone + Mac app icons (App Store + Dev; the iPhone's dark and tinted looks too)
+//     and the in-app YapIcon in Yap/Assets.xcassets;
 //   - the web app's icon-192.png, icon-512.png and apple-touch-icon.png.
-// The desktop app draws the same pixels itself (desktop/src/ui/mod.rs › app_icon).
+// web/icon.svg is the same picture as a vector; the desktop app draws it itself
+// (desktop/src/ui/mod.rs › app_icon).
 //   swift apple/Tools/make-icons.swift
 import AppKit
 import CoreText
@@ -30,70 +32,86 @@ func text(_ ctx: CGContext, _ string: String, size: CGFloat, color c: CGColor, a
     CTLineDraw(line, ctx)
 }
 
-/// Yap's icon: the pixel speech bubble with sound bars from `web/icon.svg`, on the teal desktop.
-/// Drawn on that file's 32-unit grid (y down, like the SVG), so every copy is the same picture.
-let bubbleRects: [(x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat, color: UInt32, alpha: CGFloat)] = [
-    (4, 6, 28, 19, 0x000000, 0.35),  // drop shadow
-    (2, 4, 28, 19, 0x000000, 1),     // outline
-    (4, 6, 24, 15, 0xffffff, 1),     // inside
-    (4, 6, 24, 2, 0xdfdfdf, 1),      // top shade
-    (8, 23, 8, 2, 0x000000, 1),      // tail
-    (8, 25, 5, 2, 0x000000, 1),
-    (8, 27, 2, 2, 0x000000, 1),
-    (10, 21, 4, 2, 0xffffff, 1),
-    (10, 23, 2, 2, 0xffffff, 1),
-    (7, 12, 2, 3, 0x000080, 1),      // sound bars
-    (11, 10, 2, 7, 0x000080, 1),
-    (15, 8, 2, 11, 0x000080, 1),
-    (19, 10, 2, 7, 0x000080, 1),
-    (23, 12, 2, 3, 0x000080, 1),
+/// The bubble on the glyph's 24-unit grid (y down, like the SVG); the drawing spans 2...22.
+let bubbleRects: [(x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat)] = [
+    (2, 2, 20, 2),   // top
+    (2, 4, 2, 18),   // left, down into the tail
+    (20, 4, 2, 14),  // right
+    (6, 16, 14, 2),  // bottom
+    (4, 18, 2, 2),   // the tail's step
+    (6, 7, 12, 2),   // text lines
+    (6, 11, 8, 2),
 ]
 
-/// Fills `rect` (in 1024 space, y down) with the bubble, its 30x25-unit drawing centered.
-func drawBubble(_ ctx: CGContext, in rect: CGRect) {
-    let unit = min(rect.width / 30, rect.height / 25)
-    let ox = rect.midX - 17 * unit, oy = rect.midY - 16.5 * unit
-    for r in bubbleRects {
-        ctx.setFillColor(color(r.color).copy(alpha: r.alpha)!)
-        // CG is y-up: flip the SVG's y.
-        ctx.fill(CGRect(x: ox + r.x * unit, y: 1024 - (oy + (r.y + r.h) * unit), width: r.w * unit, height: r.h * unit))
+/// The three iPhone looks: the background's top and bottom, and the bubble.
+enum Look {
+    case light, dark, tinted
+    var colors: (top: UInt32, bottom: UInt32, bubble: UInt32) {
+        switch self {
+        case .light: (0x0b8f8f, 0x006b6b, 0xffffff)
+        case .dark: (0x2e3130, 0x0e0f0f, 0x0b8f8f)
+        case .tinted: (0x3a3d3c, 0x151716, 0xd9dcdb)
+        }
     }
 }
 
-/// `web`: the bubble a little smaller, so a circular "maskable" crop never cuts it.
-func draw(size: Int, dev: Bool, mac: Bool, web: Bool = false) -> Data {
+/// Fills the current clip with the look's top-to-bottom gradient over `rect` (pixels, y up).
+func fillBackground(_ ctx: CGContext, _ look: Look, _ rect: CGRect) {
+    let g = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: [color(look.colors.top), color(look.colors.bottom)] as CFArray, locations: [0, 1])!
+    ctx.drawLinearGradient(g, start: CGPoint(x: rect.midX, y: rect.maxY), end: CGPoint(x: rect.midX, y: rect.minY), options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+}
+
+/// Draws the bubble at 62% of `tile`'s width, centered on `center` (pixels, y down).
+/// Wherever a grid cell gets 2.5 px or more it's rounded to whole pixels, so the edges
+/// stay hard; smaller (the Mac's Finder sizes) it's smoothed instead of turning to mush.
+/// 62% keeps the bubble inside a maskable web icon's safe circle (80% across).
+func drawBubble(_ ctx: CGContext, tile: CGFloat, center: CGPoint, canvas: CGFloat, color c: CGColor) {
+    let ideal = 0.62 * tile / 24
+    let crisp = ideal >= 2.5
+    let unit = crisp ? ideal.rounded() : ideal
+    var ox = center.x - 12 * unit, oy = center.y - 12 * unit
+    if crisp { ox.round(); oy.round() }
+    ctx.setShouldAntialias(!crisp)
+    ctx.setFillColor(c)
+    for r in bubbleRects {
+        // CG is y-up: flip the grid's y.
+        ctx.fill(CGRect(x: ox + r.x * unit, y: canvas - (oy + (r.y + r.h) * unit), width: r.w * unit, height: r.h * unit))
+    }
+}
+
+func draw(size: Int, dev: Bool, mac: Bool, look: Look = .light) -> Data {
     let s = CGFloat(size)
     // iOS and web icons must be opaque (App Store Connect rejects an alpha channel);
     // the Mac's keep theirs (the tile floats on a transparent margin).
     let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
                         space: CGColorSpace(name: CGColorSpace.sRGB)!,
                         bitmapInfo: (mac ? CGImageAlphaInfo.premultipliedLast : CGImageAlphaInfo.noneSkipLast).rawValue)!
-    ctx.scaleBy(x: s / 1024, y: s / 1024)
-    ctx.setShouldAntialias(false)
+    // The Dev band covers the bottom 200/1024; the bubble moves up to stay clear of it.
+    let band = dev ? 200 / 1024 * s : 0
     if mac {
         // macOS: a rounded teal tile with the standard margin.
-        let tile = CGRect(x: 100, y: 100, width: 824, height: 824)
+        let tile = CGRect(x: 100 / 1024 * s, y: 100 / 1024 * s, width: 824 / 1024 * s, height: 824 / 1024 * s)
+        ctx.saveGState()
         ctx.setShouldAntialias(true)
-        ctx.addPath(CGPath(roundedRect: tile, cornerWidth: 185, cornerHeight: 185, transform: nil))
-        ctx.setFillColor(color(0x008080))
-        ctx.fillPath()
-        // Hard pixel edges blur into a blob at Finder sizes (16-64 px); smooth those.
-        ctx.setShouldAntialias(size < 128)
-        drawBubble(ctx, in: CGRect(x: 222, y: 252, width: 580, height: 520))
+        ctx.addPath(CGPath(roundedRect: tile, cornerWidth: 185 / 1024 * s, cornerHeight: 185 / 1024 * s, transform: nil))
+        ctx.clip()
+        fillBackground(ctx, look, tile)
+        ctx.restoreGState()
+        drawBubble(ctx, tile: tile.width, center: CGPoint(x: s / 2, y: (tile.minY + min(tile.maxY, s - band)) / 2), canvas: s, color: color(look.colors.bubble))
     } else {
-        ctx.setFillColor(color(0x008080))
-        ctx.fill(CGRect(x: 0, y: 0, width: 1024, height: 1024))
-        drawBubble(ctx, in: web ? CGRect(x: 212, y: 262, width: 600, height: 500) : CGRect(x: 152, y: 212, width: 720, height: 600))
+        fillBackground(ctx, look, CGRect(x: 0, y: 0, width: s, height: s))
+        drawBubble(ctx, tile: s, center: CGPoint(x: s / 2, y: (s - band) / 2), canvas: s, color: color(look.colors.bubble))
     }
 
     if dev {
-        let band = CGRect(x: 0, y: 0, width: 1024, height: 190)
+        ctx.setShouldAntialias(false)
+        let rect = CGRect(x: 0, y: 0, width: s, height: 190 / 1024 * s)
         ctx.setFillColor(color(0xffffe1))
-        ctx.fill(band)
+        ctx.fill(rect)
         ctx.setFillColor(color(0x000000))
-        ctx.fill(CGRect(x: 0, y: band.maxY, width: 1024, height: 10))
+        ctx.fill(CGRect(x: 0, y: rect.maxY, width: s, height: 10 / 1024 * s))
         ctx.setShouldAntialias(true)
-        text(ctx, "DEV", size: 140, color: color(0x000000), at: CGPoint(x: 512, y: band.midY), center: true)
+        text(ctx, "DEV", size: 140 / 1024 * s, color: color(0x000000), at: CGPoint(x: s / 2, y: rect.midY), center: true)
     }
 
     let rep = NSBitmapImageRep(cgImage: ctx.makeImage()!)
@@ -104,9 +122,17 @@ for dev in [false, true] {
     let name = dev ? "AppIcon-Dev" : "AppIcon"
     let dir = assets.appending(path: "\(name).appiconset")
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    var images: [[String: String]] = []
+    var images: [[String: Any]] = []
     try draw(size: 1024, dev: dev, mac: false).write(to: dir.appending(path: "ios-1024.png"))
     images.append(["filename": "ios-1024.png", "idiom": "universal", "platform": "ios", "size": "1024x1024"])
+    // The iPhone's dark and tinted Home Screens (the App Store build only).
+    if !dev {
+        for look in [Look.dark, .tinted] {
+            let file = "ios-1024-\(look).png"
+            try draw(size: 1024, dev: false, mac: false, look: look).write(to: dir.appending(path: file))
+            images.append(["appearances": [["appearance": "luminosity", "value": "\(look)"]], "filename": file, "idiom": "universal", "platform": "ios", "size": "1024x1024"])
+        }
+    }
     for (points, scale) in [(16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2), (256, 1), (256, 2), (512, 1), (512, 2)] {
         let px = points * scale
         let file = "mac-\(points)@\(scale)x.png"
@@ -124,7 +150,7 @@ print("wrote YapIcon")
 
 // The web app (repo root is three levels up from Yap/Assets.xcassets).
 let web = assets.appending(path: "../../../web").standardized
-try draw(size: 192, dev: false, mac: false, web: true).write(to: web.appending(path: "icon-192.png"))
-try draw(size: 512, dev: false, mac: false, web: true).write(to: web.appending(path: "icon-512.png"))
+try draw(size: 192, dev: false, mac: false).write(to: web.appending(path: "icon-192.png"))
+try draw(size: 512, dev: false, mac: false).write(to: web.appending(path: "icon-512.png"))
 try draw(size: 180, dev: false, mac: false).write(to: web.appending(path: "apple-touch-icon.png"))
 print("wrote web icons")
