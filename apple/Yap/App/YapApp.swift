@@ -1,9 +1,6 @@
 import SwiftUI
 import YapCore
 import YapVoice
-#if os(iOS)
-import AVFoundation
-#endif
 
 @main
 struct YapApp: App {
@@ -13,8 +10,9 @@ struct YapApp: App {
     init() {
         #if os(iOS)
         // GIF videos are muted and must never stop someone's music; voice
-        // switches the session to playAndRecord itself when a call starts.
-        try? AVAudioSession.sharedInstance().setCategory(.ambient, options: [.mixWithOthers])
+        // switches the session to playAndRecord itself when a call starts
+        // (and AppModel puts this back after).
+        AudioSessionSetup.everyday()
         #endif
         // One look now: a skin stored by an earlier version (Apple, Arch) is forgotten.
         Look.settle()

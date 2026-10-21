@@ -70,6 +70,21 @@ export function renderMessages({ keep = 'auto' } = {}) {
 
   if (keep === 'bottom' || (keep === 'auto' && atBottom)) scroller.scrollTop = scroller.scrollHeight;
   else if (keep === 'anchor') scroller.scrollTop = prevTop + (scroller.scrollHeight - prevHeight);
+  renderNewPill();
+}
+
+/** Reading the newest messages (within a line or so of the bottom). */
+export function nearBottom() {
+  const scroller = $('messages');
+  return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+}
+
+/** "↓ New messages": someone wrote below while you're scrolled up; gone once you're back at the bottom. */
+export function renderNewPill() {
+  const pill = $('new-pill');
+  if (!pill) return;
+  if (state.newBelow && nearBottom()) state.newBelow = false;
+  pill.hidden = !(state.newBelow && state.view === 'chat');
 }
 
 /** "Jump to first unread" while the "New since…" divider is above the screen. */
@@ -77,8 +92,8 @@ export function renderJumpPill() {
   const pill = $('jump-pill');
   const divider = $('new-divider');
   if (!pill) return;
-  const scroller = $('messages');
-  const above = divider && state.view === 'chat' && divider.offsetTop < scroller.scrollTop;
+  // (By where they are on screen: the divider's offsetTop counts from the page, not the list.)
+  const above = divider && state.view === 'chat' && divider.getBoundingClientRect().top < $('messages').getBoundingClientRect().top;
   pill.hidden = !above;
 }
 

@@ -118,9 +118,9 @@ npm run dev:test -- --port 8787 --persist-to .wrangler/dev-test \
 
 Open http://localhost:8787/#key=testkey. The first person to sign up becomes
 the owner. For `npm run dev` (with your own `wrangler.jsonc`), copy
-`.dev.vars.example` to `.dev.vars` first. `CLAUDE.md` has the full list of
-commands, conventions and design decisions, written for both people and
-coding agents.
+`.dev.vars.example` to `.dev.vars` first. `CLAUDE.md` has the commands and
+conventions, and `docs/DECISIONS.md` the design decisions, written for both
+people and coding agents.
 
 ## License
 

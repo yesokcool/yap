@@ -1,5 +1,7 @@
+import AVFoundation
 import Foundation
 import Observation
+import os
 import SwiftUI
 import YapCore
 import YapVoice
@@ -181,6 +183,12 @@ final class AppModel {
     var planningHang = false
     /// The message a doodle reaction is being drawn for (one sheet at the root).
     var doodleTarget: Message?
+    /// What's typed and unsent in each channel (it waits while you're elsewhere).
+    @ObservationIgnored var drafts = ChannelDrafts()
+    /// "You were in Lounge." [Rejoin] after a relaunch mid-call.
+    let rejoinOffer = RejoinOffer()
+    /// Unread mentions on the app icon (iPhone) or the Dock icon (Mac).
+    @ObservationIgnored let mentionBadge = MentionBadge()
 
     /// The channel the call sheet shows: the call we're in (or, for DEBUG
     /// screenshots, `YAP_SCREEN=voicepanel:<id>`).
@@ -193,6 +201,8 @@ final class AppModel {
     #if os(iOS)
     /// iPhone: the call on the Lock Screen and in the Dynamic Island.
     @ObservationIgnored private var liveCall: LiveCall?
+    /// iPhone: back to the everyday audio session a moment after a call.
+    @ObservationIgnored private var sessionSettle: Task<Void, Never>?
     #endif
     @ObservationIgnored private var minecraftTask: Task<Void, Never>?
     @ObservationIgnored private var configTask: Task<Void, Never>?
@@ -231,13 +241,18 @@ final class AppModel {
         voice.onEvent = { [weak self] event in self?.voiceEvent(event) }
         voice.onAudioSession = { [weak self] event in self?.callWatch?.audio(event) }
         voice.onEndedByServer = { [weak self] in self?.callWatch?.endedByServer() }
+        rejoinOffer.currentCall = { [weak voice] in voice?.wantedChannelId }
         voice.onInVoiceChanged = { [weak self] in
+            self?.rejoinOffer.callChanged()
             self?.callWatch?.callChanged()
             #if os(iOS)
             self?.liveCall?.callChanged()
+            self?.settleAudioSession()
+            self?.applyMicVolume()
             #endif
         }
         notifier.onRejoin = { [weak self] channelId in self?.rejoin(channelId) }
+        notifier.onOpen = { [weak self] channelId, messageId in self?.openMentioned(channelId, messageId) }
         screenPiP.renderer = voice.screenRenderer
         screenPiP.onRestore = { [weak self] in self?.showScreen() }
         screenPiP.onClosed = { [weak self] in
@@ -258,8 +273,17 @@ final class AppModel {
         liveCall = LiveCall(model: self)
         // Screen sharing: the broadcast extension finds Yap at this socket while it's in a call.
         voice.broadcastSocketPath = AppIdentity.appGroup.flatMap(BroadcastScreenFeeder.socketPath(appGroup:))
+        // Mic volume: a new route (AirPods, a headset) gets the level you picked.
+        NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.voice.isInVoice else { return }
+                MicVolume.apply()
+            }
+        }
         #endif
         launch.apply(to: self)
+        settleRejoinOffer()
+        watchMentionBadge()
     }
 
     func start() {
@@ -338,12 +362,49 @@ final class AppModel {
 
     /// Quitting: a goodbye to the call, so nobody keeps it waiting for us.
     func willTerminate() {
+        // (The call's record stays: the next launch offers it back.)
+        rejoinOffer.terminating = true
         callWatch?.willTerminate()
         #if os(iOS)
         liveCall?.willTerminate()
         #endif
         voice.goodbye()
     }
+
+    #if os(iOS)
+    /// Out of a call: back to the everyday audio session. WebRTC leaves its
+    /// play-and-record session behind (voice chat, not mixable), so Yap's
+    /// sounds after a call (Mute, a chime preview, the soundboard) stopped
+    /// someone's music, ignored the silent switch and came out of the
+    /// speaker. A moment later, so the leave blip finishes and WebRTC has let
+    /// go of the session; never while Hear yourself runs (it sets its own and
+    /// puts this back after).
+    private func settleAudioSession() {
+        sessionSettle?.cancel()
+        guard !voice.isInVoice else { return }
+        sessionSettle = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard let self, !Task.isCancelled, !self.voice.isInVoice, !self.micCheck.isRunning,
+                  AudioSessionSetup.leftByACall else { return }
+            AudioSessionSetup.everyday()
+            Logger(subsystem: Bundle.main.bundleIdentifier ?? "yap", category: "voice").info("audio session: back to ambient after the call")
+        }
+    }
+
+    /// In a call: the mic level you picked (Settings › Voice › Mic volume),
+    /// once the call holds the mic (WebRTC activates the session a moment
+    /// after the join).
+    private func applyMicVolume() {
+        guard voice.isInVoice, MicVolume.chosen != nil else { return }
+        Task { [weak self] in
+            for delay in [1.0, 3.0] {
+                try? await Task.sleep(for: .seconds(delay))
+                guard let self, self.voice.isInVoice else { return }
+                MicVolume.apply()
+            }
+        }
+    }
+    #endif
 
     #if DEBUG && os(iOS)
     /// `YAP_DEMO_LIVE_CALL`: a pretend call's Live Activity.
@@ -361,11 +422,26 @@ final class AppModel {
         }
     }
 
+    /// A mention's notification was tapped: its channel, at that message
+    /// (once we're connected; a tap can be what launched Yap).
+    func openMentioned(_ channelId: String, _ messageId: String) {
+        Task {
+            for _ in 0..<150 where !client.isConnected { try? await Task.sleep(for: .milliseconds(200)) }
+            guard let channel = client.channelsById[channelId], channel.kind != .voice else { return }
+            jump = JumpTarget(channelId: channelId, messageId: messageId)
+            open(.channel(channelId))
+        }
+    }
+
     func scenePhaseChanged(_ phase: ScenePhase) {
         client.isAppActive = phase == .active
         // Inactive is still on screen (Siri, dictation, Control Center, a
         // notification pulled down): only the background is off screen.
         callWatch?.scene(active: phase != .background)
+        #if os(iOS)
+        // A call keeps Yap running off screen: hold on to as little as it can.
+        if phase == .background, voice.isInVoice { images.trimPictures(to: ImageStore.backgroundBudget, sparing: 0) }
+        #endif
         if phase == .active {
             #if os(iOS)
             // A call joined off screen gets its Live Activity now.
@@ -386,6 +462,11 @@ final class AppModel {
 
     func phaseChanged(_ phase: YapClient.Phase) {
         callWatch?.connection(online: phase == .online)
+        if phase == .signedOut || phase == .needsInvite {
+            // Signed out: nothing typed, and no call, of that account stays.
+            drafts.removeAll()
+            rejoinOffer.forget()
+        }
         if phase == .online {
             if config == nil { refreshConfig() }
             warmSounds()
@@ -480,7 +561,8 @@ final class AppModel {
         guard !lookingAtIt, !client.quietHolds(mention: true) else { return }
         notifier.chime()
         if !client.isAppActive {
-            notifier.post(title: "\(author) mentioned you", subtitle: channel, body: MessageFormatter.preview(message), thread: message.channelId)
+            notifier.post(title: "\(author) mentioned you", subtitle: channel, body: MessageFormatter.preview(message), thread: message.channelId,
+                          opens: (message.channelId, message.id))
         }
     }
 

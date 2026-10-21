@@ -31,6 +31,7 @@ const DEFAULTS = {
   shareSound: true, // screen sharing: send the share's sound (a tab's, or the whole screen's on Windows)
   echoCancellation: true,
   autoGain: true,
+  micVolume: 1, // 0..2, your mic before the gate (Settings › Voice › Mic volume; PROTOCOL.md › Transmit gate)
   sounds: true,
   soundboardVolume: 0.5, // 0..1 of each clip's measured (already capped) loudness
   soundboardMuted: false,

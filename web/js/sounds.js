@@ -93,20 +93,26 @@ export function playChime(chime, sound, { preview = false } = {}) {
 // soundboard volume on top (default 50 %, never above the clip's gain); the
 // limiter catches anything that still peaks; and at most two clips overlap.
 
-const decoded = new Map(); // media id → Promise<AudioBuffer>
+const decoded = new Map(); // media id → Promise<AudioBuffer>, the most recently played last
+/** Decoded clips kept ready (each ~1 MB once decoded); the least recently played go first, and decode again if played again. */
+const KEEP_DECODED = 32;
 const playing = [];
 
 function bufferFor(media) {
-  if (!decoded.has(media)) {
-    decoded.set(media, fetch(`/media/${media}`)
+  let buffer = decoded.get(media);
+  if (buffer) decoded.delete(media); // (re-added below: now the most recent)
+  else {
+    buffer = fetch(`/media/${media}`)
       .then((res) => (res.ok ? res.arrayBuffer() : Promise.reject(new Error(`HTTP ${res.status}`))))
       .then((bytes) => out().ctx.decodeAudioData(bytes))
       .catch((err) => {
-        decoded.delete(media);
+        if (decoded.get(media) === buffer) decoded.delete(media);
         throw err;
-      }));
+      });
   }
-  return decoded.get(media);
+  decoded.set(media, buffer);
+  while (decoded.size > KEEP_DECODED) decoded.delete(decoded.keys().next().value);
+  return buffer;
 }
 
 /** Play a clip (`{ media, gain }`). `force` ignores the mute switch (previews). */

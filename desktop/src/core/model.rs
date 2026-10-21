@@ -147,6 +147,9 @@ pub struct Model {
     pub toasts: VecDeque<(String, Instant)>,
     pub scroll: Option<ScrollHint>,
     pub window_focused: bool,
+    /// Bumped by each @mention (or reply to you) while the window isn't in
+    /// front: the UI asks the OS to point Yap out (taskbar flash, Dock bounce).
+    pub attention: u64,
     pub awaiting_channel: Option<String>,
     /// People in the waiting room (members can let them in).
     pub join_requests: Vec<User>,
@@ -493,6 +496,7 @@ impl Model {
             toasts: VecDeque::new(),
             scroll: None,
             window_focused: true,
+            attention: 0,
             awaiting_channel: None,
             join_requests: Vec::new(),
             mentions: HashMap::new(),
@@ -687,6 +691,26 @@ impl Model {
             }
         }
         self.mentions.clear();
+    }
+
+    /// In a call: keep `config.last_call` up to date (at most a write a minute),
+    /// so the next launch can offer it again. Returns whether it changed.
+    pub fn note_call(&mut self, now: i64) -> bool {
+        let Some(channel) = self.voice_channel.clone() else { return false };
+        let fresh = self.config.last_call.as_ref().is_some_and(|c| c.channel == channel && c.server == self.config.server && (0..60_000).contains(&(now - c.at)));
+        if fresh {
+            return false;
+        }
+        self.config.last_call = Some(crate::config::LastCall { server: self.config.server.clone(), channel, at: now });
+        self.config_dirty = true;
+        true
+    }
+
+    /// Left the call yourself (or signed out, or another server): nothing to offer next time.
+    pub fn forget_call(&mut self) {
+        if self.config.last_call.take().is_some() {
+            self.config_dirty = true;
+        }
     }
 
     /// A quiet line in a channel for this session (the same `key` replaces an older one; the last 20 stay).

@@ -21,6 +21,12 @@
  *    nothing but digital silence for 5 s.
  *  - …and the loudest sample in those 20 ms (`peak`, dBFS), for the meter's
  *    "Too loud (clipping)" (ClipWatch below).
+ *  - Mic volume (`volume`, 0–2, Settings › Voice) is applied first, so the
+ *    level, voice activity and what's sent all hear it; above 1 a soft
+ *    limiter keeps it from going past 0 dBFS. At 1 the samples are left exactly as
+ *    they are. `peak` stays the mic's own (before the volume: clipping
+ *    there is the system's input level); `boost` is the loudest sample after
+ *    the volume, before the limiter (it's working hard: turn it down).
  *  - It also says whether voice activity *would* open it (`voice`), in every
  *    mode: you're talking. Mute is applied after this (below), so that still
  *    works while you're muted: the "You're muted" reminder.
@@ -51,9 +57,18 @@ export const GATE = {
 
 const toDb = (meanSquare) => (meanSquare > 1e-12 ? 10 * Math.log10(meanSquare) : -120);
 
+/** Mic volume's limiter: straight through up to −1 dBFS, then a soft knee that levels off at 0 dBFS (never past it). */
+const KNEE = 10 ** (-1 / 20);
+export function limit(y) {
+  const a = y < 0 ? -y : y;
+  if (a <= KNEE) return y;
+  const out = KNEE + (1 - KNEE) * Math.tanh((a - KNEE) / (1 - KNEE));
+  return y < 0 ? -out : out;
+}
+
 export class Gate {
   /** @param {number} sampleRate */
-  constructor(sampleRate, { mode = 'vad', threshold = -50, ptt = false, test = false } = {}) {
+  constructor(sampleRate, { mode = 'vad', threshold = -50, ptt = false, test = false, volume = 1 } = {}) {
     this.sr = sampleRate;
     const ms = (v) => Math.round((v / 1000) * sampleRate);
     this.window = ms(GATE.windowMs);
@@ -70,6 +85,7 @@ export class Gate {
     this.threshold = threshold;
     this.ptt = ptt;
     this.test = test; // a mic test: push-to-talk acts like always-on
+    this.volume = volume; // Mic volume (1 = as the mic gives it)
     this.t = 0; // samples processed
     this.open = mode === 'open';
     this.holdUntil = -1;
@@ -86,6 +102,7 @@ export class Gate {
     this.repSum = 0;
     this.repN = 0;
     this.repPeak = 0;
+    this.repBoost = 0;
     this.silentFor = 0;
     // Adaptive noise floor: the quietest window in each bucket.
     this.buckets = [];
@@ -99,9 +116,10 @@ export class Gate {
     return mode === 'vad' ? this.preRoll : 0;
   }
 
-  /** Change mode / sensitivity / push-to-talk key state (any subset). */
-  set({ mode, threshold, ptt, test } = {}) {
+  /** Change mode / sensitivity / push-to-talk key state / mic volume (any subset). */
+  set({ mode, threshold, ptt, test, volume } = {}) {
     if (threshold !== undefined) this.threshold = threshold;
+    if (volume !== undefined) this.volume = volume;
     if (ptt !== undefined) {
       this.ptt = ptt;
       if (ptt) this.holdUntil = Number.POSITIVE_INFINITY;
@@ -171,17 +189,26 @@ export class Gate {
     const chans = output.length;
     while (this.ring.length < chans) this.ring.push(new Float32Array(this.ringSize));
     const size = this.ringSize;
+    const v = this.volume;
     let report = null;
     for (let i = 0; i < n; i++) {
-      const x0 = input[0]?.[i] ?? 0;
+      const raw = input[0]?.[i] ?? 0;
+      const a = raw < 0 ? -raw : raw;
+      if (a > this.repPeak) this.repPeak = a;
+      let x0 = raw;
+      if (v !== 1) {
+        const y = raw * v;
+        const b = y < 0 ? -y : y;
+        if (b > this.repBoost) this.repBoost = b;
+        x0 = limit(y);
+      }
       const sq = x0 * x0;
       this.winSum += sq;
       this.repSum += sq;
-      const a = x0 < 0 ? -x0 : x0;
-      if (a > this.repPeak) this.repPeak = a;
       const r = (this.w - this.delay + size) % size;
       for (let c = 0; c < chans; c++) {
-        const x = (input[c] ?? input[0])?.[i] ?? 0;
+        let x = c === 0 ? x0 : (input[c] ?? input[0])?.[i] ?? 0;
+        if (c !== 0 && v !== 1) x = limit(x * v);
         const ring = this.ring[c];
         ring[this.w] = x;
         output[c][i] = ring[r] * this.gain;
@@ -200,13 +227,14 @@ export class Gate {
       if (++this.repN === this.reportLen) {
         this.silentFor = this.repPeak < GATE.silencePeak ? this.silentFor + this.repN : 0;
         report = {
-          db: toDb(this.repSum / this.repN), peak: toDb(this.repPeak * this.repPeak), open: this.open, voice: this.t < this.voiceUntil,
+          db: toDb(this.repSum / this.repN), peak: toDb(this.repPeak * this.repPeak), boost: toDb(this.repBoost * this.repBoost), open: this.open, voice: this.t < this.voiceUntil,
           pttOpen: this.mode === 'ptt' && !this.test && this.open,
           floor: this.floor, at: this.openAt, silent: this.silentFor >= this.silenceLen,
         };
         this.repSum = 0;
         this.repN = 0;
         this.repPeak = 0;
+        this.repBoost = 0;
       }
     }
     return report;

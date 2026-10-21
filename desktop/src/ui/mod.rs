@@ -116,6 +116,11 @@ pub fn run(cfg: Config, path: PathBuf) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+/// What the picture picker offers, and what a drop looks for first.
+const PICTURE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
+/// A dropped file bigger than this isn't read (pictures go out ≤ 1.9 MB; phone photos are ~5–15 MB).
+const MAX_DROP_BYTES: u64 = 64 * 1024 * 1024;
+
 /// The window's smallest size, in UI points (it grows with the zoom).
 const MIN_W: f32 = 680.0;
 const MIN_H: f32 = 440.0;
@@ -180,8 +185,8 @@ pub struct App {
     done_rx: std::sync::mpsc::Receiver<()>,
     images: images::Images,
     pub composer: String,
-    drafts: HashMap<String, String>,
-    draft_channel: String,
+    /// What's typed (and in the tray) in the other channels.
+    drafts: chat::Drafts<Staged>,
     focus_composer: bool,
     scroll: chat::ScrollState,
     modal: Option<dialogs::Modal>,
@@ -196,7 +201,8 @@ pub struct App {
     body_cache: HashMap<String, Arc<Vec<markup::Block>>>,
     /// Lowercase display names, longest first (for @mention highlights).
     names: Vec<String>,
-    names_len: usize,
+    /// A hash of everyone's id and name when `names` was made.
+    names_key: u64,
     gif_picker: gifs::GifPicker,
     /// Screenshot aid: YAP_DEBUG_OPEN=gifs|react opens that picker once config/history arrive.
     debug_open: Option<String>,
@@ -270,6 +276,13 @@ pub struct App {
     pub screen: screen::ScreenUi,
     /// Ctrl/⌘ + scroll over a voice row, adding up to a 5 % step.
     pub wheel_volume: sections::WheelVolume,
+    /// "You were in Lounge. [Rejoin]": the call this app was in when it last
+    /// ran, if that was under 10 minutes ago (until it's joined, dismissed or too old).
+    pub rejoin: Option<crate::config::LastCall>,
+    /// The mentions we've asked the OS to point out (`Model::attention`) and
+    /// the Dock badge shown (macOS), so each is done once.
+    attention_seen: u64,
+    dock_badge: Option<u32>,
 }
 
 /// Preview before sending: what's waiting in the tray above the composer.
@@ -329,6 +342,10 @@ impl App {
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         ctx.set_zoom_factor(size.unwrap_or(AUTO_SIZE));
         let welcome = dialogs::Welcome::from_config(&shared.model.lock().config);
+        let rejoin = {
+            let m = shared.model.lock();
+            m.config.last_call.clone().filter(|c| c.offer(&m.config.server, core::now_ms()))
+        };
         let (modal, settings) = debug::start_dialog(ctx, &shared);
         let mut app = Self {
             shared,
@@ -337,8 +354,7 @@ impl App {
             done_rx,
             images: images::Images::new(ctx),
             composer: String::new(),
-            drafts: HashMap::new(),
-            draft_channel: String::new(),
+            drafts: chat::Drafts::default(),
             focus_composer: true,
             scroll: chat::ScrollState::default(),
             modal,
@@ -350,7 +366,7 @@ impl App {
             volume_ask: None,
             body_cache: HashMap::new(),
             names: Vec::new(),
-            names_len: usize::MAX,
+            names_key: 0,
             react_picker: None,
             gif_picker: gifs::GifPicker::default(),
             debug_open: std::env::var("YAP_DEBUG_OPEN").ok().filter(|v| debug::DEBUG_LATER.contains(&v.as_str())),
@@ -395,6 +411,9 @@ impl App {
             auto: None,
             screen: screen::ScreenUi::default(),
             wheel_volume: Default::default(),
+            rejoin,
+            attention_seen: 0,
+            dock_badge: None,
         };
         debug::stage(&mut app);
         app
@@ -435,7 +454,7 @@ impl App {
         };
         let (kind, exts): (&str, &[&str]) = match purpose {
             PickFor::Sound { .. } => ("Sounds", &["wav", "mp3", "m4a", "aac", "ogg", "oga", "opus", "flac", "mp4", "caf", "aif", "aiff"]),
-            _ => ("Pictures", &["png", "jpg", "jpeg", "gif", "webp"]),
+            _ => ("Pictures", PICTURE_EXTS),
         };
         rt.spawn(async move {
             let picked = rfd::AsyncFileDialog::new().set_title(title).add_filter(kind, exts).pick_file().await;
@@ -539,12 +558,19 @@ impl App {
         self.body_cache.entry(text.to_string()).or_insert_with(|| Arc::new(markup::parse(text, names))).clone()
     }
 
-    /// Re-derive the @mention name list when the member list changes.
+    /// Re-derive the @mention name list when the member list changes (someone
+    /// joined, or renamed themselves: the count alone misses that).
     fn refresh_names(&mut self, m: &Model) {
-        if m.users.len() == self.names_len {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut ids: Vec<(&String, &String)> = m.users.iter().map(|(id, u)| (id, &u.name)).collect();
+        ids.sort_unstable();
+        ids.hash(&mut h);
+        let key = h.finish();
+        if key == self.names_key {
             return;
         }
-        self.names_len = m.users.len();
+        self.names_key = key;
         let mut names: Vec<String> = m.users.values().map(|u| u.name.to_lowercase()).collect();
         names.sort_by_key(|n| std::cmp::Reverse(n.len()));
         self.names = names;
@@ -679,14 +705,21 @@ impl App {
                 m.mark_read(&ch, None);
             }
         }
-        // Drop a picture onto the window to send it (like the web client).
+        // Drop a picture onto the window to send it (like the web client: the
+        // first picture among what's dropped). It's read here, on the UI
+        // thread, so a big file dropped by mistake is refused unread.
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        if let Some(f) = dropped.into_iter().next() {
+        let picture = |f: &&egui::DroppedFileHandle| {
+            f.path().extension().and_then(|e| e.to_str()).is_some_and(|e| PICTURE_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+        };
+        if let Some(f) = dropped.iter().find(picture).or(dropped.first()) {
             let online = self.shared.model.lock().status == Status::Online;
-            match f.bytes() {
-                Ok(b) if online && self.modal.is_none() => self.stage_picture(b),
-                Ok(_) => self.shared.model.lock().toast("Connect first, then drop the picture again."),
-                Err(_) => self.shared.model.lock().toast("Couldn't read that file."),
+            let too_big = std::fs::metadata(f.path()).is_ok_and(|md| md.len() > MAX_DROP_BYTES);
+            match if too_big { None } else { Some(f.bytes()) } {
+                None => self.shared.model.lock().toast("That file is too big to send."),
+                Some(Ok(b)) if online && self.modal.is_none() => self.stage_picture(b),
+                Some(Ok(_)) => self.shared.model.lock().toast("Connect first, then drop the picture again."),
+                Some(Err(_)) => self.shared.model.lock().toast("Couldn't read that file."),
             }
         }
         self.poll_file_pick(ctx);
@@ -738,6 +771,27 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Every pass, the window shown or not (minimized, on another space):
+    /// a mention while Yap isn't the front window flashes its taskbar button
+    /// (Windows), bounces its Dock icon once (macOS) or marks it urgent (X11);
+    /// the Dock shows how many mentions are unread.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let (attention, focused, mentions) = {
+            let m = self.shared.model.lock();
+            (m.attention, m.window_focused, m.mentions.values().sum::<u32>())
+        };
+        if attention != self.attention_seen {
+            self.attention_seen = attention;
+            if !focused {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+            }
+        }
+        if self.dock_badge != Some(mentions) {
+            self.dock_badge = Some(mentions);
+            crate::notify::dock_badge(mentions);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         debug::tab(&ctx);
@@ -774,6 +828,7 @@ impl eframe::App for App {
                 self.load_shortcodes(&server);
             }
             self.update_title(&ctx, &m);
+            sections::settle_rejoin(self, &m, &ctx);
             // An update was installed: quit, and main() starts the new version.
             if matches!(m.update, UpdateState::Installed(_)) && !self.relaunching {
                 self.relaunching = true;

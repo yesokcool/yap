@@ -8,6 +8,7 @@ import { esc } from '../format.js';
 import { $, awayOf, conn, isMod, myRole, state } from './state.js';
 import { ago, avatar, copyByHand, nameIn, nameOf, swatches, toast, untilText } from './ui.js';
 import { applyTheme } from './look.js';
+import { micVolume } from '../voice.js';
 import { postImage } from './uploads.js';
 import { currentPushSubscription, disableBrowserPush, enableBrowserPush } from './push.js';
 import { fetchIce, hasRelay, renderVoicePanel, screenView, syncDuck, voice } from './voice-ui.js';
@@ -131,6 +132,7 @@ export function openSettings(tab) {
   form.theme.value = settings.theme;
   form.mode.value = settings.mode;
   form.vadThreshold.value = settings.vadThreshold;
+  renderMicVolume();
   form.bitrate.value = String(settings.bitrate);
   renderBitrateWarning();
   for (const k of ['music', 'noiseSuppression', 'echoCancellation', 'autoGain', 'sounds', 'relayOnly', 'mutedReminder', 'pttClick', 'duckMedia']) form[k].checked = settings[k];
@@ -278,6 +280,9 @@ function renderBitrateWarning() {
   $('bitrate-warn').hidden = settings.bitrate < HIGH_BITRATE;
 }
 
+const MIC_CLIPPING = "The loudest moments hit the top and distort for everyone. Turn your mic's input level down (in your system's sound settings), or sit a little further from it.";
+const MIC_VOLUME_LOUD = 'Mic volume is turned up so far that your loudest moments get squashed. Turn it down a little.';
+
 export function renderMeter(db) {
   const pct = (v) => `${Math.max(0, Math.min(100, ((v + 80) / 80) * 100))}%`;
   const fill = $('meter-fill');
@@ -286,11 +291,26 @@ export function renderMeter(db) {
   if (micTest.on) micTest.levels.push(db);
   // "Hot" = loud enough to open the gate (in a noisy room that's above your line: the gate adapts).
   fill.classList.toggle('hot', settings.mode === 'vad' && db > Math.max(settings.vadThreshold, voice.openAt));
-  // Peaks hitting the top again and again: "Too loud (clipping)" (gate-worklet.js › ClipWatch).
+  // Peaks hitting the top again and again: "Too loud (clipping)" (gate-worklet.js › ClipWatch). The mic's
+  // own peaks (before Mic volume) are the system's input level; Mic volume pushing them into its limiter is ours.
   const clipping = db > -100 && voice.clipping;
-  fill.classList.toggle('clip', clipping);
-  $('mic-clip').hidden = !clipping;
+  const limiting = db > -100 && !clipping && voice.limiting;
+  fill.classList.toggle('clip', clipping || limiting);
+  const warn = $('mic-clip');
+  warn.hidden = !clipping && !limiting;
+  if (!warn.hidden) {
+    warn.textContent = limiting ? 'Too loud: turn Mic volume down' : 'Too loud (clipping)';
+    warn.title = limiting ? MIC_VOLUME_LOUD : MIC_CLIPPING;
+  }
   $('meter-mark').style.left = pct(settings.vadThreshold);
+}
+
+/** Settings › Voice › Mic volume: the slider and its "100%". */
+function renderMicVolume() {
+  const pct = Math.round(micVolume() * 100);
+  const form = $('settings-form');
+  if (Number(form.micVolume.value) !== pct) form.micVolume.value = String(pct);
+  $('mic-volume-out').textContent = `${pct}%`;
 }
 
 /**
@@ -334,7 +354,7 @@ function checkMicTest() {
   const secs = (performance.now() - micTest.startedAt) / 1000;
   if (voice.silent) return renderMicTest('Your mic sends nothing but silence: is it muted (a switch, or in the system’s sound settings)?');
   if (!levels.length && secs > 2) return renderMicTest('No sound is coming from the microphone. Try another one above.');
-  if (levels.length && Math.max(...levels) < -70 && secs > 3) return renderMicTest('Hardly hearing anything. Speak up, or pick another microphone above.');
+  if (levels.length && Math.max(...levels) < -70 && secs > 3) return renderMicTest(micVolume() < 2 ? 'Hardly hearing anything. Speak up, turn Mic volume up, or pick another microphone above.' : 'Hardly hearing anything. Speak up, or pick another microphone above.');
   if (levels.length && Math.max(...levels) >= -70) renderMicTest(state.voiceWanted ? 'Your mic is on (you’re in a call). Speak and watch the bar.' : 'Listening. Speak and watch the bar.');
 }
 
@@ -558,6 +578,12 @@ export function bindSettings() {
     save({ vadThreshold: Number(form.vadThreshold.value) });
     renderMeter(voice.localDb);
   });
+  // Mic volume: live, as you drag (the gate takes it at once; the mic isn't reopened).
+  form.micVolume.addEventListener('input', () => {
+    save({ micVolume: Number(form.micVolume.value) / 100 });
+    voice.setMicVolume();
+    renderMicVolume();
+  });
 
   dialog.addEventListener('close', () => stopMicTest());
 }
@@ -571,6 +597,7 @@ async function prepareAvatar(file) {
   const ctx = canvas.getContext('2d');
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, 256, 256);
+  bmp.close(); // (the decoded photo: tens of MB)
   const webp = await new Promise((r) => canvas.toBlob(r, 'image/webp', 0.9));
   return webp?.type === 'image/webp' ? webp : new Promise((r) => canvas.toBlob(r, 'image/png'));
 }

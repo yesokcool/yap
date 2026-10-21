@@ -202,7 +202,7 @@ with no password gets a temporary one through `member.resetPin`.
 | `account.pin` / `account.signout` | `pin, current?` / — | See *Identity*. |
 | `member.resetPin` | `uid` | Owner/mod: a temporary password comes back as `pin.reset`. |
 | `history` | `channelId, before?, beforeId?, limit?` | Newest page when `before` is omitted; older pages pass the oldest message's `ts` and `id`. `limit` ≤ 100 (default 50). A page also stops at ~512 KB of text, so it can hold fewer (`hasMore` stays true). |
-| `send` | `channelId, body, nonce?, gif?, image?, replyTo?` | Text channels only. ≤ 40,000 chars (encrypted Personal-space notes: ≤ 240,000); `replyTo` = a message id in the same channel (in your Personal space: any message you can read, which is *Save to Personal*) — see *Replies*; trailing whitespace trimmed. `body` may be empty when `gif` or `image` is set. `image` = `{id, width, height}` from `POST /api/image` (*HTTP* › Uploads: every upload needs your `sid` and `uploadToken`). `nonce` is echoed back to you only, so you can swap your optimistic copy. |
+| `send` | `channelId, body, nonce?, gif?, image?, replyTo?` | Text channels only. ≤ 40,000 chars (encrypted Personal-space notes: ≤ 240,000); `replyTo` = a message id in the same channel (in your Personal space: any message you can read, which is *Save to Personal*) — see *Replies*; trailing whitespace trimmed. `body` may be empty when `gif` or `image` is set. `image` = `{id, width, height}` from `POST /api/image` (*HTTP* › Uploads: every upload needs your `sid` and `uploadToken`). `nonce` is echoed back to you only, so you can swap your optimistic copy; make it unique to the message (a random id). The same send again within a day (same nonce, channel and text: a send repeated after a reconnect) is answered with the message it already made: your echo with that nonce, nothing stored or sent to anyone else (`no_message` if it was deleted meanwhile). |
 | `delete` | `id, blobs?` | Own messages (owner/mods: anyone's). **Erased, not hidden:** its text, GIF, picture, reactions and earlier versions are wiped from the server; only an empty row stays so the id is never reused. `blobs` (your own Personal space only, ≤ 10): ids of the note's encrypted pictures to erase too. |
 | `invite.create` | `label` | Make a personal invite link → `invite.created` (the key is shown once; only its hash is stored). |
 | `invite.list` | | → `invites` (yours; everyone's for owner/mods). |
@@ -212,7 +212,7 @@ with no password gets a temporary one through `member.resetPin`.
 | `link.remove` | `id` | Any member. → `links`. |
 | `channel.bitrate` | `channelId, bitrate \| null` | Voice quality for everyone in that channel (32k–510k from a fixed list); null = each person's own setting. → `channel`. |
 | `modlog` | | → `modlog` (last 200: who did what to whom; never message text). |
-| `push.subscribe` / `push.unsubscribe` | `endpoint, keys {p256dh, auth}` / `endpoint` | Browser pushes (Web Push, `/sw.js`). The server encrypts per RFC 8291 and signs with VAPID (`VAPID_PRIVATE_JWK` secret; public key in `/api/config` as `push.publicKey`). Pushes follow your push mode (subscribing a new browser with it off turns on pings & mentions; sending the same subscription again leaves the mode alone) and go to ntfy and every browser you subscribed; 404/410 from a push service forgets that browser. |
+| `push.subscribe` / `push.unsubscribe` | `endpoint, keys {p256dh, auth}` / `endpoint` | Browser pushes (Web Push, `/sw.js`). The server encrypts per RFC 8291 and signs with VAPID (`VAPID_PRIVATE_JWK` secret; public key in `/api/config` as `push.publicKey`). Pushes follow your push mode (subscribing a new browser with it off turns on pings & mentions; sending the same subscription again leaves the mode alone) and go to ntfy and every browser you subscribed; 404/410 from a push service forgets that browser. A browser push's payload is JSON `{title, body, tag, channelId?, messageId?}`: the ids are there when it's about a message (an @mention, a reply, `all` mode), and tapping it opens that message (`/sw.js` asks an open tab to jump, or opens `/#channel=<id>&message=<id>`). For those pushes, ntfy's click link is that same address. |
 | `device.handoff` | | A one-time sign-in pass (15 min) → `device.handoff {token}`. Hello with it as `token`: it's spent and `ready` carries a new lasting token for that device. Used by Add to Home Screen (`/#key=&handoff=&name=`), since home-screen apps don't share Safari's storage, and by the native apps whenever they open the web app (Draw, Space, Watch…: `/#key=&place=&handoff=&name=`; in-app pages add `&embed=1`, which hides the web's own sidebar and header for that tab). A pass that arrives while the browser still has a token is kept and used if that token turns out to be signed out. Limited to 5 at once, then one per 20 s; a refusal comes back as `error {re: 'device.handoff'}`. |
 | `obs.create` / `obs.revoke` | | A listen-only device token for an OBS Browser Source (`/obs#key=&listen=&channel=[&only=Name][&overlay=0]`) → `obs.created {token}` / turn all of yours off → `obs.revoked {count}` (their sockets close). A listen-only session may only send `hello`, `voice.join/leave/state` (always muted) and `signal`; it carries `client: "obs"` (apps don't list it in the channel or chime for it) and never gets the main key. |
 | `stats` | | Owner/mods: → `stats {chatBytes, mediaBytes, limitBytes}`. |
@@ -221,13 +221,13 @@ with no password gets a temporary one through `member.resetPin`.
 | `profile` | `name?, color?` | |
 | `channel.create` | `name, kind: "text" \| "voice"` | Any member. The name is kept as typed (≤ 32 characters). |
 | `channel.archive` | `channelId` | Any member. Hides it for everyone; messages stay. The last text channel can't be archived. Voice members are removed first. |
-| `voice.join` | `channelId, muted?, deafened?, resume?, prev?, proof?, screen?` | Joining another channel while in one = leave + join. `resume: true` = you keep calls across reconnects; `prev` + `proof` (+ `screen`) = this join continues an earlier session's call — see *Voice* › Keeping calls across reconnects. |
+| `voice.join` | `channelId, muted?, deafened?, resume?, prev?, proof?, screen?` | Joining another channel while in one = leave + join. `resume: true` = you keep calls across reconnects; `prev` + `proof` = this join continues an earlier session's call — see *Voice* › Keeping calls across reconnects. `screen: true` = you're still sharing your screen (that resumed call, or a share you take along to another channel). |
 | `voice.leave` | — | |
 | `voice.state` | `muted, deafened, screen?` | `screen: true` = you're sharing your screen in your voice channel (see *Screen sharing*). |
 | `watch.join` / `watch.leave` | | Join/leave the Watch together audience → `watching { sid, on }` to everyone (+ `watch.state` to you on join). You stay in it while browsing the app. |
 | `watch.get` | | → `watch.state`. |
 | `watch.set` | `videoId?` \| `playing?, position?` | New video (YouTube id; starts at 0, playing; the server looks up its title) / play, pause or seek (seconds). Anyone can. → `watch.state` to everyone. |
-| `watch.queue` | `add?: videoId` \| `remove?: index` | Up to 20 queued; adding with nothing playing starts it. |
+| `watch.queue` | `add?: videoId` \| `remove?: index, id?: videoId` | Up to 20 queued; adding with nothing playing starts it. Removing: send the item's `id` with its `index` — the queue may have moved by the time it arrives (the video ended and the next one came up), so the server removes the item with that id (the one at `index` if it's there, else the first), and does nothing if it's already gone. Without `id`, the item at `index` goes (`bad_index` if there's none). |
 | `watch.next` | `expect: videoId` | The video ended: play the next queued one (ignored unless `expect` is still what's playing, so many clients can report the end at once). |
 | `emoji.delete` | `id` | Anyone can. Soft delete. |
 | `emoji.rename` | `id, name` | Anyone can. Broadcast as `emoji`; old `<:oldname:id>` tokens still render. |
@@ -978,7 +978,8 @@ client should do (the web's is `web/js/gate-worklet.js`, with tests):
 
 | | |
 |---|---|
-| Level | RMS over 10 ms blocks of the processed mic (after noise removal), in dBFS |
+| Mic volume | your own gain on the processed mic (after noise removal), **first**, so the level, voice activity, the meter and what's sent all hear it. Setting: **Mic volume**, 0–200 % (stored 0–2), default 100 %, per device; it changes live. Past 100 %, a soft limiter: straight through up to −1 dBFS, then `k + (1 − k)·tanh((|x| − k)/(1 − k))` with `k` = −1 dBFS, so it never goes past 0 dBFS. At exactly 100 % leave the samples alone. "Too loud (clipping)" is judged on the mic *before* the gain (only the system's input level fixes that); the limiter working hard (the gained peak at −1 dBFS or more, three times in 2 s, like clipping) says **Too loud: turn Mic volume down** instead. |
+| Level | RMS over 10 ms blocks of the processed mic (after noise removal and Mic volume), in dBFS |
 | Voice activity opens | above `max(sensitivity, noise floor + 12 dB)`, the latter capped at −30 dBFS. Sensitivity default −50 dBFS RMS. |
 | …stays open | while above `max(sensitivity − 6 dB, noise floor + 8 dB)` (hysteresis), then a **450 ms hold** |
 | Noise floor | the quietest 10 ms block in each 500 ms, the quietest of the last 8 of those (ignore digital silence) |
@@ -1203,6 +1204,22 @@ its offer — which it sends (step 4). When *they* reconnect they hang up and
 join as newcomers, offering to everyone; resuming clients close the kept
 connection on that plain join (above). So a call between an older client and
 a resuming one behaves exactly as it always has.
+
+### Rejoin after a restart (client only)
+A page that reloads, an app that restarts (after an update or a crash) or one
+the system stopped can't keep its call (the connections went with it), so it
+offers it back instead of rejoining by itself (a click also starts the
+audio on the web):
+- While you're in a voice channel, keep `{channelId, at}` somewhere that
+  outlives a restart (web: `sessionStorage` `yap.call`, this tab only),
+  written on joining and every 30 s in the call, and as the page/app goes.
+- Leaving on purpose (Leave, or the server taking you out: the channel was
+  archived) forgets it.
+- After a restart, signed in, not in voice, the channel still a voice
+  channel, and `at` at most **10 minutes** ago: a bar **You were in
+  {channel}.** with **Rejoin** (joins as clicking the channel does) and ×
+  (forgets it). It goes on ×, on joining any voice channel, and when the
+  10 minutes are up.
 
 ## Updates
 

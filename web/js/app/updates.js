@@ -35,7 +35,8 @@ function renderUpdateBar() {
 }
 
 function quietMoment() {
-  return !state.voiceWanted && !$('input').value.trim() && !state.outbox.length && !document.querySelector('dialog[open]') && !drawBoard?.drawing && !watchParty.busy()
+  // (Nothing written or on its way: a picture waiting in the tray, or still uploading, counts.)
+  return !state.voiceWanted && !$('input').value.trim() && !state.staged && !state.sendingPictures && !state.outbox.length && !document.querySelector('dialog[open]') && !drawBoard?.drawing && !watchParty.busy()
     && (document.visibilityState === 'hidden' || Date.now() - lastActivity > IDLE_RELOAD_MS);
 }
 
@@ -46,7 +47,7 @@ export function maybeUpdate() {
 
 export function reloadForUpdate() {
   try {
-    sessionStorage.setItem('yap.resume', JSON.stringify({ channel: settings.channel, draft: $('input').value, view: state.view }));
+    sessionStorage.setItem('yap.resume', JSON.stringify({ channel: settings.channel, draft: $('input').value, drafts: [...state.drafts], view: state.view }));
   } catch {}
   location.reload();
 }
@@ -57,6 +58,8 @@ export function restoreAfterUpdate() {
     sessionStorage.removeItem('yap.resume');
     if (!resume) return;
     if (resume.channel === settings.channel && resume.draft) $('input').value = resume.draft;
+    // (Other channels' drafts too: an update never throws away what you'd typed.)
+    for (const [id, text] of Array.isArray(resume.drafts) ? resume.drafts : []) if (typeof id === 'string' && typeof text === 'string') state.drafts.set(id, text);
     if (resume.view && resume.view !== 'chat') state.restoreView = resume.view;
   } catch {}
 }

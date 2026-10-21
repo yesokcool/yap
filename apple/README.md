@@ -16,7 +16,7 @@ app and a native macOS app from the same code. The wire protocol is
 | `Yap/` | The app. Synced folder: new files join the target automatically. |
 | `YapBroadcast/` | The ReplayKit broadcast upload extension (`SampleHandler`): iPhone and iPad screen sharing. Links only `YapScreenLink`. |
 | `YapLive/` | The widget extension (`YapLiveBundle`): the voice call's Live Activity (Lock Screen + Dynamic Island). `CallActivityAttributes`, `CallButtonIntent` and `CallActivityViews` are in the app target too (a membership exception); the extension borrows `Yap/App/Theme.swift` the same way. |
-| `Yap/App/` | What the screens share: `AppModel`, `Theme`, `AppIdentity`, `Look` (one look; the status bar); `CallWatch` (a call ending off screen on iPhone: "You left Lounge"), `LiveCall` (the call's Live Activity), `Notifier`, `BroadcastPicker` (iOS's screen-broadcast sheet); `ChannelController` (an open channel's behaviour: opening, jumps, edit/reply/staged picture, Send/Esc/↑, the channel menu's sheets), `SuggestionEngine`, `MessageMenu` and `ChannelMenuItems`, `InlineText` (message text), `GifSearch` / `EmojiBrowser` (the pickers' logic), `Prompts` (Ping everyone, Sign out others, copy), wording (`VoiceOptions`, `Stamps` for dates, `ColorNames`), `MediaViews` (looping GIF video, animated images), `SystemControls` (Paste, date pickers, `FlowLayout`). |
+| `Yap/App/` | What the screens share: `AppModel`, `Theme`, `AppIdentity`, `Look` (one look; the status bar); `CallWatch` (a call ending off screen on iPhone: "You left Lounge"), `LiveCall` (the call's Live Activity), `Notifier`, `BroadcastPicker` (iOS's screen-broadcast sheet); `ChannelController` (an open channel's behaviour: opening, jumps, edit/reply/staged picture, Send/Esc/↑, the channel menu's sheets), `SuggestionEngine`, `MessageMenu` and `ChannelMenuItems`, `InlineText` (message text), `GifSearch` / `EmojiBrowser` (the pickers' logic), `Prompts` (Ping everyone, Sign out others, copy), wording (`VoiceOptions`, `Stamps` for dates, `ColorNames`), `MediaViews` (looping GIF video, animated images), `SystemControls` (Paste, date pickers, `FlowLayout`); round 12: `ChannelDrafts` (what's typed in each channel), `MentionBadge` (unread mentions on the icon), `Rejoin` ("You were in Lounge." after a relaunch), `MicVolume` (Settings › Voice › Mic volume). |
 | `Yap/Views/`, `Yap/Components/` | The screens and their **Windows 98** building blocks (`Views/Voice/TalkCues98`: the tooltip, the warning line and the volume badge round 10 added). |
 | `YapKit/` | Local Swift package, everything that isn't a view. |
 | `YapKit/Sources/YapCore` | Protocol models and frames, `YapConnection` (WebSocket + heartbeat + backoff + network changes), `SendLine` (sends the server turns away), `YapClient` (identity and all the state screens read; `YapClient+Account/Events/Messages/People/Search/Vault/Extras.swift` by topic), `Mentions` (the server's mention rule), emoji codec and catalog, message formatter, KLIPY client, Keychain. No WebRTC. |
@@ -396,7 +396,13 @@ color names, away-message ends, composer suggestions, the web's words for the si
 the wrong-password help, the join bars and who sees them (owner and mods), the password words and
 "Choose a password"'s once-per-device memory, the questions, screen sharing's words, and who gets the voice
 roster's popover and which owner/mod actions it offers). It imports YapCore `@testable`
-for `loadDemo` / `receiveForTesting`.
+for `loadDemo` / `receiveForTesting`. Round 12 (`Round12Tests`): each channel's draft
+kept and given back (an edit gives back the draft behind it; never into another channel;
+signing out forgets them), the "↓ New messages" pill (someone else's message while scrolled
+up; not mine, not a page of older ones; gone at the bottom), the icon badge's sum of the
+sidebar's mentions (a channel no longer listed counts nowhere; 99+), and "You were in
+Lounge." (offered once, within 10 minutes; kept while in a call, cleared by a leave, kept by
+quitting; hidden in a call or when the channel's gone).
 
 ## Screenshots and DEBUG launch switches
 
@@ -457,6 +463,7 @@ question in its Win98 box; `YAP_SETTINGS_PAGE=voice-advanced` opens Voice ›
 Advanced (its page on iPhone, unfolded on the Mac); `YAP_SETTINGS_SCROLL=bottom`
 scrolls an iPhone Settings page to its end (Voice's Call report); `YAP_SNAPSHOT_HEIGHT=900`
 makes the Mac's Settings window that tall before the snapshot;
+`YAP_DEMO_REJOIN=lounge` offers "You were in Lounge." as after a relaunch mid-call;
 `YAP_UNREAD_LAST=N` pretends the open channel's last N messages are
 new (the "New since" line, and the Jump to first unread pill when it's off
 screen); `YAP_DRAFT=text` starts the open channel's composer with that text
@@ -1123,6 +1130,50 @@ YapCore's `Extras.swift`, `Chimes.swift`, `WAV.swift`, `TextRules.swift`,
   quality (each bit of voice no longer fits twice in a packet), and several
   times the upload for each friend in the call." The note says each voice
   goes out at its own setting (not "the lower of the two").
+
+## Round 12: drafts, new messages, badges, rejoin, mic volume
+
+The web's features from the same round, in the app's words:
+
+- **Drafts per channel:** what you typed and didn't send waits in that
+  channel while you go back to the list or open another one, and is there
+  when you come back (`ChannelDrafts`, in memory for this account; signing
+  out forgets them). A message being edited, a reply or a staged picture
+  aren't kept (as before), only the draft behind them; a locked Personal
+  space doesn't show its draft until it's unlocked.
+- **"↓ New messages":** scrolled up in a channel when someone else's
+  message comes in, a pill at the bottom of the chat takes you down
+  (`NewMessagesPill`; the scroll view's geometry says whether you're at the
+  end). It goes at the bottom or on another channel; "Jump to first unread"
+  stays at the top.
+- **Badges:** your unread @mentions (replies to you count), the number the
+  sidebar's "(@3)"s add up to, on the iPhone's app icon
+  (`setBadgeCount`, with the badge permission Yap asks for with its
+  notifications; nothing new is asked) and the Mac's Dock icon
+  (`MentionBadge`, following the counts with `withObservationTracking`, so
+  it also changes off screen during a call). It holds what it says until
+  the server has said what came while you were away.
+- **A mention's notification opens its message:** the channel, scrolled to
+  it and flashed (a tap can be what launched Yap: it waits for the
+  connection). "You left …" still rejoins.
+- **"You were in Lounge." [Rejoin] [×]:** while you're in a call the app
+  keeps `{channel, at}` on the device (refreshed every 30 s); leaving, or the
+  server taking you out, clears it; quitting, a crash or iOS stopping Yap
+  leave it. The next launch offers it once, for 10 minutes after the call,
+  outside a call and while the channel exists; Rejoin is tapping the
+  channel, it never joins by itself. On iPhone the "You left Lounge" note
+  (`CallWatch`) already covers Yap being stopped off screen: if that note
+  came, no bar; if it's still waiting to come (Yap back within 40 s), it's
+  taken back and the bar says it instead.
+- **Mic volume** (Settings › Voice › Mic & output), where the device lets
+  an app set it: the WebRTC SDK has no hook on the send path (see Known
+  gaps), so this is the mic's own level, not a gain in Yap's audio. iPhone
+  and iPad: the session's input gain (`isInputGainSettable`, so the row
+  shows in a call on routes that allow it), untouched until you move it,
+  then put back when a call starts and when the route changes. Mac: the
+  default input's volume (`kAudioDevicePropertyVolumeScalar`), the same as
+  System Settings › Sound › Input; audio interfaces with a hardware gain
+  knob have none, and the row doesn't show.
 
 ## How voice works here
 

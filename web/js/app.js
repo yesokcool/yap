@@ -11,21 +11,21 @@ import { loadStandardEmojis } from './emoji.js';
 import { loadConfig } from './config.js';
 import { confirmSheet, bindConfirmSheet } from './sheet.js';
 import { forgetKey } from './vault.js';
-import { $, TYPING_MS, conn, findMessage, firstTextChannel, isMod, noHover, setConn, state } from './app/state.js';
+import { $, TYPING_MS, coarsePointer, conn, findMessage, firstTextChannel, isMod, noHover, setConn, state } from './app/state.js';
 import { closePopover, copyByHand, hideGate, openedBy, showGate, toast } from './app/ui.js';
 import { applyTheme } from './app/look.js';
 import { postSound } from './app/uploads.js';
 import { bindUpdates, onBuild, reloadForUpdate, restoreAfterUpdate } from './app/updates.js';
 import { syncBrowserPush } from './app/push.js';
 import { VIEWS, boardCursors, drawBoard, setView, spaceWorld, watchParty, whenPlanner } from './app/places.js';
-import { adoptResumed, bindShareDialog, onVoiceRowWheel, setVolumeFor, changeScreenShare, deferLeaveChime, dropGhost, holdGhost, joinVoice, leaveVoice, onSound, onVoice, openVoiceMore, renderSharePanel, renderVoicePanel, stopWatchingScreen, toggleDeafen, toggleMute, toggleScreenShare, voice, watchScreen } from './app/voice-ui.js';
+import { adoptResumed, bindShareDialog, onVoiceRowWheel, setVolumeFor, changeScreenShare, deferLeaveChime, dismissRejoin, dropGhost, holdGhost, joinVoice, leaveVoice, onSound, onVoice, openVoiceMore, rejoinVoice, renderSharePanel, renderVoicePanel, stopWatchingScreen, toggleDeafen, toggleMute, toggleScreenShare, voice, watchScreen } from './app/voice-ui.js';
 import { bindChannelDialog, bindLinkDialog, openChannelDialog, openLinkDialog, renderChannels, renderConn, renderHeader, renderLinks, renderRequests, renderUserPanel, showVersion, startMinecraft } from './app/sidebar.js';
-import { renderJumpPill, renderMessages, renderTyping, tapMessage } from './app/messages.js';
+import { renderJumpPill, renderMessages, renderNewPill, renderTyping, tapMessage } from './app/messages.js';
 import { addLocalNote, isQuietNow, jumpTo, loadLatest, loadOlder, markRead, onDeleted, onHistory, onMessage, onPing, onSendError, onSendsLost, openAndJump, openChannel, queueSend, rememberSince, sendOutbox, updateTitle, welcomeIn } from './app/chat.js';
 import { askDelete, bindComposer, cancelEdit, cancelReply, clearStaged, deleteMessage, emojiPicker, gifPicker, openReactPicker, reactPicker, renderStaged, saveToPersonal, shrinkStaged, startEdit, startReply, toggleEmojis, toggleGifs } from './app/composer.js';
 import { openMemberMenu, openPeople, renderMembers } from './app/people.js';
 import { addToHomeScreen, bindPinDialog, bindWelcome, onHelloError, passwordLater, renderAccountBars, renderDevices, renderHomeBar, showPinDialog, showWelcome, startOver, toggleReveal } from './app/account.js';
-import { askUnlock, bindVaultDialog, showVaultDialog, syncVault } from './app/personal.js';
+import { askUnlock, bindVaultDialog, forgetSealedImages, showVaultDialog, syncVault } from './app/personal.js';
 import { bindSearch, onSearchResults, openSearch, openSwitcher, renderResultList, runSearch } from './app/search.js';
 import { doodlePad, markAllRead, onUnreadCounts, openCatchup, openDoodle, openPicture, openShelf, openSoundboard, renderHangs, renderShelf, requestUnreadCounts, sendQuiet, setAway, soundboard, viewDoodle } from './app/extras.js';
 import { bindCallReport, callNote, callSettingsChanged, copyCallReport } from './app/call-report-ui.js';
@@ -139,6 +139,9 @@ function readInviteFromUrl() {
   if (name && !settings.name) save({ name });
   const place = hash.get('place');
   if (place) state.openPlace = place;
+  // A browser push tapped while Yap was closed (sw.js): open that message once we're in.
+  const channel = hash.get('channel');
+  if (channel) state.openMessage = { channelId: channel, id: hash.get('message') };
   if (location.hash) history.replaceState(null, '', location.pathname + location.search);
 }
 
@@ -459,7 +462,8 @@ function handle(msg) {
     }
     case 'channel.archived':
       state.channels.delete(msg.channelId);
-      if (settings.channel === msg.channelId) openChannel(firstTextChannel()?.id);
+      if (settings.channel === msg.channelId) openChannel(firstTextChannel()?.id); // (what you'd typed there comes along)
+      state.drafts.delete(msg.channelId);
       return renderChannels();
     case 'voice': return onVoice(msg);
     case 'emoji':
@@ -563,12 +567,15 @@ function onReady(msg) {
   emojiPicker?.render();
   // Standard emoji list (~45 KB) so :shortcodes: convert on send; not urgent.
   setTimeout(() => loadStandardEmojis().catch(() => {}), 1500);
-  // Fresh history after every (re)connect, so nothing missed while away.
+  // Fresh history after every (re)connect, so nothing missed while away. Whatever
+  // was waiting for a page of the old one (a jump to a message) goes on with the new one.
+  const waiters = [...state.history.values()].flatMap((h) => h.waiters?.splice(0) ?? []);
   state.history.clear();
   const current = state.channels.get(settings.channel);
   if (!current || current.kind === 'voice') save({ channel: firstTextChannel()?.id ?? 'general' });
   rememberSince(settings.channel);
   loadLatest(settings.channel);
+  for (const resolve of waiters) resolve();
   sendOutbox(); // what you wrote while offline (or that the old connection never got an answer for)
   if (state.view !== 'chat') {
     conn.send({ t: 'view', view: state.view });
@@ -597,6 +604,11 @@ function onReady(msg) {
     setView(state.openPlace);
     state.openPlace = null;
   }
+  if (state.openMessage) {
+    const { channelId, id } = state.openMessage;
+    state.openMessage = null;
+    openFromPush(channelId, id);
+  }
   renderAccountBars();
   onBuild(msg.build);
   ensureConfig();
@@ -605,6 +617,14 @@ function onReady(msg) {
   renderAll();
   requestUnreadCounts();
   if (admitted) welcomeIn();
+}
+
+/** A tapped push (sw.js): that message, or its channel; once we're connected if we aren't yet. */
+function openFromPush(channelId, id) {
+  if (state.status !== 'online' || !state.channels.size) return (state.openMessage = { channelId, id });
+  if (!state.channels.has(channelId)) return;
+  if (id) openAndJump(channelId, id);
+  else openChannel(channelId);
 }
 
 /** Give up on keeping the call across a reconnect after this long (others keep ours for GHOST_MS). */
@@ -682,6 +702,12 @@ export function renderAll() {
 
 function bindUi() {
   document.addEventListener('click', onClick);
+  // A browser push tapped while this tab was open (sw.js): go to its message.
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      if (e.data?.t === 'yap.open' && typeof e.data.channelId === 'string') openFromPush(e.data.channelId, typeof e.data.messageId === 'string' ? e.data.messageId : null);
+    });
+  }
   // Per-person volume (People sheet and the voice popover; Ctrl/⌘ + scroll over their row in a voice channel).
   document.addEventListener('input', (e) => {
     const uid = e.target.dataset?.volumeUid;
@@ -709,6 +735,7 @@ function bindUi() {
     atEnd = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
     if (scroller.scrollTop < 300) loadOlder(settings.channel);
     renderJumpPill();
+    renderNewPill();
   }, { passive: true });
   const stayAtEnd = new ResizeObserver(() => {
     if (atEnd && !scroller.hidden) scroller.scrollTop = scroller.scrollHeight;
@@ -844,6 +871,14 @@ function onClick(e) {
     case 'jump-unread':
       $('new-divider')?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
       return;
+    case 'new-below': {
+      state.newBelow = false;
+      renderNewPill();
+      const scroller = $('messages');
+      scroller.scrollTo({ top: scroller.scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+      if (!coarsePointer) $('input').focus({ preventScroll: true });
+      return;
+    }
     case 'switcher': return openSwitcher();
     case 'hang-join': {
       const hang = state.hangs.get(id);
@@ -879,6 +914,8 @@ function onClick(e) {
       $('app').classList.remove('sidebar-open');
       return joinVoice(id);
     case 'leave-voice': return leaveVoice();
+    case 'rejoin-voice': return rejoinVoice();
+    case 'rejoin-dismiss': return dismissRejoin();
     case 'voice-more': return openVoiceMore(el);
     case 'copy-call-report':
       closePopover();
@@ -908,6 +945,7 @@ function onClick(e) {
       state.vault.key = null;
       state.vault.keyCt = null;
       state.notes.clear();
+      forgetSealedImages();
       forgetKey(settings.uid);
       toast('Locked on this device. Your passcode opens it again.');
       return renderAll();

@@ -280,11 +280,18 @@ function takeReply(channelId) {
 /**
  * The server turned a message away: its text goes back in the message box
  * (and what it answered, back in the reply bar), so nothing is lost — but
- * only into an empty box on the same channel, never over something new.
+ * only into an empty box, never over something new (in another channel: into
+ * that channel's draft).
  */
 export function putBack({ channelId, text, replyTo }) {
   const input = $('input');
-  if (!text || input.value.trim() || state.editing || state.staged || settings.channel !== channelId) return;
+  if (!text) return;
+  // You've moved on to another channel: it waits in its own channel's box (unless something new is there).
+  if (settings.channel !== channelId) {
+    if (state.channels.has(channelId) && !state.drafts.get(channelId)?.trim()) state.drafts.set(channelId, text);
+    return;
+  }
+  if (input.value.trim() || state.editing || state.staged) return;
   input.value = text;
   autosize();
   if (replyTo && !state.replying) startReply(replyTo);
@@ -340,21 +347,26 @@ const FULL_RES_STEPS = [[Infinity, 0.92], [3072, 0.9], [2048, 0.88], [1600, 0.82
 
 async function preparePicture(file, { full = false } = {}) {
   const bmp = await createImageBitmap(file);
-  const dims = { width: bmp.width, height: bmp.height };
-  if (file.type === 'image/gif' && file.size <= MAX_PICTURE) return { blob: file, ...dims };
-  // Full res: the original, untouched, if it fits.
-  if (full && /^image\/(jpeg|png|webp)$/.test(file.type) && file.size <= MAX_PICTURE) return { blob: file, ...dims };
-  for (const [side, quality] of full ? FULL_RES_STEPS : COMPRESSED_STEPS) {
-    const scale = Math.min(1, side / Math.max(bmp.width, bmp.height));
-    const canvas = Object.assign(document.createElement('canvas'), { width: Math.round(bmp.width * scale), height: Math.round(bmp.height * scale) });
-    const ctx = canvas.getContext('2d');
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-    let blob = await new Promise((r) => canvas.toBlob(r, 'image/webp', quality));
-    if (blob?.type !== 'image/webp') blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', quality));
-    if (blob && blob.size <= MAX_PICTURE) return { blob, width: canvas.width, height: canvas.height };
+  // (Decoded, a phone photo is ~50 MB: let it go as soon as we're done, not whenever the browser gets round to it.)
+  try {
+    const dims = { width: bmp.width, height: bmp.height };
+    if (file.type === 'image/gif' && file.size <= MAX_PICTURE) return { blob: file, ...dims };
+    // Full res: the original, untouched, if it fits.
+    if (full && /^image\/(jpeg|png|webp)$/.test(file.type) && file.size <= MAX_PICTURE) return { blob: file, ...dims };
+    for (const [side, quality] of full ? FULL_RES_STEPS : COMPRESSED_STEPS) {
+      const scale = Math.min(1, side / Math.max(bmp.width, bmp.height));
+      const canvas = Object.assign(document.createElement('canvas'), { width: Math.round(bmp.width * scale), height: Math.round(bmp.height * scale) });
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      let blob = await new Promise((r) => canvas.toBlob(r, 'image/webp', quality));
+      if (blob?.type !== 'image/webp') blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', quality));
+      if (blob && blob.size <= MAX_PICTURE) return { blob, width: canvas.width, height: canvas.height };
+    }
+    throw new Error('That picture is too big.');
+  } finally {
+    bmp.close();
   }
-  throw new Error('That picture is too big.');
 }
 
 // ── Preview before sending ────────────────────────────────────────────────
@@ -447,10 +459,13 @@ async function sendStaged(body) {
     return renderMessages({ keep: 'bottom' });
   }
   toast('Sending picture…');
+  let uploading = false;
+  state.sendingPictures++; // (an update waits until it's sent: updates.js)
   try {
     const prepared = await s.ready;
     if (prepared instanceof Error) throw prepared;
     const { blob, width, height } = prepared;
+    uploading = true;
     if (sealed) {
       // Encrypted: the picture is sealed before upload; the note says where it is.
       const bytes = await encryptBlob(state.vault.key, new Uint8Array(await blob.arrayBuffer()));
@@ -465,7 +480,17 @@ async function sendStaged(body) {
     queueSend({ t: 'send', channelId, body, image: { id, width, height }, replyTo: takeReply(channelId) }, { draft });
   } catch (err) {
     toast(`Couldn't send that picture: ${err.message}`);
+    // The caption goes back in the box, and if it was the upload that failed (not the
+    // picture), the picture goes back in the tray: Send tries again.
+    if (settings.channel !== channelId || state.editing) return;
     input.value = input.value || plainEmojis(body);
+    autosize();
+    if (uploading && !state.staged) {
+      state.staged = { ...s, url: URL.createObjectURL(s.file) };
+      renderStaged();
+    }
+  } finally {
+    state.sendingPictures--;
   }
 }
 

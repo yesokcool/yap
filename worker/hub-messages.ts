@@ -29,12 +29,14 @@ export function onHistory(hub: HubHost, ws: WebSocket, me: Attachment, msg: Extr
   const limit = clamp(Number(msg.limit) || LIMITS.historyPage, 1, LIMITS.historyMax);
   const before = Number.isFinite(msg.before) ? Number(msg.before) : Number.MAX_SAFE_INTEGER;
   const beforeId = typeof msg.beforeId === 'string' ? msg.beforeId : '￿';
+  // (ts, id) < (before, beforeId) as a row value: the index then starts right at
+  // `before`, so a page far back reads one page of rows, not every newer one.
   const rows = hub.sql
     .exec<MessageRow>(
       `SELECT ${MESSAGE_COLUMNS} FROM messages
-       WHERE channel_id = ? AND deleted_at IS NULL AND (ts < ? OR (ts = ? AND id < ?))
+       WHERE channel_id = ? AND deleted_at IS NULL AND (ts, id) < (?, ?)
        ORDER BY ts DESC, id DESC LIMIT ?`,
-      msg.channelId, before, before, beforeId, limit + 1,
+      msg.channelId, before, beforeId, limit + 1,
     )
     .toArray();
   // Long messages: keep a page well under the WebSocket frame limit.
@@ -52,8 +54,11 @@ export function onHistory(hub: HubHost, ws: WebSocket, me: Attachment, msg: Extr
 export function onSend(hub: HubHost, ws: WebSocket, me: Attachment, msg: Extract<ClientMessage, { t: 'send' }>) {
   const channel = hub.channelFor(me, msg.channelId);
   if (!channel || channel.kind === 'voice') throw new ClientError('no_channel', 'That channel does not exist.');
-  const personal = channel.kind === 'personal';
+  // The nonce only matters to the sender (to swap its optimistic copy, and to send again).
+  const nonce = typeof msg.nonce === 'string' ? msg.nonce.slice(0, 64) : undefined;
   let body = typeof msg.body === 'string' ? msg.body.replace(/\s+$/, '') : '';
+  if (nonce && answerRepeat(hub, ws, me, channel.id, nonce, body)) return;
+  const personal = channel.kind === 'personal';
   const gif = msg.gif === undefined || msg.gif === null ? undefined : cleanGif(msg.gif);
   const image = msg.image === undefined || msg.image === null ? undefined : cleanImage(msg.image);
   if (msg.image && !image) throw new ClientError('bad_image', 'That picture looks broken.');
@@ -87,12 +92,10 @@ export function onSend(hub: HubHost, ws: WebSocket, me: Attachment, msg: Extract
   if (extra.poll) message.poll = { options: extra.poll.options, votes: extra.poll.options.map(() => []) };
   if (extra.roll) message.roll = extra.roll;
   hub.sql.exec(
-    'INSERT INTO messages (id, channel_id, user_id, body, ts, gif, image, reply_to, extra) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO messages (id, channel_id, user_id, body, ts, gif, image, reply_to, extra, nonce) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     message.id, message.channelId, message.uid, message.body, message.ts, gif ? JSON.stringify(gif) : null, image ? JSON.stringify(image) : null, replyTo,
-    extra.poll || extra.roll ? JSON.stringify(extra) : null,
+    extra.poll || extra.roll ? JSON.stringify(extra) : null, nonce || null,
   );
-  const nonce = typeof msg.nonce === 'string' ? msg.nonce.slice(0, 64) : undefined;
-  // The nonce only matters to the sender (to swap its optimistic copy).
   hub.send(ws, { t: 'message', message, nonce });
   if (personal) return hub.toOwner(channel.id, { t: 'message', message }, ws); // no pushes either
   hub.broadcast({ t: 'message', message }, ws);
@@ -102,6 +105,35 @@ export function onSend(hub: HubHost, ws: WebSocket, me: Attachment, msg: Extract
   pushForMessage(hub, me, channel.name, message, mentions);
   awayReplies(hub, ws, me, mentions.uids);
   backFromAway(hub, me.uid);
+}
+
+/** How long a send may come again (a reconnect resends what had no answer yet) and still be the same message. */
+const REPEAT_MS = 24 * 3_600_000;
+
+/**
+ * A send that already made a message: the socket went before its echo arrived,
+ * and the client sent the same frame (same nonce) again after `ready`
+ * (PROTOCOL.md › Identity). Answers it with that message and stores and tells
+ * nobody anything new. False when it's a new send.
+ */
+function answerRepeat(hub: HubHost, ws: WebSocket, me: Attachment, channelId: string, nonce: string, body: string): boolean {
+  // (No ts or ORDER BY in the query: either one makes SQLite walk the channel's index instead of the nonce's.)
+  const since = Date.now() - REPEAT_MS;
+  const sent = hub.sql
+    .exec<MessageRow & { deleted_at: number | null }>(
+      `SELECT ${MESSAGE_COLUMNS}, deleted_at FROM messages WHERE user_id = ? AND nonce = ? AND channel_id = ? LIMIT 20`,
+      me.uid, nonce, channelId,
+    )
+    .toArray()
+    .filter((r) => r.ts > since)
+    .sort((x, y) => y.ts - x.ts)[0];
+  if (!sent) return false;
+  // Deleted meanwhile (by a mod, say): sending it again mustn't bring it back.
+  if (sent.deleted_at) throw new ClientError('no_message', 'That message was deleted.');
+  // Other words under the same nonce are a new message from a client that reuses nonces (a roll's text is the server's).
+  if (sent.body !== body && !sent.extra?.includes('"roll"')) return false;
+  hub.send(ws, { t: 'message', message: present(hub, [sent])[0], nonce });
+  return true;
 }
 
 // ── Reactions ──────────────────────────────────────────────────────────
@@ -186,10 +218,11 @@ export function onEdit(hub: HubHost, me: Attachment, msg: Extract<ClientMessage,
   if (!row) throw new ClientError('no_message', 'Message not found.');
   if (hub.canonical(row.user_id) !== me.uid) throw new ClientError('forbidden', 'You can only edit your own messages.');
   if (row.extra?.includes('"roll"')) throw new ClientError('forbidden', 'A roll is a roll — it can’t be edited.');
-  if (!hub.channelFor(me, row.channel_id)) throw new ClientError('no_channel', 'That channel does not exist.');
+  const channel = hub.channelFor(me, row.channel_id);
+  if (!channel) throw new ClientError('no_channel', 'That channel does not exist.');
   const body = typeof msg.body === 'string' ? msg.body.replace(/\s+$/, '') : '';
   if (!body.trim() && !row.gif && !row.image) throw new ClientError('empty', 'Message is empty. Delete it instead.');
-  if (body.length > bodyLimit(hub.channelFor(me, row.channel_id), body)) throw tooLong(hub.channelFor(me, row.channel_id), body);
+  if (body.length > bodyLimit(channel, body)) throw tooLong(channel, body);
   if (body === row.body) return;
   const now = Date.now();
   hub.sql.exec('INSERT INTO message_edits (message_id, body, edited_at) VALUES (?, ?, ?)', String(msg.id), row.body, now);

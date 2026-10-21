@@ -126,6 +126,24 @@ t('the board link is seeded once, by v10: upgrading from v10 or later never adds
   }
 });
 
+t('the busiest message reads walk an index instead of every row (rows read are a free-plan budget)', () => {
+  const sql = atVersion(LATEST);
+  const plan = (query, ...args) => rows(sql, `EXPLAIN QUERY PLAN ${query}`, ...args).map((r) => r.detail).join(' | ');
+  // The same queries as Hub.nextTs, hub-backup.ts › exportPage and hub-messages.ts › onHistory, answerRepeat.
+  const reads = {
+    'the newest message': plan('SELECT MAX(ts) AS ts FROM messages'),
+    "a backup's page": plan('SELECT id FROM messages WHERE ts > ? ORDER BY ts LIMIT ?', 0, 5000),
+    'a history page far back': plan(`SELECT id FROM messages WHERE channel_id = ? AND deleted_at IS NULL AND (ts, id) < (?, ?)
+      ORDER BY ts DESC, id DESC LIMIT ?`, 'general', 5, 'm5', 51),
+    'a send that came again': plan('SELECT id FROM messages WHERE user_id = ? AND nonce = ? AND channel_id = ? LIMIT 20', 'u1', 'n1', 'general'),
+  };
+  assert.match(reads['the newest message'], /USING COVERING INDEX messages_by_ts/);
+  assert.match(reads["a backup's page"], /USING INDEX messages_by_ts \(ts>\?\)/);
+  assert.match(reads['a history page far back'], /USING INDEX messages_by_channel \(channel_id=\? AND \(ts,id\)<\(\?,\?\)\)/);
+  assert.match(reads['a send that came again'], /USING INDEX messages_by_nonce \(user_id=\? AND nonce=\?\)/);
+  for (const [what, detail] of Object.entries(reads)) assert.doesNotMatch(detail, /SCAN messages|TEMP B-TREE/, what);
+});
+
 let failed = 0;
 for (const [name, fn] of cases) {
   try {

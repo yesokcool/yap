@@ -66,24 +66,39 @@ export function pushTargets(hub: HubHost): { id: string; name: string; topic: st
     .map((r) => ({ id: r.id, name: r.name, topic: r.ntfy_topic, mode: r.ntfy_mode }));
 }
 
+/** The message a push is about: tapping it opens that message (PROTOCOL.md › `push.subscribe`). */
+type PushOpens = { channelId: string; messageId: string };
+
+/** This server's address, and for a push about a message, `#channel=…&message=…` (never the invite key). */
+function clickUrl(base: string, open?: PushOpens): string {
+  if (!base || !open) return base;
+  try {
+    const url = new URL(base);
+    url.hash = new URLSearchParams({ channel: open.channelId, message: open.messageId }).toString();
+    return url.toString();
+  } catch {
+    return base;
+  }
+}
+
 /**
  * One push to one person: their ntfy topic and every browser they subscribed.
  * Held back during their quiet hours — except sign-in alerts, and mentions
  * if they let those through.
  */
-export function deliver(hub: HubHost, target: { id: string; topic: string | null }, push: { title: string; message: string; tags?: string[]; priority?: 1 | 2 | 3 | 4 | 5; tag?: string }, kind: 'normal' | 'mention' | 'security' = 'normal') {
+export function deliver(hub: HubHost, target: { id: string; topic: string | null }, push: { title: string; message: string; tags?: string[]; priority?: 1 | 2 | 3 | 4 | 5; tag?: string; open?: PushOpens }, kind: 'normal' | 'mention' | 'security' = 'normal') {
   if (kind !== 'security') {
     const quiet = notifySettings(hub, target.id).quiet;
     if (quiet && isQuietNow(quiet) && !(kind === 'mention' && quiet.mentions)) return;
   }
-  if (target.topic) hub.ctx.waitUntil(publish(hub.env, { topic: target.topic, title: push.title, message: push.message, tags: push.tags, priority: push.priority, click: hub.publicUrl() }));
+  if (target.topic) hub.ctx.waitUntil(publish(hub.env, { topic: target.topic, title: push.title, message: push.message, tags: push.tags, priority: push.priority, click: clickUrl(hub.publicUrl(), push.open) }));
   const jwk = hub.env.VAPID_PRIVATE_JWK;
   if (!jwk) return;
   const subs = hub.sql.exec<{ endpoint: string; p256dh: string; auth: string }>('SELECT endpoint, p256dh, auth FROM push_subs WHERE user_id = ?', target.id).toArray();
   for (const sub of subs) {
     hub.ctx.waitUntil((async () => {
       try {
-        const status = await sendWebPush(sub, { title: push.title, body: push.message, tag: push.tag ?? 'yap' }, jwk, hub.publicUrl());
+        const status = await sendWebPush(sub, { title: push.title, body: push.message, tag: push.tag ?? 'yap', ...(push.open ? { channelId: push.open.channelId, messageId: push.open.messageId } : {}) }, jwk, hub.publicUrl());
         // Gone (unsubscribed, browser reset): forget it.
         if (status === 404 || status === 410) hub.sql.exec('DELETE FROM push_subs WHERE endpoint = ?', sub.endpoint);
         else if (status >= 400) console.warn('web push failed', status, new URL(sub.endpoint).host);
@@ -108,11 +123,16 @@ export function onPushSubscribe(hub: HubHost, ws: WebSocket, me: Attachment, msg
     throw new ClientError('bad_subscription', 'That push subscription looks broken.');
   }
   // Pages send their subscription again on every connect; only a new one is "turning browser pushes on".
-  const known = hub.sql.exec('SELECT 1 FROM push_subs WHERE endpoint = ? AND user_id = ?', endpoint, me.uid).toArray().length > 0;
-  hub.sql.exec(
-    'INSERT INTO push_subs (endpoint, user_id, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth',
-    endpoint, me.uid, p256dh, auth, Date.now(),
-  );
+  const known = hub.sql
+    .exec<{ p256dh: string; auth: string }>('SELECT p256dh, auth FROM push_subs WHERE endpoint = ? AND user_id = ?', endpoint, me.uid)
+    .toArray()[0];
+  // The same one again writes nothing (row writes are a free-plan budget).
+  if (!known || known.p256dh !== p256dh || known.auth !== auth) {
+    hub.sql.exec(
+      'INSERT INTO push_subs (endpoint, user_id, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth',
+      endpoint, me.uid, p256dh, auth, Date.now(),
+    );
+  }
   // Turning on browser pushes with pushes off means "pings and mentions".
   // (A re-sent subscription leaves Off alone: it means Off.)
   if (!known && notifySettings(hub, me.uid).mode === 'off') hub.sql.exec("UPDATE users SET ntfy_mode = 'pings' WHERE id = ?", me.uid);
@@ -124,6 +144,14 @@ function onlineUids(hub: HubHost): Set<string> {
 }
 
 export function onPing(hub: HubHost, me: Attachment, msg: Extract<ClientMessage, { t: 'ping' }>) {
+  // One a minute per person (the maintainer, 2026-10-11). Kept in meta, not in a
+  // rate-limit bucket: those start over each time the Hub hibernates, which a
+  // quiet server does after about ten seconds.
+  const key = `ping:${me.uid}`;
+  const now = Date.now();
+  const last = Number(hub.sql.exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', key).toArray()[0]?.value ?? 0);
+  if (now - last < 60_000) throw new ClientError('slow_down', 'You can ping again in a minute.');
+  hub.sql.exec('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(now));
   const text = cleanName(msg.text ?? '', 140);
   const from = hub.user(me.uid)!;
   hub.broadcast({ t: 'ping', from: me.uid, text });
@@ -145,14 +173,15 @@ export function pushForMessage(hub: HubHost, me: Attachment, channelName: string
   const text = plainText(message.poll ? `📊 ${message.body}` : message.body || (message.image ? '📷 A picture' : message.gif ? `GIF: ${message.gif.title}` : ''));
   const online = onlineUids(hub);
   const now = Date.now();
+  const open = { channelId: message.channelId, messageId: message.id };
   for (const t of targets) {
     if (t.id === me.uid) continue;
     const mentioned = mentions.everyone || mentions.uids.includes(t.id);
     if (mentioned) {
-      deliver(hub, t, { title: `${author.name} mentioned ${mentions.uids.includes(t.id) ? 'you' : 'everyone'} in ${channelName}`, message: text, tags: ['speech_balloon'], priority: 4, tag: `mention-${message.channelId}` }, 'mention');
+      deliver(hub, t, { title: `${author.name} mentioned ${mentions.uids.includes(t.id) ? 'you' : 'everyone'} in ${channelName}`, message: text, tags: ['speech_balloon'], priority: 4, tag: `mention-${message.channelId}`, open }, 'mention');
     } else if (t.mode === 'all' && !online.has(t.id) && now - (hub.lastPush.get(t.id) ?? 0) > 20_000) {
       hub.lastPush.set(t.id, now);
-      deliver(hub, t, { title: `${author.name} in ${channelName}`, message: text, priority: 3, tag: `msg-${message.channelId}` });
+      deliver(hub, t, { title: `${author.name} in ${channelName}`, message: text, priority: 3, tag: `msg-${message.channelId}`, open });
     }
   }
 }

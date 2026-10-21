@@ -275,6 +275,44 @@ await test('history paging with before/beforeId', async () => {
   for (const c of [a, b]) c.inbox = c.inbox.filter((m) => !(m.t === 'message' && m.message.channelId === channel.id));
 });
 
+await test('a send repeated after a reconnect (same nonce) gets the message it made: stored once, heard once', async () => {
+  const body = `only once ${RUN}`;
+  const frame = { t: 'send', channelId: 'general', body, nonce: `again-${RUN}` };
+  const reconnect = async () => {
+    const c = new Client(ALICE);
+    c.token = a.token;
+    await c.open();
+    await c.hello();
+    return c;
+  };
+  const gone = await reconnect();
+  gone.send(frame);
+  gone.close(); // the socket goes before its echo is read
+  const first = await b.next((m) => m.t === 'message' && m.message.body === body);
+  const c = await reconnect();
+  c.send(frame); // the outbox again, after ready
+  const echo = await c.next((m) => m.t === 'message' && m.nonce === frame.nonce);
+  assert.equal(echo.message.id, first.message.id, 'the message it already made');
+  assert.equal(echo.message.body, body);
+  assert.equal('nonce' in echo.message, false, 'the nonce stays out of the message');
+  await assert.rejects(b.next((m) => m.t === 'message' && m.message.body === body, 500), 'nobody hears it twice');
+  b.send({ t: 'history', channelId: 'general', limit: 20 });
+  const h = await b.next((m) => m.t === 'history' && m.channelId === 'general');
+  assert.equal(h.messages.filter((m) => m.body === body).length, 1, 'stored once');
+  assert.equal(h.messages.some((m) => 'nonce' in m), false);
+  // A new nonce is a new message, even with the same words.
+  c.send({ ...frame, nonce: `again2-${RUN}` });
+  const second = await c.next((m) => m.t === 'message' && m.nonce === `again2-${RUN}`);
+  assert.notEqual(second.message.id, first.message.id);
+  // Deleted meanwhile: sending it again doesn't bring it back.
+  c.send({ t: 'delete', id: second.message.id });
+  await b.next((m) => m.t === 'deleted' && m.id === second.message.id);
+  c.send({ ...frame, nonce: `again2-${RUN}` });
+  assert.equal((await c.next((m) => m.t === 'error' && m.re === 'send')).code, 'no_message');
+  c.close();
+  for (const x of [a, b]) x.inbox = x.inbox.filter((m) => !(m.t === 'message' && m.message.body === body) && !(m.t === 'deleted' && m.id === second.message.id));
+});
+
 await test('empty and oversized messages are rejected', async () => {
   a.send({ t: 'send', channelId: 'general', body: '   ' });
   assert.equal((await a.next((m) => m.t === 'error')).code, 'empty');
@@ -1216,17 +1254,21 @@ await test('ðŸ“£ ping: everyone hears it, pushes go out, and it is rate limited'
   assert.deepEqual([heard.from, heard.text], [a.uid, 'game night!']);
   const push = await pushFor(bTopic, (p) => /pinged everyone/.test(p.title));
   assert.equal(push.message, 'game night!');
+  assert.equal(new URL(push.click).hash, '', 'a ping opens Yap itself, not a message');
   // One a minute per person: the next one right away is turned away.
   a.send({ t: 'ping' });
   const err = await a.next((m) => m.t === 'error');
   assert.deepEqual([err.code, err.message, err.re], ['slow_down', 'You can ping again in a minute.', 'ping']);
 });
 
-await test('@mention pushes to the person mentioned', async () => {
+await test('@mention pushes to the person mentioned; tapping it opens that message', async () => {
   a.send({ t: 'send', channelId: 'general', body: `hey @${BOB} check this`, nonce: 'mention' });
-  await a.next((m) => m.t === 'message' && m.nonce === 'mention');
+  const sent = (await a.next((m) => m.t === 'message' && m.nonce === 'mention')).message;
   const push = await pushFor(bTopic, (p) => /mentioned you/.test(p.title));
   assert.match(push.message, /check this/);
+  const click = new URL(push.click);
+  assert.equal(click.hash, `#channel=general&message=${sent.id}`, 'the click link opens the message');
+  assert.ok(!push.click.includes(KEY), 'never the invite key');
 });
 
 await test('@mentions push to exactly who is named: "@Sam Lee" is never also "@Sam"; code mentions nobody', async () => {
@@ -1287,6 +1329,7 @@ await test('browser pushes: subscribe, an @mention arrives encrypted + VAPID-sig
   b.send({ t: 'push.subscribe', endpoint, keys: { p256dh: b64u(ua.getPublicKey()), auth: b64u(auth) } });
   assert.notEqual((await b.next((m) => m.t === 'notify')).mode, 'off', 'subscribing turns pushes on');
   a.send({ t: 'send', channelId: 'general', body: `@${BOB} browser push?`, nonce: 'wp' });
+  const sent = (await a.next((m) => m.t === 'message' && m.nonce === 'wp')).message;
   let got;
   for (let i = 0; i < 40 && !got; i++) {
     got = webPushes.find((p) => endpoint.endsWith(p.path));
@@ -1307,6 +1350,7 @@ await test('browser pushes: subscribe, an @mention arrives encrypted + VAPID-sig
   const msg = openWebPush(got.body, ua, auth);
   assert.match(msg.title, /mentioned you/);
   assert.match(msg.body, /browser push\?/);
+  assert.deepEqual([msg.channelId, msg.messageId], ['general', sent.id], 'the message it opens');
   b.send({ t: 'push.unsubscribe', endpoint });
   await new Promise((r) => setTimeout(r, 200));
   const before = webPushes.length;
@@ -1684,6 +1728,9 @@ await test('watch together: audience is visible, one shared player, queue, end â
   b.send({ t: 'watch.queue', add: 'bbbbbbbbbbb' }); // right behind it: neither may be lost
   st = await a.next((m) => m.t === 'watch.state' && m.state.queue.length === 2, 15000);
   assert.deepEqual(st.state.queue.map((q) => q.id).sort(), ['aaaaaaaaaaa', 'bbbbbbbbbbb']);
+  // The state after the first add (one queued, whichever title lookup came back first) is
+  // still in the inbox: drop it, or it passes for the state after the remove below.
+  for (const c of [a, b]) c.inbox = c.inbox.filter((m) => m.t !== 'watch.state');
   b.send({ t: 'watch.queue', remove: st.state.queue.findIndex((q) => q.id === 'bbbbbbbbbbb') });
   st = await a.next((m) => m.t === 'watch.state' && m.state.queue.length === 1);
   assert.equal(st.state.queue[0].id, 'aaaaaaaaaaa');
@@ -1708,6 +1755,30 @@ await test('watch together: two quick adds with nothing on: one plays, the other
   a.send({ t: 'watch.next', expect: st.state.videoId });
   await b.next((m) => m.t === 'watch.state' && m.state.videoId === st.state.queue[0].id);
   a.send({ t: 'watch.next', expect: st.state.queue[0].id });
+  await b.next((m) => m.t === 'watch.state' && m.state.videoId === null);
+});
+
+await test('watch together: removing by id takes out the one you meant even if the queue moved up first; an id already gone does nothing', async () => {
+  const [now, next, later] = ['eeeeeeeeeee', 'fffffffffff', 'ggggggggggg'];
+  a.send({ t: 'watch.set', videoId: now });
+  await b.next((m) => m.t === 'watch.state' && m.state.videoId === now && m.state.queue.length === 0, 10000);
+  a.send({ t: 'watch.queue', add: next });
+  await b.next((m) => m.t === 'watch.state' && m.state.videoId === now && m.state.queue.length === 1, 10000);
+  a.send({ t: 'watch.queue', add: later });
+  let st = await b.next((m) => m.t === 'watch.state' && m.state.videoId === now && m.state.queue.length === 2, 10000);
+  const shown = st.state.queue.findIndex((q) => q.id === later); // where Bob's remove button was: 1
+  assert.equal(shown, 1);
+  // The video ends just before Bob's click lands: the queue moves up, so index 1 is past the end now.
+  a.send({ t: 'watch.next', expect: now });
+  await b.next((m) => m.t === 'watch.state' && m.state.videoId === next);
+  b.send({ t: 'watch.queue', remove: shown, id: later });
+  st = await a.next((m) => m.t === 'watch.state' && m.state.videoId === next && m.state.queue.length === 0);
+  assert.equal(st.state.videoId, next, 'what plays now stays');
+  // Already gone (someone else took it out first): nothing changes, and no error.
+  for (const c of [a, b]) c.inbox = c.inbox.filter((m) => m.t !== 'watch.state');
+  b.send({ t: 'watch.queue', remove: 0, id: later });
+  await assert.rejects(b.next((m) => m.t === 'watch.state' || (m.t === 'error' && m.re === 'watch.queue'), 600), 'a stale id is a no-op');
+  a.send({ t: 'watch.next', expect: next });
   await b.next((m) => m.t === 'watch.state' && m.state.videoId === null);
 });
 

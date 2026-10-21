@@ -59,6 +59,7 @@ OPTIONS (headless test mode):
   --bitrate BPS        Opus bitrate (default 128000)
   --mode open|vad|ptt  Transmit mode (default open)
   --denoise            Enable RNNoise (default off in headless)
+  --mic-volume PCT     Settings › Voice › Mic volume, 0–200 (default 100)
   --echo-cancel        Enable echo cancellation (default off in headless; the stats
                        line then shows aec=<delay estimate>)
   --expect TEXT        Report when a message containing TEXT arrives
@@ -190,6 +191,7 @@ fn main() {
             "--call-report" => h.call_report = Some(need(&mut args, "--call-report")),
             "--expect" => h.expect = Some(need(&mut args, "--expect")),
             "--denoise" => h.denoise = true,
+            "--mic-volume" => h.mic_volume = need(&mut args, "--mic-volume").parse::<f32>().ok().map(|p| p / 100.0),
             "--echo-cancel" => h.echo_cancel = true,
             "--approve-all" => h.approve_all = true,
             "--password" | "--pin" => h.pin = Some(need(&mut args, "--password")),

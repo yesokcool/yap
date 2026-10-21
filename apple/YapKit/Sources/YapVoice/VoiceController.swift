@@ -666,12 +666,19 @@ public final class VoiceController: VoiceCoordinator {
         if client.channelsById[wanted]?.kind == .voice {
             Task { await sendJoin(wanted) }
         } else {
+            // Archived while our socket was down: we're out, the same as when
+            // it happens while we're connected (the share and the screen
+            // we watch end too; the app says why).
             endNotes("The channel is gone.")
+            stopSharing(announce: false)
+            stopWatching()
             wantedChannelId = nil
             joinedOnce = nil
             keeper.leave()
             engine.stop()
             resetChannelBitrate()
+            onEvent?(.left)
+            onEndedByServer?()
         }
     }
 
@@ -1060,7 +1067,22 @@ extension VoiceController {
 /// full band) and the phone's own mic is used: `.voiceChat` would switch any
 /// headset to its narrowband call profile (HFP), so the mode is `.default`
 /// (WebRTC's voice-processing unit still cancels echo).
-enum AudioSessionSetup {
+///
+/// Outside calls the session is `everyday()`: ambient, mixing with other
+/// apps. WebRTC doesn't put that back when a call ends (it only lets the
+/// session go), so the app does.
+public enum AudioSessionSetup {
+    /// Ambient, mixing with others: Yap's own sounds (blips, chimes, GIFs)
+    /// never stop someone's music and follow the silent switch.
+    public static func everyday() {
+        try? AVAudioSession.sharedInstance().setCategory(.ambient, options: [.mixWithOthers])
+    }
+
+    /// The session is still a call's (play and record) although no call is running.
+    public static var leftByACall: Bool {
+        AVAudioSession.sharedInstance().category == .playAndRecord
+    }
+
     static func configure(highQualityBluetooth: Bool) {
         let config = RTCAudioSessionConfiguration.webRTC()
         config.category = AVAudioSession.Category.playAndRecord.rawValue

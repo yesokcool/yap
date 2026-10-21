@@ -1,3 +1,7 @@
+/** How long a connection attempt may take, and how long a ping may go unanswered, before we try again. */
+const CONNECT_MS = 15_000;
+const PONG_MS = 10_000;
+
 /**
  * The one WebSocket to the server, with heartbeat and automatic reconnect.
  * Events: 'open', 'message' (detail = parsed frame), 'close' (detail =
@@ -8,7 +12,9 @@ export class Connection extends EventTarget {
   #ws = null;
   #retry = 0;
   #retryTimer = null;
+  #connectTimer = null;
   #pingTimer = null;
+  #probeTimer = null;
   #pingSentAt = 0;
   #pongAt = 0;
   #stopped = false;
@@ -17,9 +23,15 @@ export class Connection extends EventTarget {
     super();
     this.url = url;
     this.protocols = protocols;
-    // Come back fast when the network or the tab does.
-    addEventListener('online', () => this.reconnectNow());
-    document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && this.reconnectNow());
+    // Come back fast when the network or the tab does: retry now if we're
+    // waiting to, and if the socket looks open, check it still answers (a phone
+    // that slept, or a laptop that changed networks, can hold a dead one).
+    const wake = () => {
+      this.reconnectNow();
+      this.#probe();
+    };
+    addEventListener('online', wake);
+    document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && wake());
   }
 
   get open() {
@@ -31,7 +43,12 @@ export class Connection extends EventTarget {
     this.#retryTimer = null;
     const ws = new WebSocket(this.url, this.protocols);
     this.#ws = ws;
+    // A connection attempt can hang for a minute or more (a network that
+    // swallows it): give up on it and try again, like any other drop.
+    clearTimeout(this.#connectTimer);
+    this.#connectTimer = setTimeout(() => ws.readyState === WebSocket.CONNECTING && this.#lost(ws), CONNECT_MS);
     ws.onopen = () => {
+      clearTimeout(this.#connectTimer);
       this.#retry = 0;
       this.#startHeartbeat();
       this.#emit('open');
@@ -102,6 +119,9 @@ export class Connection extends EventTarget {
       ws.close();
     } catch {}
     this.#ws = null;
+    clearTimeout(this.#connectTimer);
+    clearTimeout(this.#probeTimer);
+    this.#probeTimer = null;
     clearInterval(this.#pingTimer);
     this.#emit('close', { code: event?.code ?? 0, reason: event?.reason ?? '' });
     if (this.#stopped) return;
@@ -116,7 +136,7 @@ export class Connection extends EventTarget {
       // A ping that's gone 10 s without a pong means the socket is dead even
       // if the browser hasn't noticed. (Timers throttle in background tabs,
       // so compare against when the ping actually went out.)
-      if (this.#pingSentAt && this.#pongAt < this.#pingSentAt && Date.now() - this.#pingSentAt > 10_000) {
+      if (this.#pingSentAt && this.#pongAt < this.#pingSentAt && Date.now() - this.#pingSentAt > PONG_MS) {
         return this.#lost(this.#ws);
       }
       if (this.open) {
@@ -124,6 +144,19 @@ export class Connection extends EventTarget {
         this.#pingSentAt = Date.now();
       }
     }, 15_000);
+  }
+
+  /** One ping now; no pong within PONG_MS means the socket is dead (the heartbeat would only notice up to 25 s later). */
+  #probe() {
+    if (!this.open || this.#probeTimer) return;
+    const ws = this.#ws;
+    const sent = Date.now();
+    ws.send('ping');
+    this.#pingSentAt = sent;
+    this.#probeTimer = setTimeout(() => {
+      this.#probeTimer = null;
+      if (this.#ws === ws && this.#pongAt < sent) this.#lost(ws);
+    }, PONG_MS);
   }
 
   #emit(type, detail) {

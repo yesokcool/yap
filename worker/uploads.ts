@@ -123,7 +123,7 @@ function imageSize(b: Uint8Array): { width: number; height: number } | null {
  * emojis (asked for as /emoji/<id>, and really an emoji) are cached for a
  * year; everything else at most a day, whichever path it's asked for by.
  */
-export async function serveBlob(request: Request, id: string, env: Env, emojiPath: boolean): Promise<Response> {
+export async function serveBlob(request: Request, id: string, env: Env, ctx: ExecutionContext, emojiPath: boolean): Promise<Response> {
   const head = request.method === 'HEAD';
   if (!head && request.method !== 'GET') return new Response('GET only.', { status: 405, headers: { Allow: 'GET, HEAD' } });
   const cache = caches.default;
@@ -140,7 +140,8 @@ export async function serveBlob(request: Request, id: string, env: Env, emojiPat
   };
   if (head) return new Response(null, { headers: { ...headers, 'Content-Length': String(blob.data.byteLength) } });
   const response = new Response(blob.data, { headers });
-  await cache.put(request, response.clone());
+  // Into this location's cache after the response, not before it.
+  ctx.waitUntil(cache.put(request, response.clone()));
   return response;
 }
 

@@ -142,7 +142,12 @@ async function user(name, color, viewport = { width: 1280, height: 800 }, colorS
     if (window !== window.top || !location.origin.startsWith('http')) return; // only Yap's page (not about:blank or iframes)
     if (!localStorage.getItem('yap.settings')) {
       // A fresh browser; settle() signs in (or signs up on a fresh server) like a person would.
-      localStorage.setItem('yap.settings', JSON.stringify({ color, bitrate, mode: 'open' }));
+      // Noise suppression off: the fake mic plays a test signal (chords + noise), not speech, and
+      // RNNoise rightly removes nearly all of it once it has heard a few seconds of it (measured in a
+      // call: 0.17 RMS in, 0.0005 out). Every check of what's sent (its level, its bitrate, the
+      // push-to-talk tail, Space's left and right, Hear yourself, "heard again") then passed or
+      // failed by how long the call had been going. The noise suppression test turns it on.
+      localStorage.setItem('yap.settings', JSON.stringify({ color, bitrate, mode: 'open', noiseSuppression: false }));
     }
   }, [name, color, BITRATE]);
   const page = await context.newPage();
@@ -1116,6 +1121,149 @@ await test('catch up: two unread channels → the list, one click starts at the 
   for (const p of [a, b]) await p.click('[data-action="open-channel"][data-id="general"]');
 });
 
+await test('"Jump to first unread" shows as soon as the "New since" line is above the screen (not a header\'s height later)', async () => {
+  await b.setViewportSize({ width: 1280, height: 360 });
+  try {
+    const seen = await b.evaluate(async () => {
+      const { renderMessages, renderJumpPill } = await import('/js/app/messages.js');
+      const channel = yap.settings.channel;
+      const scroller = document.getElementById('messages');
+      // The first message from someone else that leaves room to scroll its line off the top.
+      let at = null;
+      for (const m of yap.state.history.get(channel).messages.slice(2).filter((m) => m.uid !== yap.settings.uid)) {
+        yap.state.since.set(channel, m.ts - 1);
+        renderMessages();
+        const divider = document.getElementById('new-divider');
+        at = Math.ceil(divider.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop); // (scrollTop is whole pixels)
+        if (at + 10 <= scroller.scrollHeight - scroller.clientHeight) break;
+      }
+      const pill = (top) => {
+        scroller.scrollTop = top;
+        renderJumpPill();
+        return { top: scroller.scrollTop, shown: !document.getElementById('jump-pill').hidden };
+      };
+      const result = { above: pill(at + 10), visible: pill(Math.max(0, at - 40)), at };
+      yap.state.since.delete(channel);
+      renderMessages({ keep: 'bottom' });
+      return result;
+    });
+    assert.ok(seen.above.top >= seen.at + 10, `the list scrolls far enough for this check (${JSON.stringify(seen)})`);
+    assert.equal(seen.above.shown, true, 'the line is 10 px above the screen: the pill shows');
+    assert.equal(seen.visible.shown, false, 'the line is on screen: no pill');
+  } finally {
+    await b.setViewportSize({ width: 1280, height: 800 });
+  }
+});
+
+await test('each channel keeps its own draft: switching brings back what you typed there, and Enter never sends it to the wrong channel', async () => {
+  const mine = await a.evaluate(() => `p_${yap.settings.uid}`);
+  await a.click('[data-action="open-channel"][data-id="general"]');
+  await a.fill('#input', `half a thought for general ${RUN}`);
+  await a.click(`[data-action="open-channel"][data-id="${mine}"]`);
+  assert.equal(await a.inputValue('#input'), '', 'the Personal space starts empty');
+  await a.fill('#input', `a note to self ${RUN}`);
+  await a.click('[data-action="open-channel"][data-id="general"]');
+  assert.equal(await a.inputValue('#input'), `half a thought for general ${RUN}`, 'general’s draft is back');
+  await a.click(`[data-action="open-channel"][data-id="${mine}"]`);
+  assert.equal(await a.inputValue('#input'), `a note to self ${RUN}`);
+  await a.press('#input', 'Enter');
+  await a.waitForSelector(`.msg .body:text("a note to self ${RUN}")`, { timeout: 5000 });
+  await a.click('[data-action="open-channel"][data-id="general"]');
+  assert.equal(await a.inputValue('#input'), `half a thought for general ${RUN}`, 'sending one channel’s draft leaves the other alone');
+  assert.equal(await a.locator(`.msg .body:text("half a thought for general ${RUN}")`).count(), 0, 'nothing went to general');
+  await a.fill('#input', '');
+  // A reply in progress stays with its channel.
+  const last = await a.evaluate(() => yap.state.history.get('general').messages.filter((m) => !m.pending).at(-1).id);
+  await a.locator(`.msg:has([data-action="reply-message"][data-id="${last}"])`).hover();
+  await a.click(`[data-action="reply-message"][data-id="${last}"]`);
+  await a.waitForSelector('#reply-bar:not([hidden])');
+  await a.click(`[data-action="open-channel"][data-id="${mine}"]`);
+  assert.equal(await a.isHidden('#reply-bar'), true, 'no reply bar in another channel');
+  await a.click('[data-action="open-channel"][data-id="general"]');
+});
+
+await test('"↓ New messages" shows when someone writes below while you’re scrolled up; a click goes down and it’s gone', async () => {
+  await b.setViewportSize({ width: 1280, height: 420 });
+  try {
+    await a.click('[data-action="open-channel"][data-id="general"]');
+    await b.click('[data-action="open-channel"][data-id="general"]');
+    // Enough to scroll.
+    for (let i = 0; i < 12; i++) await a.evaluate((t) => yap.ui.send({ t: 'send', channelId: 'general', body: t }), `filler ${i} ${RUN}`);
+    await b.waitForSelector(`.msg .body:text("filler 11 ${RUN}")`, { timeout: 10000 });
+    // At the bottom: a new message just appears, no pill.
+    await a.evaluate((t) => yap.ui.send({ t: 'send', channelId: 'general', body: t }), `seen at once ${RUN}`);
+    await b.waitForSelector(`.msg .body:text("seen at once ${RUN}")`, { timeout: 5000 });
+    assert.equal(await b.isHidden('#new-pill'), true, 'at the bottom: no pill');
+    await b.evaluate(() => (document.getElementById('messages').scrollTop = 0));
+    await a.evaluate((t) => yap.ui.send({ t: 'send', channelId: 'general', body: t }), `something new ${RUN}`);
+    await b.waitForSelector('#new-pill:not([hidden])', { timeout: 5000 });
+    assert.equal(await b.textContent('#new-pill'), '↓ New messages');
+    for (const scheme of ['light', 'dark']) {
+      await b.evaluate((t) => yap.ui.setTheme(t), scheme);
+      await b.screenshot({ path: path.join(OUT, `desktop-new-messages-${scheme}.png`) });
+    }
+    await b.evaluate(() => yap.ui.setTheme('dark'));
+    // Keyboard reachable, and it's in a polite live region.
+    assert.equal(await b.locator('#new-pill').evaluate((el) => el.closest('[aria-live]')?.getAttribute('aria-live')), 'polite');
+    await b.click('#new-pill');
+    await b.waitForFunction(() => { const s = document.getElementById('messages'); return s.scrollHeight - s.scrollTop - s.clientHeight < 80; }, null, { timeout: 5000 });
+    await b.waitForSelector('#new-pill', { state: 'hidden' });
+    // Scrolling down yourself hides it too; switching channels clears it.
+    await b.evaluate(() => (document.getElementById('messages').scrollTop = 0));
+    await a.evaluate((t) => yap.ui.send({ t: 'send', channelId: 'general', body: t }), `and again ${RUN}`);
+    await b.waitForSelector('#new-pill:not([hidden])', { timeout: 5000 });
+    await b.evaluate(() => { const s = document.getElementById('messages'); s.scrollTop = s.scrollHeight; });
+    await b.waitForSelector('#new-pill', { state: 'hidden' });
+    await b.evaluate(() => (document.getElementById('messages').scrollTop = 0));
+    await a.evaluate((t) => yap.ui.send({ t: 'send', channelId: 'general', body: t }), `once more ${RUN}`);
+    await b.waitForSelector('#new-pill:not([hidden])', { timeout: 5000 });
+    const mine = await b.evaluate(() => `p_${yap.settings.uid}`);
+    await b.click(`[data-action="open-channel"][data-id="${mine}"]`);
+    assert.equal(await b.isHidden('#new-pill'), true, 'another channel: no pill');
+    await b.click('[data-action="open-channel"][data-id="general"]');
+    assert.equal(await b.isHidden('#new-pill'), true, 'and none when you come back (you open at the bottom)');
+  } finally {
+    await b.setViewportSize({ width: 1280, height: 800 });
+  }
+});
+
+await test('a tapped browser push opens its message: from a closed Yap (#channel=…&message=…) and from an open tab (the service worker asks it)', async () => {
+  const target = await a.evaluate(() => yap.state.history.get('general').messages.find((m) => !m.pending && m.body?.startsWith('filler 2 ')));
+  assert.ok(target, 'a message to open');
+  // Closed: the service worker opens /#channel=…&message=…
+  const page = await b.context().newPage();
+  await page.goto(`${BASE}/#channel=general&message=${target.id}`);
+  await page.waitForSelector(`.msg.flash:has([data-id="${target.id}"])`, { timeout: 10000 });
+  assert.equal(new URL(page.url()).hash, '', 'the address is tidied up');
+  await page.close();
+  // Open: the service worker posts { t: 'yap.open' } to the tab.
+  const mine = await b.evaluate(() => `p_${yap.settings.uid}`);
+  await b.click(`[data-action="open-channel"][data-id="${mine}"]`);
+  await b.evaluate((id) => navigator.serviceWorker.dispatchEvent(new MessageEvent('message', { data: { t: 'yap.open', channelId: 'general', messageId: id } })), target.id);
+  await b.waitForSelector(`.msg.flash:has([data-id="${target.id}"])`, { timeout: 10000 });
+  assert.equal(await b.evaluate(() => yap.settings.channel), 'general');
+});
+
+await test('the installed app’s badge counts your unread @mentions', async () => {
+  const page = await b.context().newPage();
+  await page.addInitScript(() => {
+    window.badges = [];
+    navigator.setAppBadge = (n) => (window.badges.push(n), Promise.resolve());
+    navigator.clearAppBadge = () => (window.badges.push(0), Promise.resolve());
+  });
+  await page.goto(BASE);
+  await page.waitForFunction(() => yap.state.status === 'online', null, { timeout: 15000 });
+  const mine = await page.evaluate(() => `p_${yap.settings.uid}`);
+  await page.click(`[data-action="open-channel"][data-id="${mine}"]`);
+  await a.evaluate((t) => yap.ui.send({ t: 'send', channelId: 'general', body: t }), `@Ben badge me ${RUN}`);
+  await page.waitForFunction(() => window.badges.at(-1) === 1, null, { timeout: 5000 });
+  await a.evaluate((t) => yap.ui.send({ t: 'send', channelId: 'general', body: t }), `@Ben and again ${RUN}`);
+  await page.waitForFunction(() => window.badges.at(-1) === 2, null, { timeout: 5000 });
+  await page.click('[data-action="open-channel"][data-id="general"]');
+  await page.waitForFunction(() => window.badges.at(-1) === 0, null, { timeout: 5000 });
+  await page.close();
+});
+
 await test('mentions while you were away: the badge comes back after a reload; Catch up lists them first; Mark all read', async () => {
   const mine = await b.evaluate(() => `p_${yap.settings.uid}`);
   await b.click(`[data-action="open-channel"][data-id="${mine}"]`);
@@ -1414,6 +1562,13 @@ await test('Settings › Voice › Advanced › Quality: 256 and 510 kbps say wh
 });
 
 await test('Settings › Voice › Test mic: a mic whose peaks keep hitting the top says "Too loud (clipping)"; a normal one never does', async () => {
+  // The test mic as it is (its peaks at −4 dBFS): the browser's automatic gain lifts this test signal
+  // to full scale (measured: 0 dBFS peaks), which RNNoise, on here before, used to hide.
+  const autoGain = await a.evaluate(() => {
+    const was = yap.settings.autoGain;
+    yap.settings.autoGain = false;
+    return was;
+  });
   try {
     await a.click('[data-action="open-settings"]');
     await a.click('#settings-tabs [role=tab]:text-is("Voice")');
@@ -1446,9 +1601,10 @@ await test('Settings › Voice › Test mic: a mic whose peaks keep hitting the 
     await a.evaluate(() => (navigator.mediaDevices.getUserMedia = globalThis.__plainMic));
     await a.click('#settings-form .settings-actions .btn');
   } finally {
-    await a.evaluate(() => {
+    await a.evaluate((on) => {
       if (globalThis.__plainMic) navigator.mediaDevices.getUserMedia = globalThis.__plainMic;
-    }).catch(() => {});
+      yap.settings.autoGain = on;
+    }, autoGain).catch(() => {});
   }
 });
 
@@ -1553,7 +1709,6 @@ await test('no transport-cc on audio: 50 packets a second, no bandwidth-probe pa
 
 await test('push-to-talk keeps sending ~200 ms after the key is let go', async () => {
   await a.evaluate(() => {
-    yap.settings.mode = 'ptt';
     document.activeElement?.blur();
     // Watch what's actually sent: the gate's output track.
     const ctx = new AudioContext();
@@ -1568,21 +1723,29 @@ await test('push-to-talk keeps sending ~200 ms after the key is let go', async (
     }, 5);
     addEventListener('keyup', () => (globalThis.__releasedAt = performance.now()), { once: true, capture: true });
   });
-  await a.waitForTimeout(500);
-  await a.keyboard.down('Backquote');
-  await a.waitForTimeout(700);
-  await a.keyboard.up('Backquote');
-  await a.waitForTimeout(800);
-  const { tail, during } = await a.evaluate(() => {
-    clearInterval(__sentTimer);
-    const after = __sent.filter(([t]) => t > __releasedAt);
-    const lastLoud = after.filter(([, rms]) => rms > 0.001).at(-1)?.[0] ?? __releasedAt;
-    const held = __sent.filter(([t]) => t > __releasedAt - 400 && t < __releasedAt);
-    return { tail: lastLoud - __releasedAt, during: held.filter(([, rms]) => rms > 0.001).length / Math.max(1, held.length) };
-  });
-  await a.evaluate(() => (yap.settings.mode = 'open'));
-  assert.ok(during > 0.9, `sending while the key is down (${(during * 100).toFixed(0)}%)`);
-  assert.ok(tail >= 150 && tail < 450, `still sending ${tail.toFixed(0)} ms after release`);
+  try {
+    // First, still always on: what's watched is what's sent, and there is something to send.
+    await until(() => a.evaluate(() => __sent.length >= 40 && __sent.slice(-40).every(([, rms]) => rms > 0.001)), 3000, 'always on, it sends');
+    await a.evaluate(() => (yap.settings.mode = 'ptt'));
+    await a.waitForTimeout(500);
+    await a.keyboard.down('Backquote');
+    await a.waitForTimeout(700);
+    await a.keyboard.up('Backquote');
+    await a.waitForTimeout(800);
+    const { tail, during } = await a.evaluate(() => {
+      const after = __sent.filter(([t]) => t > __releasedAt);
+      const lastLoud = after.filter(([, rms]) => rms > 0.001).at(-1)?.[0] ?? __releasedAt;
+      const held = __sent.filter(([t]) => t > __releasedAt - 400 && t < __releasedAt);
+      return { tail: lastLoud - __releasedAt, during: held.filter(([, rms]) => rms > 0.001).length / Math.max(1, held.length) };
+    });
+    assert.ok(during > 0.9, `sending while the key is down (${(during * 100).toFixed(0)}%)`);
+    assert.ok(tail >= 150 && tail < 450, `still sending ${tail.toFixed(0)} ms after release`);
+  } finally {
+    await a.evaluate(() => {
+      clearInterval(__sentTimer);
+      yap.settings.mode = 'open';
+    });
+  }
 });
 
 await test('push-to-talk clicks (for you) when it opens and when it closes after the tail; a double-tap stays live ("Live — tap to stop") until the next press', async () => {
@@ -1651,6 +1814,71 @@ await test('voice quality for the whole channel: picked by one, used by both', a
   await a.selectOption('#popover .vp-quality', '');
   await b.waitForFunction(() => yap.state.channels.get('lounge')?.bitrate === null, null, { timeout: 5000 });
   await a.keyboard.press('Escape');
+});
+
+await test('Settings › Voice › Mic volume: 100 % sends what the mic gives, 50 % sends 6 dB less (and the bar shows it), live while you drag', async () => {
+  // What goes out (the gate's output) against what the mic gives, both through an analyser, in back-to-back
+  // ~0.7 s windows over 4 s: the test signal swells and fades every 2 s, and the two paths differ by a few ms.
+  const sentVsMic = () => a.evaluate(async () => {
+    const ctx = new AudioContext();
+    const size = 32768;
+    const tap = (track) => {
+      const an = ctx.createAnalyser();
+      an.fftSize = size;
+      ctx.createMediaStreamSource(new MediaStream([track])).connect(an);
+      return an;
+    };
+    const mic = tap(yap.voice.rawStream.getAudioTracks()[0]);
+    const sent = tap(yap.voice.sendTrack);
+    const buf = new Float32Array(size);
+    const energy = (an) => {
+      an.getFloatTimeDomainData(buf);
+      return buf.reduce((s, x) => s + x * x, 0);
+    };
+    const windowMs = (size / ctx.sampleRate) * 1000;
+    await new Promise((r) => setTimeout(r, windowMs));
+    let micSum = 0;
+    let sentSum = 0;
+    let windows = 0;
+    // The meter (the gate's own level, every 20 ms), over the same seconds.
+    const meter = [];
+    const reading = setInterval(() => meter.push(10 ** (yap.voice.localDb / 10)), 20);
+    for (const end = performance.now() + 4000; performance.now() < end; windows++) {
+      micSum += energy(mic);
+      sentSum += energy(sent);
+      await new Promise((r) => setTimeout(r, windowMs));
+    }
+    clearInterval(reading);
+    ctx.close();
+    const micPower = micSum / (windows * size);
+    return { sent: 10 * Math.log10(sentSum / micSum), meter: 10 * Math.log10(meter.reduce((s, p) => s + p, 0) / meter.length / micPower) };
+  });
+  const setVolume = (pct) => a.evaluate((v) => {
+    const slider = document.querySelector('#settings-form [name=micVolume]');
+    slider.value = String(v);
+    slider.dispatchEvent(new Event('input', { bubbles: true }));
+  }, pct);
+  await a.click('[data-action="open-settings"]');
+  await a.click('#settings-tabs [role=tab]:text-is("Voice")');
+  try {
+    assert.equal(await a.textContent('#mic-volume-out'), '100%');
+    const full = await sentVsMic();
+    assert.ok(Math.abs(full.sent) < 1, `at 100 % what's sent is what the mic gives (${full.sent.toFixed(2)} dB)`);
+    const tagged = () => a.evaluate(() => [yap.voice.rawStream, ...[...yap.voice.peers.values()].map((p) => p.pc)].map((o) => (o.__e2e ??= Math.random())));
+    const before = await tagged();
+    await setVolume(50);
+    assert.equal(await a.textContent('#mic-volume-out'), '50%');
+    assert.equal(await a.evaluate(() => yap.settings.micVolume), 0.5, 'saved for this device');
+    const half = await sentVsMic();
+    assert.ok(Math.abs(half.sent + 6.02) < 1, `at 50 % it's 6 dB down (${half.sent.toFixed(2)} dB)`);
+    const bar = half.meter - full.meter;
+    assert.ok(Math.abs(bar + 6.02) < 1.5, `the bar hears it too (${bar.toFixed(2)} dB; read every 20 ms, so a little rougher)`);
+    assert.deepEqual(await tagged(), before, 'the same mic and the same connections (nothing reopened)');
+    await a.locator('#settings-form label:has([name=micVolume])').screenshot({ path: path.join(OUT, 'mic-volume.png') });
+  } finally {
+    await setVolume(100).catch(() => {});
+    await a.click('#settings-form .settings-actions .btn').catch(() => {});
+  }
 });
 
 await test('speaking ring shows for the remote speaker', async () => {
@@ -1826,15 +2054,31 @@ await test('one Noise suppression switch: RNNoise in the call (not the browser\'
     Object.assign(yap.settings, p);
     await yap.voice.restartMic();
   }, patch);
-  if (SYNTH) assert.deepEqual(await mic(), { rnnoise: true, asked: false }, 'RNNoise, and not the browser\'s filter as well');
-  else assert.equal((await mic()).rnnoise, true);
-  await reopen({ music: true });
-  assert.equal((await mic()).rnnoise, false, 'music mode: off');
-  if (SYNTH) assert.equal((await mic()).asked, false);
-  await reopen({ music: false, noiseSuppression: false });
-  assert.equal((await mic()).rnnoise, false, 'switched off: off');
-  await reopen({ noiseSuppression: true });
-  assert.equal((await mic()).rnnoise, true);
+  try {
+    await reopen({ noiseSuppression: true }); // (off for everyone else here, for the test signal's sake: see user())
+    if (SYNTH) assert.deepEqual(await mic(), { rnnoise: true, asked: false }, 'RNNoise, and not the browser\'s filter as well');
+    else assert.equal((await mic()).rnnoise, true);
+    await reopen({ music: true });
+    assert.equal((await mic()).rnnoise, false, 'music mode: off');
+    if (SYNTH) assert.equal((await mic()).asked, false);
+    await reopen({ music: false, noiseSuppression: false });
+    assert.equal((await mic()).rnnoise, false, 'switched off: off');
+    await reopen({ noiseSuppression: true });
+    assert.equal((await mic()).rnnoise, true);
+    // Two changes in a row (on, with RNNoise to set up, then off at once): what ends up open is the last one asked for.
+    const last = await a.evaluate(async () => {
+      yap.settings.noiseSuppression = false;
+      const first = yap.voice.restartMic();
+      yap.settings.noiseSuppression = true;
+      const second = yap.voice.restartMic();
+      yap.settings.noiseSuppression = false;
+      await Promise.all([first, second, yap.voice.restartMic()]);
+      return { rnnoise: yap.voice.rnnoise, open: yap.voice.rawStream?.getAudioTracks()[0]?.readyState };
+    });
+    assert.deepEqual(last, { rnnoise: false, open: 'live' }, 'the last change wins, with one live mic');
+  } finally {
+    await reopen({ music: false, noiseSuppression: false }); // (the plain test signal again for the tests after this one)
+  }
   await a.waitForFunction(() => [...yap.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'));
   // Settings from before: "Stronger noise removal" on (with the old switch off) means noise removal stays on.
   const ctx = await newContext({ viewport: { width: 800, height: 600 } }, 'old settings');
@@ -2315,6 +2559,30 @@ await test('screen sharing: the sharer sees who\'s watching; someone whose conne
   await b.waitForFunction(() => !document.querySelector('.voice-member .live-badge'), null, { timeout: 5000 });
 });
 
+await test('screen sharing: changing voice channels — a viewer who moves away stops watching; a sharer who moves takes the share along, LIVE there', async () => {
+  const adaSid = await a.evaluate(() => yap.state.sid);
+  const inLounge = (page) => page.waitForFunction(() => yap.state.voiceChannel === 'lounge' && [...yap.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'), null, { timeout: 15000 });
+  try {
+    await startSharing(a);
+    await b.click(`.voice-member[data-voice-sid="${adaSid}"] .live-badge`);
+    await b.waitForFunction(() => document.querySelector('#screen-view').dataset.state === 'live', null, { timeout: 15000 });
+    // Ben moves to Gaming: Ada's picture can't follow him there, so his viewer closes (it used to say "Connecting…" for good).
+    await b.click('button.channel.voice:has-text("Gaming")');
+    await b.waitForFunction(() => yap.state.voiceChannel === 'gaming' && !yap.state.screenSid && yap.state.view !== 'screen', null, { timeout: 8000 });
+    await a.waitForFunction(() => /No one's watching yet/.test(document.querySelector('#share-panel').textContent), null, { timeout: 8000 });
+    // Ada follows him, still sharing: the share is LIVE in Gaming too (it used to go on unseen there).
+    await a.click('button.channel.voice:has-text("Gaming")');
+    await b.waitForFunction((sid) => { const v = yap.state.sessions.get(sid)?.voice; return v?.channelId === 'gaming' && v.screen; }, adaSid, { timeout: 8000 });
+    assert.equal(await b.locator(`.voice-member[data-voice-sid="${adaSid}"] .live-badge`).count(), 1, 'LIVE by her name');
+    assert.match(await sharePanel(a), /^Sharing your screen /, 'still sharing, panel and all');
+  } finally {
+    await a.evaluate(() => yap.voice.stopScreen()).catch(() => {});
+    await a.click('button.channel.voice:has-text("Lounge")').catch(() => {});
+    await b.click('button.channel.voice:has-text("Lounge")').catch(() => {});
+    await Promise.all([inLounge(a), inLounge(b)]);
+  }
+});
+
 await test('screen sharing: watching a native app\'s share — H.264 constrained baseline only, no stream id on the video, its sound in a stream of its own', async () => {
   await b.evaluate(() => yap.state.screenSid && document.querySelector('#screen-view [data-screen="stop"]').click());
   await a.evaluate(() => yap.voice.stopScreen());
@@ -2684,6 +2952,14 @@ await test('OBS link: a listen-only page joins the call and receives audio', asy
     await until(async () => (await received()) > 1000, 10000, 'audio at the OBS page');
     assert.ok((await received()) > 1000, 'audio bytes arrived');
     await obs.screenshot({ path: path.join(OUT, 'obs-overlay.png') });
+    // Talking and stopping changes that person's card in place (so its lift and glow ease on stream), not the whole overlay.
+    const card = await obs.evaluate((sid) => {
+      const before = [...document.querySelectorAll('#stage .who')];
+      const mine = before.find((el) => el.dataset.sid === sid);
+      for (const speaking of [true, false]) yapObs.voice.dispatchEvent(new CustomEvent('speaking', { detail: { sid, speaking } }));
+      return { found: Boolean(mine), same: before.every((el) => el.isConnected), quiet: mine?.classList.contains('quiet') && !mine.classList.contains('speaking') };
+    }, await a.evaluate(() => yap.state.sid));
+    assert.deepEqual(card, { found: true, same: true, quiet: true }, 'the card, in place');
 
     // The way VDO.Ninja's viewer plays a call (web/js/obs.js): each person from an element of their
     // own at full volume (OBS sets the volume), no audio graph of its own, the browser's own jitter
@@ -2961,6 +3237,44 @@ await test('draw layers: draw on the top layer, erase it without touching the bo
   await a.click('[data-tool="wiggle"]');
 });
 
+await test('draw on a touch screen: a second finger never takes over a stroke; Clear keeps a page the gallery couldn\'t take', async () => {
+  // Both are still on Draw. Two fingers, the way a palm or a pinch lands on a phone or tablet.
+  const box = await a.locator('.draw-paper').boundingBox();
+  const cdp = await a.context().newCDPSession(a);
+  const touch = (type, touchPoints) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints });
+  const one = (i) => ({ x: box.x + box.width * (0.2 + i * 0.02), y: box.y + box.height * 0.25, id: 1 });
+  const two = (i) => ({ x: box.x + box.width * 0.7, y: box.y + box.height * (0.5 + i * 0.02), id: 2 });
+  const before = await a.evaluate(() => yap.ui.draw.strokes.length);
+  await touch('touchStart', [one(0)]);
+  for (let i = 1; i < 5; i++) await touch('touchMove', [one(i)]);
+  await touch('touchStart', [one(5), two(0)]); // a second finger comes down…
+  for (let i = 6; i < 12; i++) await touch('touchMove', [one(i), two(i)]);
+  await touch('touchEnd', [two(12)]); // …and lifts first
+  for (let i = 12; i < 16; i++) await touch('touchMove', [one(i)]);
+  await touch('touchEnd', [one(16)]);
+  await cdp.detach();
+  await b.waitForFunction((n) => yap.ui.draw.strokes.length > n, before, { timeout: 5000 });
+  await a.waitForTimeout(300);
+  const ys = await a.evaluate((n) => yap.ui.draw.strokes.slice(n).map((s) => s.p.filter((_, i) => i % 2)), before);
+  assert.equal(ys.length, 1, 'one stroke, from the first finger');
+  assert.ok(Math.max(...ys[0]) - Math.min(...ys[0]) < 50, 'it stays on the first finger\'s line (no zigzag to the second)');
+  assert.ok(ys[0].length >= 14, `it kept drawing after the second finger lifted (${ys[0].length} points)`);
+  // The gallery says no: Clear keeps the page, and says so (it used to clear it anyway).
+  await a.route('**/api/drawing?**', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: false, message: 'Saving too fast.' }) }));
+  const n = await b.evaluate(() => yap.ui.draw.strokes.length);
+  await a.click('[data-tool="clear"]');
+  await a.click('[data-clear="page"]');
+  await a.waitForSelector('#toast:not([hidden]):has-text("nothing was cleared")', { timeout: 8000 });
+  await b.waitForTimeout(500);
+  assert.equal(await b.evaluate(() => yap.ui.draw.strokes.length), n, 'the page is still there for Ben');
+  // And Save doesn't claim it saved.
+  await a.click('[data-tool="save"]');
+  await a.waitForSelector('#toast:not([hidden]):has-text("Couldn\'t save to the gallery: Saving too fast.")', { timeout: 5000 });
+  await a.waitForTimeout(300);
+  assert.doesNotMatch(await a.textContent('#toast'), /Saved/);
+  await a.unroute('**/api/drawing?**');
+});
+
 await test('pictures: attach one, everyone sees it in the chat', async () => {
   for (const page of [a, b]) await page.click('[data-action="open-channel"][data-id="general"]');
   // A 64×48 PNG made on the spot.
@@ -2983,6 +3297,13 @@ await test('pictures: attach one, everyone sees it in the chat', async () => {
   await a.evaluate(() => (yap.state.status = 'online'));
   assert.equal(await a.isVisible('#staged img'), true, 'the picture is still there');
   assert.equal(await a.inputValue('#input'), `caption ${RUN}`, 'and so is the caption');
+  // The upload fails (the network, the server): it says why, and the picture goes back in the tray with its caption.
+  await a.route(/\/api\/image\?/, (route) => route.fulfill({ json: { ok: false, message: 'Storage hiccup.' } }));
+  await a.click('.send-btn');
+  await a.waitForSelector('#toast:not([hidden]):has-text("Storage hiccup")');
+  await a.unroute(/\/api\/image\?/);
+  assert.equal(await a.isVisible('#staged img'), true, 'the picture is back in the tray');
+  assert.equal(await a.inputValue('#input'), `caption ${RUN}`, 'with its caption');
   await a.fill('#input', '');
   // Changed your mind: × drops it, nothing is sent.
   await a.click('[data-action="unstage"]');
@@ -3094,6 +3415,19 @@ await test('space: walk around and the other person sees you move (radar too)', 
   await a.screenshot({ path: path.join(OUT, 'desktop-space-sitting.png') });
   await b.waitForTimeout(300);
   await b.screenshot({ path: path.join(OUT, 'desktop-space.png') });
+  // A reconnect (every deploy drops every socket) makes a new session: it's back on the map for
+  // everyone straight away, not only once it moves. (Ben's second tab, so Ada's call isn't touched.)
+  const tab = await b.context().newPage();
+  await tab.goto(`${BASE}/#key=${encodeURIComponent(KEY)}`);
+  await tab.waitForFunction(() => yap.state.status === 'online', null, { timeout: 10000 });
+  await tab.click('[data-action="open-view"][data-view="space"]');
+  const first = await tab.evaluate(() => yap.state.sid);
+  await a.waitForFunction((sid) => yap.ui.space.players.has(sid), first, { timeout: 5000 });
+  await tab.evaluate(() => yap.ui.dropSocket());
+  await tab.waitForFunction((old) => yap.state.status === 'online' && yap.state.sid !== old, first, { timeout: 15000 });
+  const second = await tab.evaluate(() => yap.state.sid);
+  await a.waitForFunction(([gone, sid]) => !yap.ui.space.players.has(gone) && yap.ui.space.players.has(sid), [first, second], { timeout: 5000 });
+  await tab.close();
   await a.click('[data-action="open-channel"][data-id="general"]');
   await b.click('[data-action="open-channel"][data-id="general"]');
 });
@@ -3317,7 +3651,8 @@ await test('📣 ping reaches the other person', async () => {
 // onStateChange; commands playVideo/pauseVideo/seekTo/loadVideoById/… Its
 // own ⏯ and +30s buttons stand in for YouTube's controls. ytBlock makes a
 // person's next player refuse to start N times, like a browser that blocks
-// autoplay with sound.
+// autoplay with sound. A video id starting with "broken" never plays: the
+// player answers error 150, like one whose owner turned off embedding.
 const ytBlock = new Map();
 const fakePlayerHtml = (block) => `<!doctype html><meta charset="utf-8">
 <style>html,body{margin:0;height:100%;background:#24243a;color:#fff;font:600 15px system-ui,sans-serif}body{display:grid;place-items:center;text-align:center}button{font:inherit;margin:4px 3px}</style>
@@ -3339,7 +3674,7 @@ function setState(s) {
   post({ event: 'onStateChange', info: s });
   post({ event: 'infoDelivery', info: info() });
 }
-const start = () => (P.block > 0 ? P.block-- : setState(1));
+const start = () => (P.id.startsWith('broken') ? post({ event: 'onError', info: 150 }) : P.block > 0 ? P.block-- : setState(1));
 setInterval(() => {
   if (P.state === 1 && P.now() >= P.duration) setState(0);
   post({ event: 'infoDelivery', info: info() });
@@ -3588,10 +3923,42 @@ await test('watch together: leaving takes your seat away; voice keeps going', as
   assert.equal(await a.evaluate(() => document.querySelector('#watch-dock').hidden), true);
 });
 
+await test('rejoin after a reload: "You were in Lounge." with Rejoin puts you back in the call; × means no bar next time', async () => {
+  const online = async () => {
+    await b.reload();
+    await settle(b, 'Ben');
+  };
+  await online();
+  await b.waitForSelector('#rejoin-bar:visible', { timeout: 10000 });
+  assert.equal((await b.textContent('#rejoin-bar span')).trim(), 'You were in Lounge.');
+  assert.equal(await b.evaluate(() => yap.state.voiceWanted), null, "it doesn't rejoin by itself (a click starts the audio)");
+  await b.locator('#rejoin-bar').screenshot({ path: path.join(OUT, 'rejoin-bar.png') });
+  // ×: gone, and not back after another reload.
+  await b.click('#rejoin-bar [data-action="rejoin-dismiss"]');
+  assert.equal(await b.isHidden('#rejoin-bar'), true);
+  await online();
+  await b.waitForTimeout(1000);
+  assert.equal(await b.isHidden('#rejoin-bar'), true, 'dismissed: nothing to rejoin');
+  // In the call again (the usual way), then a reload: Rejoin.
+  await b.click('button.channel.voice:has-text("Lounge")');
+  await b.waitForFunction(() => yap.state.voiceChannel === 'lounge', null, { timeout: 10000 });
+  await online();
+  await b.click('#rejoin-bar [data-action="rejoin-voice"]');
+  await b.waitForSelector('#rejoin-bar', { state: 'hidden', timeout: 3000 });
+  await b.waitForFunction(() => yap.state.voiceChannel === 'lounge', null, { timeout: 10000 });
+  for (const page of [a, b]) {
+    await page.waitForFunction(() => [...yap.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'), null, { timeout: 15000 });
+  }
+  // A call worth a report (the call report test after the next one reads this one): a few rounds of stats.
+  await b.waitForFunction(() => yap.state.voiceStats?.peers?.length > 0, null, { timeout: 10000 });
+  await b.waitForTimeout(4500);
+});
+
 await test('leaving hangs up on both sides', async () => {
   await b.click('[data-action="leave-voice"]');
   await a.waitForFunction(() => yap.voice.peers.size === 0, null, { timeout: 5000 });
   assert.equal(await b.evaluate(() => yap.voice.peers.size), 0);
+  assert.equal(await b.evaluate(() => sessionStorage.getItem('yap.call')), null, 'left on purpose: no "You were in …" after a reload');
 });
 
 await test('call report after the call: Settings › Voice › Copy last call report copies the one that ended, kept on this device', async () => {
@@ -3668,6 +4035,22 @@ await test('space: a newcomer catches up on the ball and tag; when "it" leaves, 
   await phone.waitForFunction((id) => !yap.ui.space.tag.over && yap.ui.space.tag.it !== id, sidA.slice(0, 8), { timeout: 5000 });
   assert.equal(await b.evaluate(() => yap.ui.space.tag.it), await phone.evaluate(() => yap.ui.space.tag.it));
   await b.waitForFunction((sid) => yap.ui.space.ball.owner && yap.ui.space.ball.owner !== sid, sidA, { timeout: 5000 });
+});
+
+await test('watch together: a video YouTube refuses says why, and never asks you to "Click to join the show"', async () => {
+  const before = await a.evaluate(() => yap.ui.watch.state?.videoId);
+  await a.click('[data-action="open-view"][data-view="watch"]'); // a seat again
+  await a.fill('.watch-add input', 'https://youtu.be/brokenvid01');
+  await a.click('.watch-add button[value="play"]');
+  await a.waitForSelector('.watch-note:has-text("YouTube won\'t play this one here: its owner turned off embedding")', { timeout: 8000 });
+  await a.waitForTimeout(6500); // past the two tries to start it, after which a blocked player gets the gate
+  assert.ok(await a.isHidden('#watch-dock .watch-gate'), 'no "Click to join the show" for a video that can\'t play');
+  assert.ok(await a.isHidden('#watch-dock .watch-hint'), 'no "press ▶ on the video" either');
+  // The show as it was, for the next test.
+  await a.evaluate((id) => yap.ui.send({ t: 'watch.set', videoId: id }), before ?? 'vidBBBBBBB2');
+  await until(async () => (await ytPlayer(a))?.state === 1, 8000, 'the show back on');
+  await a.click('.watch-head [data-watch="leave"]');
+  await a.click('[data-action="open-channel"][data-id="general"]');
 });
 
 await test('watch together on a phone: the view (heads scroll sideways) and the mini player above the composer', async () => {
@@ -3837,4 +4220,7 @@ if (obsMeasured?.median) console.log(`OBS page: a click plays ${obsMeasured.medi
 console.log(`screenshots: ${OUT}`);
 const failed = results.filter((r) => r[0] === '✗').length;
 console.log(`${results.length - failed}/${results.length} passed`);
-process.exit(failed ? 1 : 0);
+// Exiting at once cuts off whatever is still on its way down a pipe (test:all reads this through
+// one, and lost the list's end and the "passed" line): let stdout drain first.
+process.exitCode = failed ? 1 : 0;
+process.stdout.write('', () => process.exit());

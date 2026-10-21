@@ -4,7 +4,11 @@
 //! Static first frame by default; animation only on request (hover), so an
 //! animated emoji on screen doesn't keep the whole UI repainting. Emoji images
 //! are content-addressed and immutable, so they're also cached on disk. KLIPY
-//! media is never written to disk (their terms).
+//! media is never written to disk (their terms). One HTTP agent for all of
+//! them, so a screenful of emojis shares a few connections instead of a TLS
+//! handshake each. A picture that couldn't be fetched (offline, the server
+//! busy) is tried again a little later; one that's gone or isn't a picture
+//! isn't.
 
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 use parking_lot::Mutex;
@@ -18,10 +22,13 @@ const MAX_SIDE: u32 = 512;
 const MAX_FULL: u32 = 2560;
 const MAX_FRAMES: usize = 150;
 const EVICT_AFTER: Duration = Duration::from_secs(120);
+/// A fetch that failed for a passing reason goes again after this (while it's still on screen).
+const RETRY_AFTER: Duration = Duration::from_secs(15);
 
 enum Entry {
     Loading,
-    Failed,
+    /// `retry`: when to fetch it again (None: for good — gone, or not a picture).
+    Failed { retry: Option<Instant> },
     Static { tex: TextureHandle, size: egui::Vec2 },
     Animated { frames: Vec<(TextureHandle, Duration)>, total: Duration, size: egui::Vec2 },
 }
@@ -31,10 +38,19 @@ struct Slot {
     used: Instant,
 }
 
+impl Slot {
+    /// A fetch that failed for a passing reason, due to go again.
+    fn retry_due(&self) -> bool {
+        matches!(self.entry, Entry::Failed { retry: Some(at) } if Instant::now() >= at)
+    }
+}
+
 enum Decoded {
     Static(ColorImage),
     Animated(Vec<(ColorImage, Duration)>),
     Failed,
+    /// Couldn't be fetched just now (no network, a timeout, the server's 5xx).
+    Unreachable,
 }
 
 /// (cache key, URL, animate, decrypt with: a Personal space key for sealed pictures).
@@ -53,15 +69,36 @@ fn cache_path(url: &str) -> Option<std::path::PathBuf> {
     (id.len() == 32 && id.chars().all(|c| c.is_ascii_hexdigit())).then(|| dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("yap").join("emoji").join(id))
 }
 
-fn fetch(url: &str) -> Result<Vec<u8>, String> {
+/// Why a fetch failed, and whether trying again later could help.
+struct FetchError {
+    why: String,
+    passing: bool,
+}
+
+impl FetchError {
+    fn new(e: ureq::Error) -> Self {
+        // 4xx: gone or refused, for good. Too big: it'll stay too big. The rest (I/O, timeouts, 5xx) passes.
+        let passing = match &e {
+            ureq::Error::StatusCode(code) => *code >= 500,
+            ureq::Error::BodyExceedsLimit(_) | ureq::Error::BadUri(_) => false,
+            _ => true,
+        };
+        Self { why: e.to_string(), passing }
+    }
+
+    fn lasting(why: String) -> Self {
+        Self { why, passing: false }
+    }
+}
+
+fn fetch(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>, FetchError> {
     if let Some(path) = cache_path(url)
         && let Ok(bytes) = std::fs::read(&path)
     {
         return Ok(bytes);
     }
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(20))).build().into();
-    let mut res = agent.get(url).call().map_err(|e| e.to_string())?;
-    let bytes = res.body_mut().with_config().limit(8 * 1024 * 1024).read_to_vec().map_err(|e| e.to_string())?;
+    let mut res = agent.get(url).call().map_err(FetchError::new)?;
+    let bytes = res.body_mut().with_config().limit(8 * 1024 * 1024).read_to_vec().map_err(FetchError::new)?;
     if let Some(path) = cache_path(url) {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -135,17 +172,19 @@ impl Images {
         let (tx, rx) = mpsc::channel::<Job>();
         let rx = Arc::new(Mutex::new(rx));
         let done: Arc<Mutex<Vec<(String, Decoded)>>> = Arc::new(Mutex::new(Vec::new()));
+        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(20))).build().into();
         for n in 0..4 {
             let rx = rx.clone();
             let done = done.clone();
             let ctx = ctx.clone();
+            let agent = agent.clone();
             let _ = std::thread::Builder::new().name(format!("yap-img-{n}")).spawn(move || {
                 loop {
                     let job = rx.lock().recv();
                     let Ok((key, url, animate, seal)) = job else { return };
                     // A sealed picture: opaque bytes until this device's key opens them.
-                    let fetched = fetch(&url).and_then(|b| match &seal {
-                        Some(k) => crate::vault::decrypt_blob(k, &b),
+                    let fetched = fetch(&agent, &url).and_then(|b| match &seal {
+                        Some(k) => crate::vault::decrypt_blob(k, &b).map_err(FetchError::lasting),
                         None => Ok(b),
                     });
                     let decoded = match fetched {
@@ -161,8 +200,8 @@ impl Images {
                             decode(&bytes, animate, fit)
                         }
                         Err(e) => {
-                            log::debug!("image {url}: {e}");
-                            Decoded::Failed
+                            log::debug!("image {url}: {}{}", e.why, if e.passing { " (trying again later)" } else { "" });
+                            if e.passing { Decoded::Unreachable } else { Decoded::Failed }
                         }
                     };
                     done.lock().push((key, decoded));
@@ -193,7 +232,8 @@ impl Images {
                         .collect();
                     Entry::Animated { frames, total, size }
                 }
-                Decoded::Failed => Entry::Failed,
+                Decoded::Failed => Entry::Failed { retry: None },
+                Decoded::Unreachable => Entry::Failed { retry: Some(Instant::now() + RETRY_AFTER) },
             };
             slots.insert(key, Slot { entry, used: Instant::now() });
         }
@@ -209,7 +249,7 @@ impl Images {
     pub fn get_square(&self, url: &str) -> Option<egui::TextureId> {
         let key = format!("{url}#square");
         let mut slots = self.slots.lock();
-        match slots.get_mut(&key) {
+        match slots.get_mut(&key).filter(|s| !s.retry_due()) {
             None => {
                 slots.insert(key.clone(), Slot { entry: Entry::Loading, used: Instant::now() });
                 let _ = self.queue.send((key, url.to_string(), false, None));
@@ -247,13 +287,13 @@ impl Images {
     /// Whether the viewer's copy failed to load / open.
     pub fn failed_full(&self, url: &str, sealed: bool) -> bool {
         let key = if sealed { format!("{url}#full#sealed") } else { format!("{url}#full#anim") };
-        self.slots.lock().get(&key).is_some_and(|s| matches!(s.entry, Entry::Failed))
+        self.slots.lock().get(&key).is_some_and(|s| matches!(s.entry, Entry::Failed { .. }))
     }
 
     /// Whether a sealed picture failed to open (not just still loading).
     pub fn failed(&self, url: &str, sealed: bool) -> bool {
         let key = if sealed { format!("{url}#sealed") } else { url.to_string() };
-        self.slots.lock().get(&key).is_some_and(|s| matches!(s.entry, Entry::Failed))
+        self.slots.lock().get(&key).is_some_and(|s| matches!(s.entry, Entry::Failed { .. }))
     }
 
     fn get_with(&self, url: &str, animate: bool, seal: Option<crate::vault::Key>) -> Option<(egui::TextureId, egui::Vec2)> {
@@ -265,7 +305,7 @@ impl Images {
             url.to_string()
         };
         let mut slots = self.slots.lock();
-        match slots.get_mut(&key) {
+        match slots.get_mut(&key).filter(|s| !s.retry_due()) {
             None => {
                 slots.insert(key.clone(), Slot { entry: Entry::Loading, used: Instant::now() });
                 let _ = self.queue.send((key, url.trim_end_matches("#pixel").trim_end_matches("#full").to_string(), animate, seal));
@@ -274,7 +314,7 @@ impl Images {
             Some(slot) => {
                 slot.used = Instant::now();
                 match &slot.entry {
-                    Entry::Loading | Entry::Failed => None,
+                    Entry::Loading | Entry::Failed { .. } => None,
                     Entry::Static { tex, size } => Some((tex.id(), *size)),
                     Entry::Animated { frames, total, size } => {
                         let t = self.ctx.input(|i| i.time);
@@ -293,5 +333,29 @@ impl Images {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What's worth trying again: no network, a timeout, the server's 5xx; not a 4xx or a file over the limit.
+    #[test]
+    fn passing_failures_go_again() {
+        let io = || ureq::Error::Io(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"));
+        assert!(FetchError::new(io()).passing);
+        assert!(FetchError::new(ureq::Error::StatusCode(503)).passing);
+        assert!(!FetchError::new(ureq::Error::StatusCode(404)).passing);
+        assert!(!FetchError::new(ureq::Error::BodyExceedsLimit(8 << 20)).passing);
+        assert!(!FetchError::lasting("can't open it".into()).passing);
+        // A real refused connection: tried again later, then due once its time has come.
+        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(2))).build().into();
+        let e = fetch(&agent, "http://127.0.0.1:9/x.png").expect_err("nothing listens on port 9");
+        assert!(e.passing, "{}", e.why);
+        let slot = |at| Slot { entry: Entry::Failed { retry: Some(at) }, used: Instant::now() };
+        assert!(!slot(Instant::now() + RETRY_AFTER).retry_due());
+        assert!(slot(Instant::now() - Duration::from_millis(1)).retry_due());
+        assert!(!Slot { entry: Entry::Failed { retry: None }, used: Instant::now() }.retry_due());
     }
 }

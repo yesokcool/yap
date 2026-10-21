@@ -21,6 +21,7 @@ export async function syncVault(wrap) {
   if (!wrap || (state.vault.key && state.vault.keyCt !== wrap.ct)) {
     state.vault.key = null;
     state.vault.keyCt = null;
+    forgetSealedImages();
     forgetKey(settings.uid);
   }
   if (wrap && !state.vault.key) {
@@ -58,6 +59,12 @@ export function openNote(body) {
     );
   }
   return null;
+}
+
+/** Locked: the pictures opened so far go too (blob: copies, readable until they're let go). */
+export function forgetSealedImages() {
+  for (const url of state.sealedImages.values()) if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+  state.sealedImages.clear();
 }
 
 function loadSealedImage(img) {

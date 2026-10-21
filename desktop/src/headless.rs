@@ -26,6 +26,8 @@ pub struct Args {
     pub bitrate: Option<u32>,
     pub mode: Option<InputMode>,
     pub denoise: bool,
+    /// Mic volume (1 = 100 %).
+    pub mic_volume: Option<f32>,
     /// Echo cancellation on the WAV mic, against what we hear (off by default here).
     pub echo_cancel: bool,
     pub expect: Option<String>,
@@ -170,6 +172,7 @@ async fn run_async(args: Args) -> i32 {
         key: args.key.clone().or(invite_key).unwrap_or_default(),
         name: if args.name.is_empty() { "Bot".into() } else { args.name.clone() },
         noise_suppression: args.denoise,
+        mic_volume: args.mic_volume.unwrap_or(1.0),
         echo_cancellation: args.echo_cancel,
         sounds: false,
         mode: args.mode.unwrap_or(InputMode::Open),

@@ -230,6 +230,7 @@ struct MicOutputGroup98: View {
         @Bindable var voice = model.voice
         GroupBox98(title: SettingsText.micOutput) {
             MicCheck98()
+            MicVolumeRow98()
             #if os(iOS)
             Check98(title: VoiceOptions.headphonesTitle, isOn: Binding(get: { voice.settings.highQualityBluetooth }, set: {
                 voice.settings.highQualityBluetooth = $0

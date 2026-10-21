@@ -22,6 +22,12 @@ final class Notifier {
         set { taps.onRejoin = newValue }
     }
 
+    /// A mention's notification was tapped: open that channel at that message.
+    var onOpen: (@MainActor (_ channelId: String, _ messageId: String) -> Void)? {
+        get { taps.onOpen }
+        set { taps.onOpen = newValue }
+    }
+
     init() {
         // Before launch finishes, so a tap that launched Yap still arrives.
         UNUserNotificationCenter.current().delegate = taps
@@ -36,13 +42,15 @@ final class Notifier {
         }
     }
 
-    func post(title: String, subtitle: String?, body: String, thread: String) {
+    /// `opens`: the message a tap opens (a mention's).
+    func post(title: String, subtitle: String?, body: String, thread: String, opens message: (channelId: String, id: String)? = nil) {
         let content = UNMutableNotificationContent()
         content.title = title
         if let subtitle { content.subtitle = subtitle }
         content.body = String(body.prefix(200))
         content.sound = .default
         content.threadIdentifier = thread
+        if let message { content.userInfo = [Self.channelKey: message.channelId, Self.messageKey: message.id] }
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         Task { try? await UNUserNotificationCenter.current().add(request) }
     }
@@ -63,6 +71,9 @@ final class Notifier {
     nonisolated static let callNoteId = "yap-call-note"
     nonisolated static let callEndedId = "yap-call-ended"
     nonisolated static let rejoinKey = "yapRejoin"
+    /// A mention's channel and message (a tap opens them).
+    nonisolated static let channelKey = "yapChannel"
+    nonisolated static let messageKey = "yapMessage"
 
     /// "You left Lounge" + why (+ "Tap to rejoin."); silent in quiet hours.
     nonisolated static func callEndedContent(channel: String, channelId: String, reason: BackgroundCall.Reason, quiet: Bool) -> UNMutableNotificationContent {
@@ -108,15 +119,19 @@ final class Notifier {
 nonisolated final class NotificationTaps: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
     /// Read and written on the main thread only.
     nonisolated(unsafe) var onRejoin: (@MainActor (String) -> Void)?
+    nonisolated(unsafe) var onOpen: (@MainActor (String, String) -> Void)?
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
-        let channelId = response.actionIdentifier == UNNotificationDefaultActionIdentifier
-            ? response.notification.request.content.userInfo[Notifier.rejoinKey] as? String : nil
+        let info = response.actionIdentifier == UNNotificationDefaultActionIdentifier ? response.notification.request.content.userInfo : [:]
+        let rejoin = info[Notifier.rejoinKey] as? String
+        let channel = info[Notifier.channelKey] as? String
+        let message = info[Notifier.messageKey] as? String
         // Called on the main thread only.
         nonisolated(unsafe) let done = completionHandler
         DispatchQueue.main.async { [weak self] in
-            if let channelId { self?.onRejoin?(channelId) }
+            if let rejoin { self?.onRejoin?(rejoin) }
+            if let channel, let message { self?.onOpen?(channel, message) }
             done()
         }
     }

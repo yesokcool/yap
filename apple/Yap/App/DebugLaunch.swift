@@ -66,6 +66,7 @@ import UIKit
 ///                                                  iPhone: a pretend call's Live Activity (no server needed),
 ///                                                  shown by iOS as an alert 8 s later (the island opens, or a
 ///                                                  banner): screenshots of it without touching the simulator
+///   YAP_DEMO_REJOIN=lounge                         offer "You were in Lounge." [Rejoin] as after a relaunch mid-call
 ///   YAP_DEMO_BURST=N                               once online, send N numbered messages to the open channel at once
 ///   YAP_DEMO_SHARE=1                               once in the call, share a moving test card (the sharing UI
 ///                                                  on iPhone without the broadcast extension; nothing is captured)
@@ -121,6 +122,7 @@ struct DebugLaunch {
     var demoBurst: Int?
     var demoShare = false
     var demoLiveCall: String?
+    var demoRejoin: String?
 
     var usesMemoryStore: Bool { invite != nil }
     var isScripted: Bool { invite != nil }
@@ -150,6 +152,7 @@ struct DebugLaunch {
         launch.vaultPasscode = env["YAP_VAULT_PASSCODE"]
         launch.search = env["YAP_SEARCH"]
         launch.showPins = env["YAP_SHOW_PINS"] == "1"
+        launch.demoRejoin = env["YAP_DEMO_REJOIN"]
         launch.jump = env["YAP_JUMP"]
         launch.switcherText = env["YAP_SWITCHER"]
         launch.settingsPage = env["YAP_SETTINGS_PAGE"]
@@ -294,6 +297,7 @@ struct DebugLaunch {
         if fakeKlipy { FakeKlipy.install() }
         if let login { model.client.logIn(name: login.name, pin: login.pin) }
         if let signup { model.client.signUp(name: signup.name, pin: signup.pin, color: "#8e4ec6") }
+        if let demoRejoin { model.rejoinOffer.offerForDemo(LastCall(channelId: demoRejoin, at: Date())) }
         if let channel { model.open(.channel(channel)) }
         if wants("board") { model.open(.web(.board)) }
         if wants("draw") { model.open(.web(.draw)) }

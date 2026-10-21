@@ -67,6 +67,9 @@ pub struct Config {
     pub noise_suppression: bool,
     /// Settings › Voice › Automatic gain: speech towards −23 dBFS, at most +20 dB.
     pub auto_gain: bool,
+    /// Settings › Voice › Mic volume: how loud your mic goes out (1.0 = 100 %, 0–2),
+    /// after the automatic gain and before the gate.
+    pub mic_volume: f32,
     /// Settings › Voice › Echo cancellation: what the speakers play is taken
     /// back out of the mic (AEC3), so friends don't hear themselves.
     pub echo_cancellation: bool,
@@ -120,6 +123,30 @@ pub struct Config {
     /// `ready.weakReason` ("pin", "temporary", "guessable"), like the web's
     /// `passwordLater`: putting off one doesn't put off the others.
     pub password_later: Vec<String>,
+    /// The call you were in, kept up to date while you're in it (and cleared
+    /// when you leave it yourself): the next launch, within 10 minutes, offers
+    /// "You were in Lounge. [Rejoin]" (after an update, a crash or a quit).
+    pub last_call: Option<LastCall>,
+}
+
+/// A call we were in (`Config::last_call`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct LastCall {
+    pub server: String,
+    pub channel: String,
+    /// Unix ms: when we were last in it.
+    pub at: i64,
+}
+
+/// How long after a call "You were in …" is offered.
+pub const REJOIN_MS: i64 = 10 * 60_000;
+
+impl LastCall {
+    /// Is this a call to offer again on `server`, `now` (Unix ms)? (A clock that
+    /// went backwards doesn't count as recent.)
+    pub fn offer(&self, server: &str, now: i64) -> bool {
+        self.server == server && !self.channel.is_empty() && (0..=REJOIN_MS).contains(&(now - self.at))
+    }
 }
 
 /// Settings › Look › Size limits.
@@ -145,6 +172,7 @@ impl Default for Config {
             bitrate: 128_000,
             noise_suppression: true,
             auto_gain: true,
+            mic_volume: 1.0,
             echo_cancellation: true,
             sounds: true,
             remind_muted: true,
@@ -169,6 +197,7 @@ impl Default for Config {
             saved_note_seen: false,
             relay_only: false,
             password_later: Vec::new(),
+            last_call: None,
         }
     }
 }
@@ -212,6 +241,7 @@ impl Config {
             self.sound_volume = 0.5;
         }
         self.sound_volume = self.sound_volume.clamp(0.0, 1.0);
+        self.mic_volume = if self.mic_volume.is_finite() { self.mic_volume.clamp(0.0, crate::audio::dsp::MIC_VOLUME_MAX) } else { 1.0 };
         if let Some(s) = self.size {
             self.size = s.is_finite().then(|| s.clamp(SIZE_MIN, SIZE_MAX));
         }
@@ -321,10 +351,12 @@ pub fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
+    let hex = |b: u8| (b as char).to_digit(16);
     while i < bytes.len() {
+        // (By bytes: "%a" then a letter like é would cut that letter in half, which panicked.)
         if bytes[i] == b'%' && i + 2 < bytes.len()
-            && let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(b);
+            && let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((hi * 16 + lo) as u8);
                 i += 3;
                 continue;
             }
@@ -405,6 +437,9 @@ mod tests {
         assert_eq!(parse_invite("http://localhost:8788"), ("http://localhost:8788".into(), None));
         assert_eq!(parse_invite("localhost:8788/"), ("http://localhost:8788".into(), None));
         assert_eq!(parse_invite("yap.example.dev?key=k1"), ("https://yap.example.dev".into(), Some("k1".into())));
+        // A pasted link with a stray "%" before a non-ASCII letter keeps it as typed (it panicked).
+        assert_eq!(parse_invite("https://yap.example.dev/#key=%aé"), ("https://yap.example.dev".into(), Some("%aé".into())));
+        assert_eq!(percent_decode("%C3%A9%x1%-1"), "é%x1%-1", "only two hex digits make a byte");
     }
 
     /// The prompts Later put off are a new field: a config from an older
@@ -451,6 +486,32 @@ mod tests {
         std::fs::write(&path, r#"{"ptt_key":""}"#).unwrap();
         assert_eq!(Config::load(&path).ptt_key, "Backquote");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mic_volume_and_last_call() {
+        // Older configs: Mic volume 100 %, no call to offer. Broken values come back sane.
+        let mut c: Config = serde_json::from_str("{}").unwrap();
+        c.fill_defaults();
+        assert_eq!((c.mic_volume, c.last_call.clone()), (1.0, None));
+        let mut c: Config = serde_json::from_str(r#"{"mic_volume": 7.5}"#).unwrap();
+        c.fill_defaults();
+        assert_eq!(c.mic_volume, 2.0);
+        let mut c: Config = serde_json::from_str(r#"{"mic_volume": -1}"#).unwrap();
+        c.fill_defaults();
+        assert_eq!(c.mic_volume, 0.0);
+        // A call is offered again on the same server within 10 minutes, not after,
+        // not on another server, and not from a clock that went backwards.
+        let call = LastCall { server: "https://a".into(), channel: "lounge".into(), at: 1_000_000 };
+        assert!(call.offer("https://a", 1_000_000));
+        assert!(call.offer("https://a", 1_000_000 + REJOIN_MS));
+        assert!(!call.offer("https://a", 1_000_000 + REJOIN_MS + 1));
+        assert!(!call.offer("https://b", 1_000_000));
+        assert!(!call.offer("https://a", 999_000));
+        // It survives a save and a load.
+        let mut c = Config { last_call: Some(call.clone()), ..Config::default() };
+        c = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(c.last_call, Some(call));
     }
 
     #[test]

@@ -64,6 +64,8 @@ export async function onSearchResults(msg) {
       }
       results = [...results, ...notes].sort((a, b) => b.ts - a.ts).slice(0, 60);
     }
+    // (Reading your notes takes a moment: a newer search may have started meanwhile.)
+    if (msg.q !== state.search.q) return;
   }
   state.search.results = results;
   state.search.pending = false;

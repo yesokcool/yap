@@ -1,6 +1,6 @@
 //! Small signal-processing pieces for the voice path: an 80 Hz high-pass and
-//! a slow automatic gain on the mic (V12), and the limiter on people you've
-//! turned up past 100 % (V13).
+//! a slow automatic gain on the mic (V12), Settings › Voice › Mic volume, and
+//! the limiter on people you've turned up past 100 % (V13).
 
 /// A 2nd-order Butterworth high-pass (RBJ cookbook biquad): takes rumble,
 /// desk thumps and mains hum out of the mic before anything else hears it.
@@ -120,6 +120,51 @@ impl Agc {
         for (i, s) in block.iter_mut().enumerate() {
             let g = g0 + (g1 - g0) * (i as f32 + 1.0) / n;
             *s = (*s * g).clamp(-1.0, 1.0);
+        }
+    }
+}
+
+/// Settings › Voice › Mic volume (0–200 %), on the capture thread just
+/// before the gate, so voice activity and the meter hear what friends will.
+/// A change ramps across one 10 ms block (no zipper noise). Above 100 % a
+/// peak limiter keeps it under −1 dBFS (instant attack, 150 ms release, like
+/// the boost on people), so a loud moment is turned down, never squared off.
+/// At exactly 100 % it does nothing at all: the samples are today's, bit for bit.
+pub struct MicGain {
+    gain: f32,
+    reduction: f32,
+    release: f32,
+}
+
+/// Where Mic volume's limiter holds peaks (−1 dBFS, the automatic gain's ceiling).
+pub const MIC_LIMIT: f32 = 0.89;
+/// The slider's range.
+pub const MIC_VOLUME_MAX: f32 = 2.0;
+
+impl MicGain {
+    pub fn new(rate: u32) -> Self {
+        Self { gain: 1.0, reduction: 1.0, release: 1.0 - (-1.0 / (0.150 * rate as f32)).exp() }
+    }
+
+    /// One block, in place, at `target` (1 = 100 %).
+    pub fn process(&mut self, block: &mut [f32], target: f32) {
+        let target = if target.is_finite() { target.clamp(0.0, MIC_VOLUME_MAX) } else { 1.0 };
+        let (g0, g1) = (self.gain, target);
+        self.gain = target;
+        if g0 == 1.0 && g1 == 1.0 && self.reduction >= 1.0 {
+            return;
+        }
+        let n = block.len().max(1) as f32;
+        for (i, s) in block.iter_mut().enumerate() {
+            let g = if g0 == g1 { g1 } else { g0 + (g1 - g0) * (i as f32 + 1.0) / n };
+            let x = *s * g;
+            let want = if x.abs() > MIC_LIMIT { MIC_LIMIT / x.abs() } else { 1.0 };
+            self.reduction = if want < self.reduction { want } else { (self.reduction + (want - self.reduction) * self.release).min(1.0) };
+            // (Settled back to none: exactly 1, so 100 % is untouched again.)
+            if self.reduction > 0.9999 {
+                self.reduction = 1.0;
+            }
+            *s = (x * self.reduction).clamp(-1.0, 1.0);
         }
     }
 }
@@ -247,5 +292,62 @@ mod tests {
         let orig = q.clone();
         Limiter::new(SR).process(&mut q, 2.0);
         assert!(q.iter().zip(&orig).all(|(a, b)| (a - 2.0 * b).abs() < 1e-6));
+    }
+    #[test]
+    fn mic_gain_at_100_is_untouched_and_at_50_is_minus_6_db() {
+        let orig = tone(300.0, -20.0, 0.5);
+        let mut x = orig.clone();
+        let mut g = MicGain::new(SR);
+        for b in x.chunks_mut(480) {
+            g.process(b, 1.0);
+        }
+        assert!(x.iter().zip(&orig).all(|(a, b)| a.to_bits() == b.to_bits()), "bit-exact at 100 %");
+        let mut half = orig.clone();
+        let mut g = MicGain::new(SR);
+        for b in half.chunks_mut(480) {
+            g.process(b, 0.5);
+        }
+        // (After the first block's ramp.)
+        let db = rms_db(&half[480..]) - rms_db(&orig[480..]);
+        assert!((db + 6.02).abs() < 0.05, "{db:.2} dB");
+        // Back to 100 %: one block's ramp, then the samples are the input again.
+        let mut back = orig.clone();
+        for b in back.chunks_mut(480) {
+            g.process(b, 1.0);
+        }
+        assert!(back[480..].iter().zip(&orig[480..]).all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
+
+    #[test]
+    fn mic_gain_past_100_never_clips() {
+        // A loud mic at 200 %: held under −1 dBFS, never squared off at the top.
+        let mut x = tone(200.0, -3.0, 1.0);
+        let mut g = MicGain::new(SR);
+        for b in x.chunks_mut(480) {
+            g.process(b, 2.0);
+        }
+        let peak = x.iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!(peak <= MIC_LIMIT + 1e-4, "peak {peak}");
+        // A quiet one comes through doubled (+6 dB), the limiter never touching it.
+        let orig = tone(200.0, -30.0, 0.5);
+        let mut q = orig.clone();
+        let mut g = MicGain::new(SR);
+        for b in q.chunks_mut(480) {
+            g.process(b, 2.0);
+        }
+        assert!(q[480..].iter().zip(&orig[480..]).all(|(a, b)| (a - 2.0 * b).abs() < 1e-6));
+        // Out-of-range or broken values: 0–200 %, or 100 %.
+        let mut z = orig.clone();
+        let mut g = MicGain::new(SR);
+        for b in z.chunks_mut(480) {
+            g.process(b, f32::NAN);
+        }
+        assert!(z.iter().zip(&orig).all(|(a, b)| a.to_bits() == b.to_bits()));
+        let mut m = orig.clone();
+        let mut g = MicGain::new(SR);
+        for b in m.chunks_mut(480) {
+            g.process(b, -1.0);
+        }
+        assert!(m[480..].iter().all(|s| *s == 0.0), "0 % is silence");
     }
 }

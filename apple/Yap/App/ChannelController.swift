@@ -36,8 +36,12 @@ final class ChannelController {
     var showingShelf = false
     var makingPoll = false
     var pill = UnreadPill()
+    /// "↓ New messages" while scrolled up.
+    var newBelow = NewMessagesPill()
 
     @ObservationIgnored private var opened = false
+    /// The kept draft went into the box (not while the Personal space was locked).
+    @ObservationIgnored private var restoredDraft = true
     @ObservationIgnored private var debugDone: Set<String> = []
     /// The rows on screen (the rows report in), so a jump can tell it got there.
     @ObservationIgnored private var onScreen: Set<String> = []
@@ -45,6 +49,13 @@ final class ChannelController {
     init(model: AppModel, channelId: String) {
         self.model = model
         self.channelId = channelId
+        // What you'd typed here before going elsewhere (not into a locked
+        // Personal space: its box is shut, and the words would show in it).
+        if model.client.channelsById[channelId]?.isPersonal == true && model.client.vaultLocked {
+            restoredDraft = false
+        } else {
+            draft = model.drafts.text(for: channelId)
+        }
     }
 
     var client: YapClient { model.client }
@@ -83,6 +94,9 @@ final class ChannelController {
 
     func disappear() {
         client.close(channel: channelId)
+        // The draft waits here (an edit in progress gives back the draft behind it).
+        let text = editing?.savedDraft ?? draft
+        if restoredDraft || !text.isEmpty { model.drafts.keep(text, for: channelId) }
     }
 
     /// After a reconnect the history reloads; keep the screen's channel active.

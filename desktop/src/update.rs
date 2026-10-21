@@ -247,7 +247,8 @@ pub fn install(update: &Available, progress: impl Fn(u64, u64)) -> Result<PathBu
             return Err(format!("Download failed (HTTP {}).", res.status()));
         }
         let mut reader = res.body_mut().as_reader();
-        let mut bytes = Vec::with_capacity(update.file.size as usize);
+        // (The size is only the manifest's word until the hash checks out: don't reserve more than a real build.)
+        let mut bytes = Vec::with_capacity(update.file.size.min(64 * 1024 * 1024) as usize);
         let mut buf = vec![0u8; 64 * 1024];
         loop {
             let n = reader.read(&mut buf).map_err(|e| format!("Download failed: {e}"))?;

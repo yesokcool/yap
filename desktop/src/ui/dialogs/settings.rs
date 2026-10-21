@@ -244,6 +244,17 @@ pub(super) fn voice_tab(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
             acts.push(Act::Config(Box::new(move |c| c.input_device = name)));
             acts.push(Act::Cmd(Cmd::AudioSettings { restart_input: true, restart_output: false, renegotiate: false }));
         });
+        // How loud you go out: before voice activity and the meter, so they hear it too (live, in a call as well).
+        field_label(ui, "Mic volume:", p);
+        let mut vol = (m.config.mic_volume * 100.0).round();
+        ui.horizontal(|ui| {
+            if theme::tip(theme::trackbar(ui, &mut vol, 0.0..=200.0, 5.0, 220.0, p), "How loud your voice goes out to friends. Past 100% boosts a quiet mic.").changed() {
+                let v = vol / 100.0;
+                acts.push(Act::Config(Box::new(move |c| c.mic_volume = v)));
+                acts.push(Act::ApplyGate);
+            }
+            ui.label(theme::text(format!("{}%", vol as i32), p.text));
+        });
         field_label(ui, "Output:", p);
         device_combo(ui, "out", &m.config.output_device, devices.as_ref().map(|d| &d.1), p, |name| {
             acts.push(Act::Config(Box::new(move |c| c.output_device = name)));

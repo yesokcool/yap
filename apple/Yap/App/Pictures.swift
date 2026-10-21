@@ -258,7 +258,7 @@ extension ImageStore {
     /// its long side) so a scroll through photos doesn't hold full-size bitmaps.
     func picture(for url: URL, maxPixel: Int = 900) -> PlatformImage? {
         let key = "\(url.absoluteString)#\(maxPixel)"
-        if let hit = pictures[key] { return hit }
+        if let hit = cachedPicture(key) { return hit }
         loadPicture(url, key: key, maxPixel: maxPixel)
         return nil
     }

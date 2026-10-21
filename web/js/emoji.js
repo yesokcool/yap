@@ -44,18 +44,25 @@ export function loadStandardEmojis() {
 // Skin tone for standard emojis that have one (0 = default yellow, 1–5 light → dark).
 const TONE_KEY = 'yap.emojiTone';
 const TONE_HANDS = ['✋', '✋🏻', '✋🏼', '✋🏽', '✋🏾', '✋🏿'];
+/** Read once, not per emoji (the picker draws ~1,900 of them; the suggestions look at all of them per key). */
+let tone = null;
 function emojiTone() {
-  try {
-    return Math.min(5, Math.max(0, Number(localStorage.getItem(TONE_KEY)) || 0));
-  } catch {
-    return 0;
+  if (tone === null) {
+    try {
+      tone = Math.min(5, Math.max(0, Number(localStorage.getItem(TONE_KEY)) || 0));
+    } catch {
+      tone = 0;
+    }
   }
+  return tone;
 }
-function setEmojiTone(tone) {
+function setEmojiTone(value) {
+  tone = value;
   try {
-    localStorage.setItem(TONE_KEY, String(tone));
+    localStorage.setItem(TONE_KEY, String(value));
   } catch {}
 }
+addEventListener('storage', (e) => e.key === TONE_KEY && (tone = null)); // (picked in another tab)
 /** The character to insert for a standard emoji, in your skin tone. */
 const toned = (e) => (e.skins && emojiTone() ? e.skins[emojiTone() - 1] : e.char);
 
@@ -119,7 +126,10 @@ async function prepareEmojiFile(file) {
   } catch {
     throw new Error(`${file.name}: not an image Yap can read (use PNG, GIF, WebP or JPEG).`);
   }
-  if (file.size <= MAX_EMOJI_BYTES && Math.max(bitmap.width, bitmap.height) <= SIDE && file.type === 'image/png') return file;
+  if (file.size <= MAX_EMOJI_BYTES && Math.max(bitmap.width, bitmap.height) <= SIDE && file.type === 'image/png') {
+    bitmap.close();
+    return file;
+  }
   const scale = Math.min(1, SIDE / Math.max(bitmap.width, bitmap.height));
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.round(bitmap.width * scale));
@@ -127,6 +137,7 @@ async function prepareEmojiFile(file) {
   const ctx = canvas.getContext('2d');
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close(); // (decoded, a big photo is tens of MB; a bulk upload decodes one after another)
   const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/webp', 0.92));
   const out = blob?.type === 'image/webp' ? blob : await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
   if (!out || out.size > MAX_EMOJI_BYTES) throw new Error(`${file.name}: too big even after shrinking.`);

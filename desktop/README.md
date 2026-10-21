@@ -118,6 +118,10 @@ meter and "Too loud (clipping)"), `YAP_DEBUG_HEAR=1` with `YAP_DEBUG_AUDIO=silen
 `YAP_DEBUG_AUDIO_FAIL=mic|speakers[@secs]` (fake a stream error once, 5 s
 in by default: the recovery path without real devices),
 `YAP_DEBUG_STAGE=<picture>` (put a picture in the preview tray),
+`YAP_DEBUG_OPEN=rejoin` ("You were in <the first voice channel>." as after a
+restart out of a call), `YAP_DEBUG_OPEN=new-below|scroll-up` (3 s in, the
+message list scrolled to the top, with "↓ New messages" showing; `scroll-up`
+leaves the pill to a real message arriving),
 `YAP_DEBUG_TAB=<n>` (move the keyboard focus on n times, as Tab
 would, 3 s in), `YAP_DEBUG_WINDOW=WxH[+X+Y]` (that window size, at the top left of the main
 screen, or at X,Y over other apps' windows: a window that's entirely covered
@@ -334,6 +338,13 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
 - **You at the top:** your nameplate (opens Settings › Profile), the big
   Mute / Deafen buttons and the voice panel sit right under the sidebar's
   header, AIM-style.
+- **Drafts per channel:** what you've typed, and a picture or GIF waiting in
+  the tray, stay with their channel when you switch and come back when you
+  return (in memory; an edit or a reply in progress is dropped on a switch,
+  so it can never land in another channel).
+- **"↓ New messages":** scrolled up in the open channel when someone else
+  writes, a pill shows over the bottom of the list; clicking it scrolls down
+  (it goes once you're at the bottom, or in another channel).
 - **Edit your messages:** the pencil in the hover toolbar, or ↑ in an empty
   message box (your last one); Enter saves, Esc cancels and gives your draft
   back. The message being edited is marked with a dotted focus box and
@@ -405,7 +416,12 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   (`unread.counts` › `mentions`, asked on every connect) —, a chime, and a
   desktop notification when Yap isn't focused (Settings › Notifications: every
   message / only @mentions and pings / off); 📣 "Ping everyone" (megaphone in
-  the title bar) with an optional note; incoming pings chime + notify.
+  the title bar) with an optional note; incoming pings chime + notify. A
+  mention while Yap isn't the front window also asks the system to point Yap
+  out (not in quiet hours): its taskbar button flashes on Windows, its Dock
+  icon bounces once on macOS, the window is marked urgent on X11 — minimized
+  too (`App::logic` runs while the window is hidden). On macOS the Dock icon
+  shows how many mentions are unread.
 - **GIFs:** messages render (still frame, plays on hover); the **GIF picker**
   talks to KLIPY directly (trending, recent, search; "Powered by KLIPY"; shares
   reported), per PROTOCOL.md › GIFs.
@@ -579,8 +595,17 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   the spec's words: no dropout protection — RED's copy no longer fits a
   packet — and several times the upload for each friend), RNNoise noise suppression (default on),
   **Echo cancellation** (default on; it applies at once, in a call too, and
-  Hear yourself includes it), **Automatic gain** (default on), calls that survive reconnects and server
-  restarts (no gap, no chimes), a quiet word next to someone when their
+  Hear yourself includes it), **Automatic gain** (default on), **Mic volume**
+  (Settings › Voice, 0–200 %, default 100 %, per device: how loud you go out,
+  live; after the automatic gain, which would otherwise undo it, and before
+  the gate and the meter, so voice activity, the meter, Test mic and Hear
+  yourself all hear it; past 100 % a limiter holds peaks at −1 dBFS, and at
+  exactly 100 % the mic is untouched, bit for bit; "Too loud (clipping)" is
+  still about the mic itself, before it), calls that survive reconnects and server
+  restarts (no gap, no chimes), **"You were in Lounge. [Rejoin]"** after the
+  app restarts out of a call (an update, a crash, a quit: the call is kept in
+  the settings file while you're in it, and leaving it yourself clears it),
+  for 10 minutes, until you join voice or dismiss it; never a join by itself, a quiet word next to someone when their
   connection is off (*weak connection*, *needs the voice relay* /
   *can't connect*, *reconnecting…*), and one about your own: "Your
   connection is dropping some of your audio" in the voice panel when most
@@ -931,7 +956,7 @@ ch m while away`) (they log `POLL`, `ROLL`, `SOUND`, `AWAY`, `HANG`,
 `SHELF`, `UNREAD`, `MENTIONS`, `JOINED`, `QUIET` lines; join requests say
 "link also used by …"),
 `--mute-after S`, `--expect TEXT`, `--record-wav out.wav`, `--bitrate`,
-`--mode open|vad|ptt`, `--denoise`, `--echo-cancel` (echo cancellation on
+`--mode open|vad|ptt`, `--denoise`, `--mic-volume PCT` (Mic volume, 0–200), `--echo-cancel` (echo cancellation on
 the WAV mic against what the bot hears; the stats line then adds `aec=` AEC3's
 delay estimate, `erle=`, `realigned=`, `owed=`), `--speakers` (real output device),
 `--drop-socket-at S[,S…]` (drop the socket then: the call is kept across it),
@@ -1115,6 +1140,13 @@ AEC3 settles on a ~40 ms delay, the rest being its own backlog). Same
 server and variables as the interop test:
 `YAP_URL=http://localhost:8788 YAP_KEY=testkey YAP_ADMIN_KEY=testadmin
 YAP_BIN=desktop/target/release/yap node desktop/tests/echo-loop.mjs`.
+
+`tests/mic-volume.mjs` checks Mic volume end to end: Dan talks (a
+speech-like WAV) at 100 %, 50 % and 200 %, Cleo records what she hears
+through the whole call path; 50 % comes out 6 dB quieter (measured −5.8 to
+−6.0), 200 % about 6 dB louder (+5.6 to +5.9: its limiter only touches the
+loudest peaks), never at full scale. Same server and variables as the
+interop test.
 
 `tests/vault-crosscheck.mjs` checks the encryption against the web's own code
 both ways, at the real 600,000 rounds: Node makes a vault and a note (plus a
@@ -1329,6 +1361,18 @@ Windows yet (a named pipe would do; its global keys see everything there).
 
 ## Please test by hand
 
+- **Round 12 on each OS:** a mention while Yap is behind another window and
+  while it's minimized — the taskbar button flashes until you click it
+  (Windows), the Dock icon bounces once and shows the count (macOS; the
+  count goes when you read the channel), the window is marked urgent (Linux
+  X11; Wayland compositors may ignore it); Mic volume with a real mic at 50 %
+  and 200 % (friends hear the difference, nothing crackles at 200 %, the
+  meter and Hear yourself follow, and 100 % sounds exactly as before);
+  quitting Yap mid-call, an update's relaunch mid-call and a crash
+  (force-quit) — "You were in Lounge." on the next start, Rejoin joins, and
+  it isn't offered after you left the call yourself or 10 minutes later;
+  "↓ New messages" with a real scroll wheel and trackpad; a draft and a
+  staged picture kept per channel.
 - **Round 10's voice controls on real keyboards, mice and mics:** the
   Mute / Deafen / Push-to-mute keys as global keys on Windows, Linux X11,
   Linux Wayland (with and without the `input` group, and `yap --remote` from

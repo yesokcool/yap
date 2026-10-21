@@ -39,7 +39,6 @@ function saveFavorites(list) {
   } catch {}
 }
 const favKey = (gif) => gif.slug || gif.mp4 || gif.webp || gif.gif;
-const isFavorite = (gif) => loadFavorites().some((g) => favKey(g) === favKey(gif));
 let customerId = null;
 const trendingCache = { at: 0, pages: [] };
 
@@ -285,6 +284,7 @@ export class GifPicker {
   }
 
   #append(start) {
+    const favorites = new Set(loadFavorites().map(favKey)); // (once, not per tile)
     for (let i = start; i < this.items.length; i++) {
       const gif = this.items[i];
       const col = this.#columns.reduce((a, b) => (Number(a.dataset.height) <= Number(b.dataset.height) ? a : b));
@@ -295,7 +295,7 @@ export class GifPicker {
       tile.dataset.index = String(i);
       tile.title = gif.title;
       tile.style.aspectRatio = `${gif.width} / ${gif.height}`;
-      const fav = isFavorite(gif);
+      const fav = favorites.has(favKey(gif));
       tile.innerHTML = `<img src="${esc(gif.webp ?? gif.gif ?? gif.still)}" alt="${esc(gif.title)}" loading="lazy" decoding="async"><span class="gif-fav ${fav ? 'on' : ''}" data-fav title="${fav ? 'Remove from favorites' : 'Add to favorites'}">★</span>`;
       col.append(tile);
     }

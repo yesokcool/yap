@@ -23,7 +23,7 @@ function minecraftServer(env: Env): { name: string; host: string; port: number }
 }
 
 export default {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request, env, ctx): Promise<Response> {
     const url = new URL(request.url);
     const key = inviteKey(request, url);
 
@@ -144,7 +144,7 @@ export default {
 
     // /emoji/<id> and /media/<id> are the same content-addressed store.
     const blob = url.pathname.match(/^\/(?:emoji|media)\/([a-f0-9]{32})$/);
-    if (blob) return serveBlob(request, blob[1], env, url.pathname.startsWith('/emoji/'));
+    if (blob) return serveBlob(request, blob[1], env, ctx, url.pathname.startsWith('/emoji/'));
     const asset = await env.ASSETS.fetch(request);
     // A mistyped address in a browser: a page with a way back (web/404.html), not a blank one.
     if (asset.status === 404 && request.method === 'GET' && (request.headers.get('Accept') ?? '').includes('text/html')) {

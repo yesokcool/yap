@@ -603,6 +603,8 @@ impl Core {
             }
             Cmd::JoinVoice(id) => self.join_voice(id).await,
             Cmd::LeaveVoice => {
+                // Left on purpose: no "You were in …" next launch.
+                self.shared.model.lock().forget_call();
                 // Leaving voice stops sharing (and watching): the video rides on the call.
                 self.share_stop();
                 self.stop_watching();
@@ -788,6 +790,7 @@ impl Core {
                 self.send(out::profile(name.then_some(n.as_str()), color.then_some(c.as_str())));
             }
             Cmd::Reconnect => {
+                self.shared.model.lock().forget_call();
                 self.say_goodbye_in_voice().await;
                 let token = {
                     let m = self.shared.model.lock();
@@ -836,6 +839,7 @@ impl Core {
                 self.send(out::account_pin(&password, current.as_deref()));
             }
             Cmd::SignOut => {
+                self.shared.model.lock().forget_call();
                 if self.shared.model.lock().voice_wanted.is_some() {
                     self.leave_voice();
                 }

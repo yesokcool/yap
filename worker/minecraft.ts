@@ -82,6 +82,8 @@ export async function ping(host: string, port: number, timeoutMs = 4000): Promis
         if (buf.length > 1 << 20) throw new Error('response too large');
       }
     })();
+    // Once the timeout wins, closing the socket fails the read: nobody is listening for that any more.
+    query.catch(() => {});
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error('timed out')), timeoutMs) as unknown as number;
     });

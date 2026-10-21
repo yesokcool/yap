@@ -167,20 +167,93 @@ pub struct ScrollState {
     set_offset: Option<f32>,
     /// Keep re-asserting "at the bottom" for a few frames (content may still be growing).
     want_bottom: u8,
+    /// The newest message last frame (id, ts): something newer from someone
+    /// else while you're scrolled up is "↓ New messages".
+    newest: Option<(String, i64)>,
+    /// "↓ New messages" shows (until you're at the bottom, or another channel).
+    new_below: bool,
+    /// Screenshot aid: one frame without sticking to the bottom, so `set_offset` can move off it.
+    unstick: bool,
+}
+
+impl ScrollState {
+    /// After this frame's layout: is there something new below what you're
+    /// reading? `newest`: the newest message (id, ts, ours); `at_bottom`: the
+    /// list is scrolled all the way down (or about to be).
+    fn track_new(&mut self, newest: Option<(&str, i64, bool)>, at_bottom: bool) -> bool {
+        if at_bottom {
+            self.new_below = false;
+        } else if let (Some((_, ts, mine)), Some((_, seen))) = (newest, &self.newest)
+            && ts > *seen
+            && !mine
+        {
+            self.new_below = true;
+        }
+        self.newest = newest.map(|(id, ts, _)| (id.to_string(), ts));
+        self.new_below
+    }
+
+    /// Screenshot aid: scrolled to the top (with "↓ New messages" showing if
+    /// `pill`), once the list has settled at the bottom. False until then.
+    pub fn debug_scroll_up(&mut self, pill: bool) -> bool {
+        if self.want_bottom > 0 || self.content_h <= 0.0 {
+            return false;
+        }
+        self.set_offset = Some(0.0);
+        self.unstick = true;
+        self.new_below |= pill;
+        true
+    }
+}
+
+/// What you had typed in each channel, and the picture or GIF waiting in its
+/// tray: switching channels keeps them with their channel and brings them
+/// back when you return (in memory, this run only). `T` is the tray's.
+pub struct Drafts<T> {
+    /// The channel the composer is showing.
+    pub channel: String,
+    pub text: std::collections::HashMap<String, String>,
+    pub staged: std::collections::HashMap<String, T>,
+}
+
+impl<T> Default for Drafts<T> {
+    fn default() -> Self {
+        Self { channel: String::new(), text: Default::default(), staged: Default::default() }
+    }
+}
+
+impl<T> Drafts<T> {
+    /// The composer moves to channel `to`: what's in it (and in the tray) stays
+    /// with the channel it was written in, and `to`'s comes back. False if
+    /// it's already there. The first time (no channel yet) keeps what's there.
+    pub fn switch(&mut self, to: &str, composer: &mut String, staged: &mut Option<T>) -> bool {
+        if self.channel == to {
+            return false;
+        }
+        if !self.channel.is_empty() {
+            let old = std::mem::take(composer);
+            if !old.is_empty() {
+                self.text.insert(self.channel.clone(), old);
+            }
+            if let Some(s) = staged.take() {
+                self.staged.insert(self.channel.clone(), s);
+            }
+            *composer = self.text.remove(to).unwrap_or_default();
+            *staged = self.staged.remove(to);
+        }
+        self.channel = to.to_string();
+        true
+    }
 }
 
 pub fn chat(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>) {
     let channel = m.channel(&m.config.channel).cloned();
-    // Drafts are per channel (an edit or a reply in progress is dropped).
-    if app.draft_channel != m.config.channel {
+    // Drafts are per channel, the tray's picture or GIF too (an edit or a
+    // reply in progress is dropped: they never follow you to another channel).
+    if app.drafts.channel != m.config.channel {
         cancel_edit(app);
         app.replying = None;
-        let old = std::mem::take(&mut app.composer);
-        if !app.draft_channel.is_empty() {
-            app.drafts.insert(app.draft_channel.clone(), old);
-        }
-        app.composer = app.drafts.remove(&m.config.channel).unwrap_or_default();
-        app.draft_channel = m.config.channel.clone();
+        app.drafts.switch(&m.config.channel, &mut app.composer, &mut app.staged);
         app.focus_composer = true;
     }
     restore_refused(app, m, acts);
@@ -345,7 +418,7 @@ pub fn message_list(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
         counted.or(if reaches { loaded } else { None }).map(|id| (id, mark))
     });
     let mut divider: Option<Rect> = None;
-    let mut area = egui::ScrollArea::vertical().id_salt(("messages", &channel_id)).auto_shrink(false).stick_to_bottom(true);
+    let mut area = egui::ScrollArea::vertical().id_salt(("messages", &channel_id)).auto_shrink(false).stick_to_bottom(!std::mem::take(&mut st.unstick));
     if let Some(o) = st.set_offset.take() {
         area = area.vertical_scroll_offset(o);
     }
@@ -410,6 +483,15 @@ pub fn message_list(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
         } else {
             acts.push(Act::Cmd(Cmd::JumpTo { channel: channel_id.clone(), id: id.clone() }));
         }
+    }
+    // "↓ New messages": something new came in below while you're scrolled up.
+    let max = (out.content_size.y - out.inner_rect.height()).max(0.0);
+    let at_bottom = out.state.offset.y >= max - 4.0 || app.scroll.want_bottom > 0 || app.scroll.set_offset.is_some();
+    let newest = h.and_then(|h| h.messages.last()).map(|x| (x.id.as_str(), x.ts, x.uid == m.config.uid));
+    if app.scroll.track_new(newest, at_bottom) && viewport.width() > 180.0 && super::extras::new_below_pill(ui, viewport, p) {
+        app.scroll.want_bottom = 4;
+        app.scroll.new_below = false;
+        ui.ctx().request_repaint();
     }
     let st = &mut app.scroll;
     let new_h = out.content_size.y;
@@ -1103,8 +1185,8 @@ fn restore_refused(app: &mut App, m: &Model, acts: &mut Vec<Act>) {
     }
     for (channel, text) in &m.composer_restore {
         let text = crate::core::plain_emojis(text);
-        let slot = if *channel != app.draft_channel {
-            app.drafts.entry(channel.clone()).or_default()
+        let slot = if *channel != app.drafts.channel {
+            app.drafts.text.entry(channel.clone()).or_default()
         } else if let Some(e) = app.editing.as_mut() {
             &mut e.draft
         } else {
@@ -1420,5 +1502,56 @@ mod offline_tests {
         assert_eq!(offline_words("IO error: Network is unreachable (os error 51)"), "This computer can't reach the internet right now.");
         assert_eq!(offline_words("HTTP error: 502 Bad Gateway"), "The server answered, but not like a Yap server.");
         assert_eq!(offline_words("Connection reset without closing handshake"), "The connection dropped.");
+    }
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::{Drafts, ScrollState};
+
+    #[test]
+    fn drafts_stay_with_their_channel() {
+        let mut d: Drafts<&str> = Drafts::default();
+        let mut composer = String::new();
+        // The first channel shown keeps what's there (a screenshot's staged picture).
+        let mut tray = Some("pic");
+        assert!(d.switch("general", &mut composer, &mut tray));
+        assert_eq!(tray, Some("pic"));
+        composer.push_str("half a thought");
+        // To another channel: an empty box and tray; general keeps both.
+        assert!(d.switch("games", &mut composer, &mut tray));
+        assert_eq!((composer.as_str(), tray), ("", None));
+        composer.push_str("gg");
+        // Back: general's text and picture come back, games keeps "gg".
+        d.switch("general", &mut composer, &mut tray);
+        assert_eq!((composer.as_str(), tray), ("half a thought", Some("pic")));
+        assert!(!d.switch("general", &mut composer, &mut tray), "already there");
+        composer.clear();
+        tray = None;
+        d.switch("games", &mut composer, &mut tray);
+        assert_eq!((composer.as_str(), tray), ("gg", None));
+        // Sent in general meanwhile (the box emptied): nothing comes back there.
+        d.switch("general", &mut composer, &mut tray);
+        assert_eq!((composer.as_str(), tray), ("", None));
+    }
+
+    #[test]
+    fn new_messages_pill() {
+        let mut st = ScrollState::default();
+        // The first look at a channel: nothing is "new".
+        assert!(!st.track_new(Some(("a", 1, false)), false));
+        // Scrolled up, someone writes: the pill shows, and stays.
+        assert!(st.track_new(Some(("b", 2, false)), false));
+        assert!(st.track_new(Some(("b", 2, false)), false));
+        // At the bottom: gone.
+        assert!(!st.track_new(Some(("b", 2, false)), true));
+        // Our own message, or an older one coming back (a newer one deleted), isn't news.
+        assert!(!st.track_new(Some(("c", 3, true)), false));
+        assert!(!st.track_new(Some(("b", 2, false)), false));
+        // At the bottom when it arrives: no pill.
+        assert!(!st.track_new(Some(("d", 4, false)), true));
+        // Fresh history after a reconnect (nothing known first): no pill for what was there.
+        assert!(!st.track_new(None, false));
+        assert!(!st.track_new(Some(("e", 5, false)), false));
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Testing
 @testable import YapCore
 
@@ -22,6 +23,25 @@ struct HeartbeatTests {
         #expect(wifi != NetworkPathSignature(satisfied: true, interfaces: "pdp_ip0"))
         #expect(wifi == NetworkPathSignature(satisfied: true, interfaces: "en0,pdp_ip0"))
         #expect(wifi != NetworkPathSignature(satisfied: false, interfaces: "en0,pdp_ip0"))
+    }
+
+    /// A server that takes the connection and never answers the upgrade (a
+    /// network that died under it, a captive portal): the attempt is given
+    /// up after `openTimeout` and tried again. URLSession alone waited 61 s,
+    /// and coming back on screen or a new network didn't hurry it.
+    @Test func aStuckUpgradeIsGivenUpAndTriedAgain() async throws {
+        let silent = try await SilentServer()
+        defer { silent.stop() }
+        let connection = YapConnection(url: URL(string: "ws://127.0.0.1:\(silent.port)/ws")!)
+        connection.openTimeout = .milliseconds(300)
+        var closes: [YapConnection.CloseReason] = []
+        connection.onClose = { closes.append($0) }
+        connection.connect()
+        defer { connection.stop() }
+        try await waitUntil("given up", timeout: .seconds(5)) { !closes.isEmpty }
+        #expect(closes.first == .lost, "a stuck upgrade is a lost socket, not a wrong key")
+        #expect(!connection.isStopped, "it keeps trying")
+        try await waitUntil("tried again", timeout: .seconds(5)) { silent.accepted >= 2 }
     }
 
     /// Against the dev server: extra pings all the time, short deadlines,
@@ -72,5 +92,34 @@ struct FrameOrderTests {
         }
         try await waitUntil("every answer") { counts.count == rounds * 10 }
         #expect(counts == Array(repeating: Array(1...10), count: rounds).flatMap { $0 })
+    }
+}
+
+/// Takes TCP connections on 127.0.0.1 and never says a word.
+@MainActor
+final class SilentServer {
+    private let listener: NWListener
+    private var held: [NWConnection] = []
+    private(set) var accepted = 0
+    var port: UInt16 { listener.port?.rawValue ?? 0 }
+
+    init() async throws {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters)
+        listener.newConnectionHandler = { [weak self] connection in
+            connection.start(queue: .main)
+            MainActor.assumeIsolated {
+                self?.held.append(connection)
+                self?.accepted += 1
+            }
+        }
+        listener.start(queue: .main)
+        try await waitUntil("listening") { listener.state == .ready && port != 0 }
+    }
+
+    func stop() {
+        for connection in held { connection.cancel() }
+        listener.cancel()
     }
 }

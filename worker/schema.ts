@@ -297,6 +297,21 @@ export const MIGRATIONS: ((sql: SqlStorage) => void)[] = [
       CREATE INDEX hangs_by_at ON hangs (at);
     `);
   },
+  // v19 (2026-10-21): messages by time alone. The newest message (Hub.nextTs,
+  // once per wake) and the backup's pages by ts read every row without it.
+  (sql) => {
+    sql.exec('CREATE INDEX IF NOT EXISTS messages_by_ts ON messages (ts)');
+  },
+  // v20 (2026-10-21): the nonce a send came with, so the same send again after
+  // a reconnect is answered with the message it made instead of stored twice
+  // (hub-messages.ts › answerRepeat). Only the server reads it: never on the
+  // wire, never in a backup.
+  (sql) => {
+    sql.exec(`
+      ALTER TABLE messages ADD COLUMN nonce TEXT;
+      CREATE INDEX messages_by_nonce ON messages (user_id, nonce) WHERE nonce IS NOT NULL;
+    `);
+  },
 ];
 
 /**

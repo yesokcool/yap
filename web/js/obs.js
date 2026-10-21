@@ -199,7 +199,7 @@ function render() {
   stage.innerHTML = shown.map((s) => {
     const u = state.users.get(s.uid);
     const face = u?.avatar ? `<img src="/media/${esc(u.avatar)}" alt="">` : u?.look ? esc(u.look) : esc(initial(u?.name ?? '?'));
-    return `<div class="who ${state.speaking.has(s.sid) ? 'speaking' : 'quiet'}"><div class="face" style="--c:${esc(u?.color ?? '#555')}">${face}</div><div class="name">${esc(u?.name ?? '')}</div></div>`;
+    return `<div class="who ${state.speaking.has(s.sid) ? 'speaking' : 'quiet'}" data-sid="${esc(s.sid)}"><div class="face" style="--c:${esc(u?.color ?? '#555')}">${face}</div><div class="name">${esc(u?.name ?? '')}</div></div>`;
   }).join('');
 }
 
@@ -282,7 +282,11 @@ function handle(msg) {
 voice.addEventListener('speaking', ({ detail: { sid, speaking } }) => {
   if (speaking) state.speaking.add(sid);
   else state.speaking.delete(sid);
-  render();
+  // Just their card, in place: so its lift and glow ease in and out on stream (a redraw would snap
+  // them and make every picture again, several times a second). Not drawn = not shown: nothing to do.
+  const who = [...$('stage').children].find((el) => el.dataset.sid === sid);
+  who?.classList.toggle('speaking', speaking);
+  who?.classList.toggle('quiet', !speaking);
 });
 voice.addEventListener('peer', () => applyOnly());
 setInterval(applyOnly, 1000);

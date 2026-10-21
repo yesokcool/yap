@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { orderAudioCodecs, orderCodecs, OwnConnection, panGains, SCREEN_QUALITY, tuneOpus } from '../web/js/voice.js';
 import { PAN, voicePan } from '../web/js/space-map.js';
 import { settings } from '../web/js/settings.js';
-import { CLIP, ClipWatch, Gate, GATE, MutedReminder, MUTED_REMINDER, PttLatch, PTT_LATCH_MS } from '../web/js/gate-worklet.js';
+import { CLIP, ClipWatch, Gate, GATE, limit, MutedReminder, MUTED_REMINDER, PttLatch, PTT_LATCH_MS } from '../web/js/gate-worklet.js';
 
 const cases = [];
 const t = (name, fn) => cases.push([name, fn]);
@@ -444,6 +444,43 @@ t('mic meter: each report carries its loudest sample (dBFS); "Too loud (clipping
   const spread = new ClipWatch();
   for (const at of [0, 1500, 3000, 4500]) assert.equal(spread.push(-0.5, at), false, 'one every 1.5 s is never three in 2 s');
   assert.equal(CLIP.db, -1);
+});
+
+t('mic volume: 100 % leaves every sample exactly as it was; 50 % is 6 dB down in the level, voice activity and what goes out', () => {
+  const x = noise(SR * 2, -70);
+  syllable(x, ms(500), 600, -30);
+  const plain = run(x, { mode: 'open' });
+  const at100 = run(x, { mode: 'open', volume: 1 });
+  assert.ok(plain.out.every((v, i) => Object.is(v, at100.out[i])), 'bit-identical at 100 %');
+  const half = run(x, { mode: 'open', volume: 0.5 });
+  const rms = (a, from, to) => Math.sqrt(a.subarray(from, to).reduce((s, v) => s + v * v, 0) / (to - from));
+  const drop = 20 * Math.log10(rms(half.out, ms(600), ms(1000)) / rms(plain.out, ms(600), ms(1000)));
+  assert.ok(Math.abs(drop + 6.02) < 0.05, `sent ${drop.toFixed(2)} dB`);
+  const loud = (r) => Math.max(...r.reports.filter((p) => p.t > ms(600) && p.t < ms(1000)).map((p) => p.db));
+  assert.ok(Math.abs(loud(half) - loud(plain) + 6.02) < 0.1, 'the meter hears it too');
+  // A syllable just over the sensitivity opens voice activity at 100 %, not at 50 %.
+  const y = noise(SR * 2, -80);
+  syllable(y, ms(500), 300, -46);
+  assert.ok(run(y, { mode: 'vad', threshold: -50 }).gainOf.some((g) => g > 0.99), 'opens at 100 %');
+  assert.equal(run(y, { mode: 'vad', threshold: -50, volume: 0.5 }).gainOf.reduce((m, g) => Math.max(m, g), 0), 0, 'not at 50 %');
+  // Live, without a new gate.
+  const live = run(x, { mode: 'open' }, [{ at: ms(800), set: { volume: 0.5 } }]);
+  assert.ok(rms(live.out, ms(900), ms(1000)) < rms(live.out, ms(600), ms(700)) * 0.6, 'turned down mid-stream');
+});
+
+t('mic volume past 100 %: a soft limiter, never past 0 dBFS; "peak" is still the mic\'s own, "boost" what the volume made of it', () => {
+  assert.equal(limit(0.5), 0.5, 'straight through below −1 dBFS');
+  assert.equal(limit(-0.8), -0.8);
+  for (const v of [0.95, 1.2, 1.5]) assert.ok(limit(v) < 1 && limit(v) > limit(v * 0.99) && limit(-v) === -limit(v), `soft, below 1, still rising: ${v}`);
+  for (const v of [3, 10, 1e6]) assert.ok(limit(v) <= 1 && limit(-v) === -limit(v), `never past full scale: ${v}`);
+  const x = noise(SR, -70);
+  syllable(x, ms(200), 600, -6); // peaks near −3 dBFS
+  const r = run(x, { mode: 'open', volume: 2 });
+  assert.ok(r.out.every((v) => Math.abs(v) <= 1), 'never past full scale');
+  const loudest = r.reports.filter((p) => p.t > ms(300) && p.t < ms(700));
+  assert.ok(loudest.every((p) => p.peak < -2), `the mic's own peaks (${loudest[0].peak.toFixed(1)} dBFS): not clipping`);
+  assert.ok(loudest.every((p) => p.boost > -1), `doubled, they reach the limiter (${loudest[0].boost.toFixed(1)} dBFS)`);
+  assert.ok(run(x, { mode: 'open' }).reports.every((p) => p.boost === -120), 'at 100 % there is no boost to report');
 });
 
 let failed = 0;

@@ -116,7 +116,7 @@ export class Soundboard {
         const audio = new Audio(url);
         audio.volume = 0.3 * settings.soundboardVolume;
         audio.onended = () => URL.revokeObjectURL(url);
-        return audio.play().catch(() => {});
+        return audio.play().catch(() => URL.revokeObjectURL(url));
       }
       case 'save': {
         const name = this.el.querySelector('[name=sb-name]').value.trim();

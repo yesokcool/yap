@@ -108,6 +108,7 @@ struct MacRootView: View {
                         // Your nameplate and the call at the top, like the web.
                         AccountNotices98()
                         HangNotice98()
+                        RejoinNotice98()
                         UserPanel()
                         if model.voice.isInVoice { VoiceBar() }
                         SharingStrip98()

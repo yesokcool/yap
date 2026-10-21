@@ -241,6 +241,8 @@ export class SpaceWorld {
     });
     addEventListener('keydown', (e) => {
       if (!this.running || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+      // Ctrl/⌘/Alt + a key is a shortcut (Ctrl+Shift+D deafens, Ctrl+F finds), never a step or a throw.
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       const k = e.key.toLowerCase();
       if (this.viewing >= 0 && ['escape', 'arrowleft', 'arrowright'].includes(k)) {
         e.preventDefault();
@@ -257,7 +259,11 @@ export class SpaceWorld {
         if (k.startsWith('arrow')) e.preventDefault();
       }
     });
-    addEventListener('keyup', (e) => this.keys.delete(e.key.toLowerCase()));
+    addEventListener('keyup', (e) => {
+      // macOS sends no keyup for keys let go while ⌘ is down: stop rather than walk on forever.
+      if (e.key === 'Meta') this.keys.clear();
+      else this.keys.delete(e.key.toLowerCase());
+    });
     addEventListener('blur', () => this.keys.clear());
     this.canvas.addEventListener('pointerdown', (e) => {
       if (this.tapHint) {
@@ -290,8 +296,10 @@ export class SpaceWorld {
     this.last = performance.now();
     this.panelSig = this.gameSig = '';
     this.canvas.focus();
+    // One loop at a time, even if Space closes and opens again before the last frame ran.
+    const run = (this.run = (this.run ?? 0) + 1);
     const loop = (now) => {
-      if (!this.running) return;
+      if (!this.running || run !== this.run) return;
       this.#tick(Math.min(0.05, Math.max(0, now - this.last) / 1000), now);
       this.last = now;
       this.#render();
@@ -339,8 +347,10 @@ export class SpaceWorld {
       const spread = () => (Math.random() - 0.5) * SPAWN.spread;
       this.me = me ? { ...me } : { x: SPAWN.x + spread(), y: SPAWN.y + spread() / 3, d: Math.PI / 2 };
       if (blocked(this.me.x, this.me.y)) Object.assign(this.me, { x: SPAWN.x, y: SPAWN.y });
-      this.#send(true);
     }
+    // Always say where we are: after a reconnect (every deploy) this is a new session, which
+    // nobody sees on the map until it has sent a position.
+    this.#send(true);
     // Catch up on the games (whoever owns something answers), and tell everyone our own bits.
     this.#game('sync', {});
     this.#announceMine();
@@ -597,8 +607,13 @@ export class SpaceWorld {
 
   #send(force) {
     if (!force && Date.now() - this.lastSent < SEND_EVERY_MS) return;
+    const move = { t: 'space.move', x: Math.round(this.me.x), y: Math.round(this.me.y), d: Math.round(this.me.d * 100) / 100 };
+    // Walking into a wall (or a key held down) goes nowhere: nothing to tell anyone.
+    const at = `${move.x},${move.y},${move.d}`;
+    if (!force && at === this.sentAt) return;
+    this.sentAt = at;
     this.lastSent = Date.now();
-    this.hooks.send({ t: 'space.move', x: Math.round(this.me.x), y: Math.round(this.me.y), d: Math.round(this.me.d * 100) / 100 });
+    this.hooks.send(move);
   }
 
   // ── Fire and water ───────────────────────────────────────────────────────

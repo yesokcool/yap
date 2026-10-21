@@ -111,6 +111,11 @@ export class OwnConnection {
 /** The voice channel's quality, if it sets one; else your own setting. */
 let channelBitrate = null;
 const callBitrate = () => channelBitrate ?? settings.bitrate;
+/** Settings › Voice › Mic volume as the gate takes it: 0–2, exactly 1 unless you moved it (so 100 % leaves the samples alone). */
+export const micVolume = () => {
+  const v = Number(settings.micVolume);
+  return Number.isFinite(v) ? Math.min(2, Math.max(0, Math.round(v * 100) / 100)) : 1;
+};
 
 /**
  * Screen-share presets. Each viewer gets their own stream from the sharer
@@ -203,6 +208,9 @@ export class Voice extends EventTarget {
   /** The mic's peaks keep hitting the top ("Too loud (clipping)" on the meter). */
   clipping = false;
   #clip = new ClipWatch();
+  /** Mic volume (past 100 %) keeps pushing your loudest moments into the limiter: "turn Mic volume down". */
+  limiting = false;
+  #limit = new ClipWatch();
   /** A mic test is running: push-to-talk acts like always-on. */
   micTest = false;
   /** The mic has sent nothing but digital silence for 5 s (a hardware mute switch, a dead device). */
@@ -218,7 +226,10 @@ export class Voice extends EventTarget {
   #deviceTimer = null;
   #resumeOnGesture = null;
   #ctx = null;
+  #ctxReady = null; // the gate's worklet module, loading into #ctx
+  #micOpening = Promise.resolve(); // mic (re)opens run one at a time (#queueMic)
   #out = null; // playback graph for volume past 100%
+  #outSink = null; // the output #out was last pointed at (a missing one isn't tried again until devices change)
   #denoise = null; // RNNoise node, when on
   #rnnoiseBroken = false; // it failed to load here: the browser's noise suppression instead
   #source = null;
@@ -427,21 +438,44 @@ export class Voice extends EventTarget {
     if (iceServers) this.iceServers = iceServers;
     if (this.listenOnly) return;
     if (!this.#ctx) {
-      this.#ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
-      this.#ctx.onstatechange = () => {
+      const ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+      this.#ctx = ctx;
+      ctx.onstatechange = () => {
         this.#emit('context', { state: this.#ctx?.state }); // (the call report notes interruptions)
         this.#kickContext();
       };
-      await this.#ctx.audioWorklet.addModule(new URL('./gate-worklet.js', import.meta.url));
+      this.#ctxReady = ctx.audioWorklet.addModule(new URL('./gate-worklet.js', import.meta.url)).catch((err) => {
+        // A context without the gate can't carry a mic: the next try starts with a new one.
+        if (this.#ctx === ctx) {
+          this.#ctx = null;
+          ctx.close().catch(() => {});
+        }
+        throw err;
+      });
     }
-    await this.#ctx.resume();
-    if (!this.rawStream) await this.#openMic();
+    const ctx = this.#ctx;
+    // (A second prepare() while the first is still loading the gate waits for it, rather than build a mic without it.)
+    await this.#ctxReady;
+    await ctx.resume();
+    if (!this.rawStream) await this.#queueMic({ ifClosed: true });
   }
 
   /** Re-open the mic after a device or processing change. */
   async restartMic() {
     if (!this.#ctx) return;
-    await this.#openMic();
+    await this.#queueMic();
+  }
+
+  /**
+   * Open the mic (again), one open at a time: each waits for the one before,
+   * so the settings asked for last are the ones that end up open (a slow
+   * RNNoise load can't finish after a later, quicker open and undo it).
+   * `ifClosed`: only if it isn't open by then.
+   */
+  #queueMic({ ifClosed = false } = {}) {
+    const run = this.#micOpening.then(() => (ifClosed && this.rawStream ? undefined : this.#openMic()));
+    this.#micOpening = run.catch(() => {});
+    return run;
   }
 
   async #openMic() {
@@ -546,16 +580,18 @@ export class Voice extends EventTarget {
     if (this.rawStream?.getAudioTracks()[0] !== track) return; // already replaced
     console.warn('the microphone stopped; reopening it');
     setTimeout(() => {
-      if (this.rawStream?.getAudioTracks()[0] === track) this.#openMic();
+      if (this.rawStream?.getAudioTracks()[0] === track) this.#queueMic();
     }, 300);
   }
 
   /** Devices came or went: follow the mic (and the speakers) like a native app would. */
   async #devicesChanged() {
-    let devices = [];
+    let devices;
     try {
       devices = await navigator.mediaDevices.enumerateDevices();
-    } catch {}
+    } catch {
+      return; // (no list: no way to tell what changed, so leave the mic and speakers where they are)
+    }
     const has = (kind, id) => devices.some((d) => d.kind === kind && d.deviceId === id);
     const track = this.rawStream?.getAudioTracks()[0];
     if (track && this.#ctx) {
@@ -565,35 +601,41 @@ export class Voice extends EventTarget {
         || (using.deviceId && !has('audioinput', using.deviceId)) // the mic in use is gone
         || (settings.inputId && using.deviceId !== settings.inputId && has('audioinput', settings.inputId)) // the one you picked is back
         || (!settings.inputId && def?.groupId && using.groupId && def.groupId !== using.groupId); // the system default moved (Chrome)
-      if (reopen) await this.#openMic();
+      if (reopen) await this.#queueMic();
     }
     // Speakers: the picked one if it's there, else the system default.
     for (const peer of this.peers.values()) peer.applyOutput({ force: true });
-    if (this.#out?.setSinkId) this.#out.setSinkId(settings.outputId && has('audiooutput', settings.outputId) ? settings.outputId : '').catch(() => {});
+    if (this.#out?.setSinkId) {
+      this.#outSink = settings.outputId && has('audiooutput', settings.outputId) ? settings.outputId : '';
+      this.#out.setSinkId(this.#outSink).catch(() => {});
+    }
   }
 
   /**
-   * Keep the audio graph running: a suspended or interrupted context (Safari:
-   * a phone call, Siri; any browser: the OS took the device) gets resumed —
-   * on the next tap or key press if the browser wants a gesture.
+   * Keep the audio graphs running (the mic's, and the one playing people
+   * turned up past 100 % or panned in Space): a suspended or interrupted
+   * context (Safari: a phone call, Siri; any browser: the OS took the device)
+   * gets resumed — on the next tap or key press if the browser wants a gesture.
    */
   #kickContext() {
-    const ctx = this.#ctx;
-    if (!ctx || ctx.state === 'closed') return;
-    if (ctx.state === 'running') {
-      if (this.#resumeOnGesture) {
-        removeEventListener('pointerdown', this.#resumeOnGesture, true);
-        removeEventListener('keydown', this.#resumeOnGesture, true);
-        this.#resumeOnGesture = null;
-      }
-      return;
-    }
-    ctx.resume().catch(() => {});
+    const stuck = [this.#ctx, this.#out].filter((ctx) => ctx && ctx.state !== 'running' && ctx.state !== 'closed');
+    if (!stuck.length) return this.#stopKicking();
+    for (const ctx of stuck) ctx.resume().catch(() => {});
     if (!this.#resumeOnGesture) {
-      this.#resumeOnGesture = () => this.#ctx?.resume().catch(() => {});
+      this.#resumeOnGesture = () => {
+        this.#ctx?.resume().catch(() => {});
+        this.#out?.resume().catch(() => {});
+      };
       addEventListener('pointerdown', this.#resumeOnGesture, true);
       addEventListener('keydown', this.#resumeOnGesture, true);
     }
+  }
+
+  #stopKicking() {
+    if (!this.#resumeOnGesture) return;
+    removeEventListener('pointerdown', this.#resumeOnGesture, true);
+    removeEventListener('keydown', this.#resumeOnGesture, true);
+    this.#resumeOnGesture = null;
   }
 
   /** The gate reports every 20 ms; 1.5 s without one = the graph is stuck: fail open. */
@@ -629,6 +671,8 @@ export class Voice extends EventTarget {
   }
 
   #releaseMic() {
+    // (A warning about the mic that goes — "sending silence", "plain mic" — goes with it.)
+    const unwell = this.stalled || this.silent;
     this.#source?.disconnect();
     this.#source = null;
     this.#denoise?.disconnect();
@@ -647,10 +691,13 @@ export class Voice extends EventTarget {
     this.silent = false;
     this.clipping = false;
     this.#clip = new ClipWatch();
+    this.limiting = false;
+    this.#limit = new ClipWatch();
     this.rawStream?.getTracks().forEach((t) => t.stop());
     this.sendTrack?.stop();
     this.rawStream = null;
     this.sendTrack = null;
+    if (unwell) this.#emit('health', { stalled: false, silent: false });
   }
 
   // ── Transmit gate: mute / deafen / voice activity / push-to-talk ─────────
@@ -684,8 +731,15 @@ export class Voice extends EventTarget {
   outputContext() {
     if (!this.#out || this.#out.state === 'closed') {
       this.#out = new AudioContext({ latencyHint: 'interactive' });
+      this.#out.onstatechange = () => this.#kickContext();
+      this.#outSink = null;
     }
-    if (settings.outputId && this.#out.setSinkId && this.#out.sinkId !== settings.outputId) this.#out.setSinkId(settings.outputId).catch(() => {});
+    // The picked speakers, or the system's again when that's what's picked now.
+    const sink = settings.outputId || '';
+    if (this.#out.setSinkId && this.#outSink !== sink) {
+      this.#outSink = sink;
+      this.#out.setSinkId(sink).catch(() => {});
+    }
     this.#out.resume().catch(() => {});
     return this.#out;
   }
@@ -737,9 +791,10 @@ export class Voice extends EventTarget {
   }
 
   /** A report from the gate, every 20 ms (gate-worklet.js). */
-  #onLevel({ db, peak, open, voice, pttOpen, at, silent }) {
+  #onLevel({ db, peak, boost, open, voice, pttOpen, at, silent }) {
     this.localDb = db;
     this.clipping = this.#clip.push(peak ?? -120, performance.now());
+    this.limiting = this.#limit.push(boost ?? -120, performance.now());
     this.gateOpen = open;
     this.openAt = at;
     // Push-to-talk's closing click: once the gate has closed after the tail.
@@ -766,10 +821,15 @@ export class Voice extends EventTarget {
    */
   #gateSettings() {
     const mode = settings.mode === 'vad' && settings.music ? 'open' : settings.mode;
-    return { mode, threshold: settings.vadThreshold, ptt: this.pttDown, test: this.micTest };
+    return { mode, threshold: settings.vadThreshold, ptt: this.pttDown, test: this.micTest, volume: micVolume() };
   }
 
-  /** Tell the gate whatever changed (mode, sensitivity, push-to-talk key). */
+  /** Mic volume changed (Settings › Voice): straight to the gate, no reopening the mic. */
+  setMicVolume() {
+    this.#syncGate();
+  }
+
+  /** Tell the gate whatever changed (mode, sensitivity, push-to-talk key, mic volume). */
   #syncGate() {
     if (!this.#gate) return;
     const now = this.#gateSettings();
@@ -1061,17 +1121,21 @@ export class Voice extends EventTarget {
     this.#emit('rebuild', { sid, by: 'us' });
   }
 
-  /** Fully off: no peers, mic released, audio graph closed. */
+  /** Fully off: no peers, no screen share, mic released, audio graph closed. */
   stop() {
+    this.stopScreen(); // (out of the call = not sharing: PROTOCOL.md › Screen sharing)
     this.hangupAll();
+    this.#watching.clear();
     this.#releaseMic();
     clearInterval(this.#watchdog);
     this.#watchdog = null;
     this.micOk = false;
     this.#ctx?.close();
     this.#ctx = null;
+    this.#ctxReady = null;
     this.#out?.close();
     this.#out = null;
+    this.#stopKicking();
     if (this.#selfSpeaking && this.mySid) this.#emit('speaking', { sid: this.mySid, speaking: false });
     this.#selfSpeaking = false;
   }
@@ -1149,7 +1213,14 @@ export class Voice extends EventTarget {
     const peers = [];
     const yours = []; // what each person we're sending to reports losing of our voice
     for (const peer of [...this.peers.values()]) {
-      const s = await peer.stats();
+      // Someone who left during this round: their closed connection has no stats (getStats throws).
+      if (this.peers.get(peer.sid) !== peer) continue;
+      let s;
+      try {
+        s = await peer.stats();
+      } catch {
+        continue;
+      }
       if (s.rtt != null) {
         rtt += s.rtt;
         rttCount++;
@@ -1497,8 +1568,9 @@ class Peer {
     const level = Math.max(0, (settings.volumes[uid] ?? 1) * (this.proximity ?? 1));
     const pan = this.pan ?? null;
     if ((level > 1.001 || pan !== null) && this.audio.srcObject) {
+      // (Every time, not just when the graph is made: it follows a newly picked output, and is resumed if it was interrupted.)
+      const ctx = this.voice.outputContext();
       if (!this.boost) {
-        const ctx = this.voice.outputContext();
         const source = ctx.createMediaStreamSource(this.audio.srcObject);
         const gain = ctx.createGain();
         // Two channels from here on (a mono voice goes to both), one gain per ear.

@@ -6,9 +6,9 @@ use super::*;
 
 /// Screenshot aid: the `YAP_DEBUG_OPEN` targets that wait until the model has
 /// what they show (connected, history, a voice channel…).
-pub(super) const DEBUG_LATER: [&str; 29] = [
+pub(super) const DEBUG_LATER: [&str; 32] = [
     "gifs", "react", "voice", "reply", "draw", "space", "search", "pins", "plan", "catchup", "shelf", "soundboard", "people-away", "delete", "archive", "viewer", "volume", "signin-alert", "weak-pin",
-    "weak-password", "temp-password", "password-reset", "hang-now", "voice-more", "edit", "watch", "share", "share-dialog", "burst",
+    "weak-password", "temp-password", "password-reset", "hang-now", "voice-more", "edit", "watch", "share", "share-dialog", "burst", "rejoin", "new-below", "scroll-up",
 ];
 
 /// A small made-up picture (the emoji dialog's screenshot aid).
@@ -114,7 +114,7 @@ pub(super) fn stage(app: &mut App) {
     {
         app.stage_picture(bytes);
         app.composer = "the view from the hike 🏔️".into();
-        app.draft_channel = app.shared.model.lock().config.channel.clone();
+        app.drafts.channel = app.shared.model.lock().config.channel.clone();
     }
 }
 
@@ -138,6 +138,23 @@ impl App {
                     acts.push(Act::Cmd(Cmd::Send { body: format!("Note {i} of 12."), reply_to: None }));
                 }
                 acts.push(Act::Cmd(Cmd::Send { body: "A reply to a message that's gone.".into(), reply_to: Some("gone".into()) }));
+            }
+            // "You were in <the first voice channel>." as if Yap had just restarted out of a call.
+            Some("rejoin") if m.status == Status::Online => {
+                if let Some(c) = m.channels.iter().find(|c| c.is_voice()) {
+                    self.rejoin = Some(crate::config::LastCall { server: m.config.server.clone(), channel: c.id.clone(), at: core::now_ms() });
+                    self.debug_open = None;
+                }
+            }
+            // "↓ New messages" over this channel, as if something came in below while scrolled up.
+            // (3 s in: once the history and its "scroll to the bottom" have settled.)
+            // `scroll-up` only scrolls up: a message someone sends then shows the pill for real.
+            Some(v @ ("new-below" | "scroll-up")) if m.history.get(&m.config.channel).is_some_and(|h| !h.messages.is_empty()) => {
+                if ctx.input(|i| i.time) > 3.0 && self.scroll.debug_scroll_up(v == "new-below") {
+                    self.debug_open = None;
+                } else {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                }
             }
             Some("gifs") if m.server_config.is_some() => {
                 self.debug_open = None;
@@ -232,14 +249,14 @@ impl App {
                 }
             }
             // Edit our own last message here (the composer bar, the message outlined).
-            Some("edit") if self.draft_channel == m.config.channel => {
+            Some("edit") if self.drafts.channel == m.config.channel => {
                 if let Some(last) = m.last_own_message(&m.config.channel).cloned() {
                     chat::start_edit(self, m, &last);
                     self.debug_open = None;
                 }
             }
             // Reply to the last message from someone else here.
-            Some("reply") if self.draft_channel == m.config.channel => {
+            Some("reply") if self.drafts.channel == m.config.channel => {
                 if let Some(last) = m.history.get(&m.config.channel).and_then(|h| h.messages.iter().rev().find(|x| x.uid != m.config.uid)) {
                     content::start_reply(self, m, last);
                     self.debug_open = None;

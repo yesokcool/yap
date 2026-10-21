@@ -29,6 +29,8 @@ const PAUSED = 2;
 const BUFFERING = 3;
 const CUED = 5;
 const DRIFT = 1.5; // seconds off before we seek to where everyone is
+const SEEK_EVERY_MS = 2500; // at most one catch-up seek this often; doubles while seeks don't catch up
+const SEEK_LOAD_MS = 8000; // a catch-up seek may buffer this long before we try another
 const PREFS_KEY = 'yap.watch'; // { volume 0–100, muted } — this device only
 const MIN_SEATS = 6; // empty chairs fill the row so it reads as a theater
 const GAP = 10; // mini player ↔ composer / window edge
@@ -59,7 +61,7 @@ function loadPrefs() {
 /** What our player last told us. `video` is what we asked it to load. */
 const freshPlayer = (video = null) => ({
   ready: false, talking: false, state: UNSTARTED, sampleState: UNSTARTED,
-  time: null, timeAt: 0, duration: 0, video, started: false,
+  time: null, timeAt: 0, duration: 0, video, started: false, error: 0,
 });
 
 export class WatchParty {
@@ -97,6 +99,7 @@ export class WatchParty {
     this.playTries = 0;
     this.pauseAskedAt = 0;
     this.seekAt = 0;
+    this.seeks = 0; // catch-up seeks in a row that didn't catch up (a slow connection)
     this.nextAt = 0;
     this.volAt = 0;
     this.touchedAt = -Infinity; // the person last clicked into the player
@@ -142,6 +145,7 @@ export class WatchParty {
     const s = msg.state;
     this.state = s;
     this.offset = Number(msg.now) - Date.now() || 0;
+    this.seeks = 0; // someone changed the show: follow it promptly
     if (prev) this.describe(prev, s);
     if (s.playing && (!prev?.playing || prev.videoId !== s.videoId)) {
       this.playAskedAt = 0;
@@ -314,6 +318,7 @@ export class WatchParty {
     }
     if (st === PLAYING) {
       p.started = true;
+      p.error = 0;
       this.unblockTried = false;
       this.setBlocked(0);
     }
@@ -376,6 +381,9 @@ export class WatchParty {
   }
 
   onPlayerError(code) {
+    // It can't play this one: not a case for "Click to join the show".
+    this.player.error = code || -1;
+    this.setBlocked(0);
     const why = { 2: "that link's video id is wrong", 5: "the browser can't play it", 100: 'it was removed or is private', 101: 'its owner turned off embedding', 150: 'its owner turned off embedding', 153: 'the player was set up wrong' }[code];
     this.showNote(`YouTube won't play this one here${why ? `: ${why}` : ''} (error ${code}). Try Next or another link.`);
   }
@@ -430,7 +438,7 @@ export class WatchParty {
     const want = this.expected();
     if (p.video !== s.videoId) {
       // A new video: same iframe, so nothing reloads (and autoplay stays allowed).
-      Object.assign(p, { video: s.videoId, time: null, duration: 0, started: false });
+      Object.assign(p, { video: s.videoId, time: null, duration: 0, started: false, error: 0 });
       this.setBlocked(0);
       this.cmd(s.playing ? 'loadVideoById' : 'cueVideoById', [s.videoId, Math.floor(want)]);
       this.applyVolume();
@@ -438,6 +446,7 @@ export class WatchParty {
       this.playTries = 1;
       return;
     }
+    if (p.error) return; // YouTube won't play it here (the note says so); Next or another link moves on
     if (p.duration > 0 && want > p.duration + 2) {
       // It should have ended by now (everyone was away): move on.
       if (p.state !== ENDED && now - this.nextAt > 5000) {
@@ -471,10 +480,19 @@ export class WatchParty {
       }
     }
     // Seeking during the very first buffer knocks YouTube back to "unstarted", so wait until it has played.
-    if (p.time !== null && (p.started ? [PLAYING, PAUSED, BUFFERING].includes(p.state) : p.state === PAUSED)
-      && Math.abs(this.localTime() - want) > DRIFT && now - this.seekAt > 2500) {
+    if (p.time === null || !(p.started ? [PLAYING, PAUSED, BUFFERING].includes(p.state) : p.state === PAUSED)) return;
+    if (Math.abs(this.localTime() - want) <= DRIFT) {
+      this.seeks = 0;
+      return;
+    }
+    // On a slow connection every seek buffers, and buffering falls behind again: let a seek load,
+    // and wait longer each time it didn't catch up, so the video plays (a little behind) instead of
+    // seeking forever.
+    if (p.state === BUFFERING && now - this.seekAt < SEEK_LOAD_MS) return;
+    if (now - this.seekAt > SEEK_EVERY_MS * 2 ** Math.min(this.seeks, 3)) {
       this.cmd('seekTo', [want, true]);
       this.seekAt = now;
+      this.seeks += 1;
     }
   }
 
@@ -742,7 +760,7 @@ export class WatchParty {
         this.savePrefs();
         this.applyVolume();
         return this.renderTransport();
-      case 'remove': return this.host.send({ t: 'watch.queue', remove: Number(el.dataset.index) });
+      case 'remove': return this.host.send({ t: 'watch.queue', remove: Number(el.dataset.index), id: el.dataset.id }); // (by id: the queue may move first)
       case 'join': return this.join();
       case 'leave':
       case 'close': return this.leave();
@@ -826,7 +844,7 @@ export class WatchParty {
         <li class="watch-q-item">
           <img class="watch-thumb" src="${esc(thumb(item.id))}" alt="" loading="lazy">
           <span class="watch-q-text"><span class="watch-q-title">${esc(titleOf(item))}</span><small class="muted">added by ${esc(this.name(item.by))}</small></span>
-          <button class="icon-btn tiny" type="button" data-watch="remove" data-index="${i}" title="Remove from the queue" aria-label="Remove ${esc(titleOf(item))}">${icon('x')}</button>
+          <button class="icon-btn tiny" type="button" data-watch="remove" data-index="${i}" data-id="${esc(item.id)}" title="Remove from the queue" aria-label="Remove ${esc(titleOf(item))}">${icon('x')}</button>
         </li>`).join('')
       : '<li class="watch-q-empty muted">Nothing queued. Paste a link above and press Add to queue.</li>';
 

@@ -9,10 +9,10 @@ import { plainText } from '../format.js';
 import { findMentions } from '../mentions.js';
 import { renderAll } from '../app.js';
 import { $, MAX_FRAME, coarsePointer, conn, firstTextChannel, state } from './state.js';
-import { hideToast, toast } from './ui.js';
+import { autosize, hideToast, toast } from './ui.js';
 import { setView } from './places.js';
 import { renderChannels } from './sidebar.js';
-import { nodeCache, renderMessages, renderTyping } from './messages.js';
+import { nearBottom, nodeCache, renderMessages, renderNewPill, renderTyping } from './messages.js';
 import { cancelEdit, cancelReply, putBack } from './composer.js';
 import { renderResultList } from './search.js';
 import { renderShelfGrid } from './extras.js';
@@ -73,6 +73,11 @@ export function onMessage({ message: m, nonce }) {
   if (m.uid === settings.uid && !(channel?.kind === 'personal' && !nonce)) markRead(m.channelId, m.ts);
   if (m.channelId === settings.channel) {
     renderMessages({ keep: nonce ? 'bottom' : 'auto' });
+    // Scrolled up reading older ones: say there's something new below.
+    if (m.uid !== settings.uid && state.view === 'chat' && !nearBottom()) {
+      state.newBelow = true;
+      renderNewPill();
+    }
     renderTyping();
     if (document.visibilityState === 'visible') markRead(m.channelId);
   }
@@ -226,6 +231,8 @@ export function openChannel(id) {
   if (id !== settings.channel) {
     state.since.delete(settings.channel);
     rememberSince(id);
+    swapDraft(settings.channel, id);
+    state.newBelow = false;
   }
   save({ channel: id });
   if (!state.history.has(id)) loadLatest(id);
@@ -236,19 +243,43 @@ export function openChannel(id) {
   if (!coarsePointer) $('input').focus();
 }
 
+/**
+ * Each channel keeps what you'd typed in it (in memory, until you send it):
+ * switching puts this one's away and brings back the other's, so Enter never
+ * sends it to the wrong channel.
+ */
+function swapDraft(from, to) {
+  const input = $('input');
+  const text = input.value;
+  const theirs = state.drafts.get(to) ?? '';
+  state.drafts.delete(to);
+  if (state.channels.has(from)) {
+    if (text.trim()) state.drafts.set(from, text);
+    else state.drafts.delete(from);
+    input.value = theirs;
+  } else {
+    // (The channel you were typing in is gone: what you typed comes along rather than vanish.)
+    state.drafts.delete(from);
+    input.value = theirs && text.trim() ? `${theirs}\n${text}` : theirs || text;
+  }
+  autosize();
+}
+
 export function loadLatest(channelId) {
   if (!conn?.open) return;
   state.history.set(channelId, { messages: [], hasMore: true, loading: true, mode: 'latest' });
   conn.send({ t: 'history', channelId, limit: 50 });
 }
 
+/** Ask for the page before the oldest message shown. False if there's nothing to ask (or no connection). */
 export function loadOlder(channelId) {
   const h = state.history.get(channelId);
-  if (!h || h.loading || !h.hasMore || !h.messages.length || !conn?.open) return;
+  if (!h || h.loading || !h.hasMore || !h.messages.length || !conn?.open) return false;
   h.loading = true;
   h.mode = 'older';
   const oldest = h.messages[0];
   conn.send({ t: 'history', channelId, limit: 50, before: oldest.ts, beforeId: oldest.id });
+  return true;
 }
 
 export function markRead(channelId, ts) {
@@ -276,6 +307,24 @@ export function updateTitle() {
   const menu = document.querySelector('[data-action="toggle-sidebar"]');
   menu?.classList.toggle('has-unread', elsewhere);
   menu?.classList.toggle('has-mention', [...state.mentions.entries()].some(([id, n]) => n && id !== settings.channel));
+  updateAppBadge();
+}
+
+let badgeShown = -1; // (-1: whatever the icon was left showing gets set right on the first look)
+/**
+ * The installed app's icon (Home Screen, Dock, taskbar) shows your unread
+ * @mentions and replies: what the sidebar's mention badges add up to.
+ * Browsers without app badges (or a page that isn't installed) do nothing.
+ */
+function updateAppBadge() {
+  if (typeof navigator.setAppBadge !== 'function') return;
+  let n = 0;
+  for (const c of state.channels.values()) if (c.kind === 'text') n += state.mentions.get(c.id) ?? 0;
+  if (n === badgeShown) return;
+  badgeShown = n;
+  try {
+    (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
+  } catch {}
 }
 
 /** Does this message @-mention me (or @everyone / @here)? */
@@ -326,7 +375,13 @@ function maybeNotify(m) {
     if (isQuietNow(state.notify?.quiet, true)) return;
     if (document.visibilityState !== 'visible' || m.channelId !== settings.channel) sounds.mention();
     if (!state.browserPush && settings.desktopNotify !== 'off' && document.visibilityState !== 'visible' && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-      new Notification(`${state.users.get(m.uid)?.name ?? 'Someone'} mentioned you`, { body: plainText(m.body, { line: true }).slice(0, 200), tag: m.channelId, icon: '/icon.svg' });
+      const n = new Notification(`${state.users.get(m.uid)?.name ?? 'Someone'} mentioned you`, { body: plainText(m.body, { line: true }).slice(0, 200), tag: m.channelId, icon: '/icon.svg' });
+      // Clicked: straight to the message that mentions you (like a message notification opens its channel).
+      n.onclick = () => {
+        focus();
+        openAndJump(m.channelId, m.id);
+        n.close();
+      };
     }
     return;
   }
@@ -356,7 +411,7 @@ export async function loadUntil(channelId, id) {
     else if (!h.hasMore) return false;
     else {
       const done = new Promise((r) => (h.waiters ??= []).push(r));
-      loadOlder(channelId);
+      if (!loadOlder(channelId)) return false; // (offline: no page is coming)
       await done;
     }
   }

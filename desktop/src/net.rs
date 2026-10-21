@@ -1,6 +1,7 @@
 //! The one WebSocket to the server: heartbeat (`ping` every 15 s, dead after
 //! 10 s without `pong`) and reconnect with jittered exponential backoff
-//! (0.5 s -> 10 s), exactly as PROTOCOL.md describes.
+//! (0.5 s -> 10 s), exactly as PROTOCOL.md describes. An attempt that hasn't
+//! connected in 15 s counts as failed (a browser has its own such limit).
 //!
 //! The invite key can change while we're connected (the owner reset the main
 //! link: `key`, `ready.key`), so each new attempt reads the current one.
@@ -15,6 +16,10 @@ use tokio_tungstenite::tungstenite::{self, Message as WsMessage};
 
 const HEARTBEAT: Duration = Duration::from_secs(15);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
+/// One attempt (TCP, TLS, the upgrade) gives up after this: a network that
+/// swallows packets (a captive portal, Wi‑Fi waking up) would otherwise hold
+/// it for the OS's own timeout, or forever in the TLS handshake.
+const CONNECT_TIMEOUT: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(15) };
 /// The server closes a socket with this when its invite key is wrong and it
 /// didn't sign in with a device token (PROTOCOL.md › HTTP › Resetting the main link).
 /// (It also closes with 4003 "banned" or "denied", right after `error banned`
@@ -101,11 +106,11 @@ pub fn spawn(server: String, key: String, events: mpsc::UnboundedSender<NetEvent
                 }
             };
             let attempt = tokio::select! {
-                r = tokio_tungstenite::connect_async(request) => r,
+                r = tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(request)) => r,
                 _ = st.notified() => return,
             };
             let (unauthorized, reason) = match attempt {
-                Ok((ws, _resp)) => {
+                Ok(Ok((ws, _resp))) => {
                     retry = 0;
                     // Drop anything queued while we were offline; the core re-sends what matters on `ready`.
                     while out_rx.try_recv().is_ok() {}
@@ -119,11 +124,12 @@ pub fn spawn(server: String, key: String, events: mpsc::UnboundedSender<NetEvent
                     };
                     (wrong_key(code, &reason), reason)
                 }
-                Err(tungstenite::Error::Http(resp)) => {
+                Ok(Err(tungstenite::Error::Http(resp))) => {
                     let code = resp.status().as_u16();
                     (code == 401, format!("HTTP {code}"))
                 }
-                Err(e) => (false, e.to_string()),
+                Ok(Err(e)) => (false, e.to_string()),
+                Err(_) => (false, "timed out connecting".to_string()),
             };
             if events.send(NetEvent::Closed { unauthorized, reason }).is_err() {
                 return;
@@ -166,7 +172,7 @@ async fn run(ws: Ws, out_rx: &mut mpsc::UnboundedReceiver<String>, events: &mpsc
                                 return ("client gone".into(), None);
                             }
                         }
-                        Err(e) => log::warn!("bad frame from server: {e}: {}", &text[..text.len().min(200)]),
+                        Err(e) => log::warn!("bad frame from server: {e}: {}", head(text, 200)),
                     }
                 }
                 Some(Ok(WsMessage::Close(frame))) => return closed_by_server(frame.as_ref()),
@@ -197,6 +203,16 @@ async fn run(ws: Ws, out_rx: &mut mpsc::UnboundedReceiver<String>, events: &mpsc
     }
 }
 
+/// At most `max` bytes of `text`, cut at a character boundary (a byte offset
+/// inside an emoji or an accented letter would panic, and release builds abort).
+fn head(text: &str, max: usize) -> &str {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// The server's close frame: its code and words ("closed by server: 4003 wrong invite key").
 fn closed_by_server(frame: Option<&tungstenite::protocol::CloseFrame>) -> (String, Option<u16>) {
     match frame {
@@ -213,6 +229,40 @@ fn closed_by_server(frame: Option<&tungstenite::protocol::CloseFrame>) -> (Strin
 mod tests {
     use super::*;
     use tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+
+    /// A server that takes the connection but never answers the upgrade: the
+    /// attempt gives up (and the app says so, then tries again) instead of
+    /// "Connecting…" for ever.
+    #[tokio::test]
+    async fn a_silent_server_times_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let held = tokio::spawn(async move {
+            let mut kept = Vec::new();
+            while let Ok((s, _)) = listener.accept().await {
+                kept.push(s);
+            }
+        });
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let net = spawn(format!("http://{addr}"), "k".into(), tx);
+        let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("an answer in time");
+        match ev {
+            Some(NetEvent::Closed { unauthorized: false, reason }) => assert!(reason.contains("timed out"), "{reason}"),
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+        net.stop.notify_waiters();
+        held.abort();
+    }
+
+    /// A bad frame's log line never cuts a character in half (that panicked, and the app aborted).
+    #[test]
+    fn log_lines_cut_at_characters() {
+        assert_eq!(head("hello", 200), "hello");
+        let text = format!("{}é and more", "a".repeat(199));
+        assert_eq!(head(&text, 200), "a".repeat(199), "é starts at byte 199 and takes two");
+        assert_eq!(head("😀😀", 5), "😀");
+        assert_eq!(head("😀", 3), "");
+    }
 
     /// A 4003 close is "wrong invite key"; any other close is just a closed socket.
     #[test]

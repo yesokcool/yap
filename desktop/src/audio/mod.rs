@@ -1,6 +1,6 @@
 //! Audio: capture -> 80 Hz high-pass -> echo cancellation (`echo.rs`, fed
-//! with what the speakers play) -> RNNoise -> automatic gain -> the
-//! transmit gate (`gate.rs`: voice activity / push-to-talk with fades, a
+//! with what the speakers play) -> RNNoise -> automatic gain -> Mic volume
+//! (`dsp::MicGain`) -> the transmit gate (`gate.rs`: voice activity / push-to-talk with fades, a
 //! release tail and a pre-roll) -> mute -> 20 ms frames (fanned out to every
 //! peer's Opus encoder), and the playout mixer that pulls every peer's jitter
 //! buffer from the output device's clock.
@@ -78,6 +78,9 @@ pub struct Gate {
     pub noise_suppression: AtomicBool,
     /// Automatic gain (V12): speech towards −23 dBFS, at most +20 dB.
     pub auto_gain: AtomicBool,
+    /// Settings › Voice › Mic volume (1 = 100 %, 0–2), after the automatic
+    /// gain and before the gate and the meter.
+    pub mic_gain: AtomicF32,
     /// Echo cancellation (AEC3 on the mic, against what the speakers play).
     pub echo_cancellation: AtomicBool,
     /// What the echo canceller is doing (running, its delay estimate), for
@@ -121,6 +124,7 @@ impl Gate {
             vad_threshold: AtomicF32::new(-50.0),
             noise_suppression: AtomicBool::new(true),
             auto_gain: AtomicBool::new(true),
+            mic_gain: AtomicF32::new(1.0),
             echo_cancellation: AtomicBool::new(true),
             echo: Mutex::new(echo::EchoStats::default()),
             test: AtomicBool::new(false),
@@ -1050,6 +1054,7 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
     let mut highpass = dsp::HighPass::new(RATE, 80.0);
     let mut denoise = nnnoiseless::DenoiseState::new();
     let mut agc = dsp::Agc::default();
+    let mut mic_gain = dsp::MicGain::new(RATE);
     let mut tx = gate::Gate::new(RATE, gate.tx_mode(), gate.vad_threshold.get());
     let mut work = [0f32; BLOCK];
     let mut ns_in = [0f32; BLOCK];
@@ -1118,6 +1123,9 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
                 agc.process(&mut work, voice);
                 gate.agc_db.set(agc.gain_db());
             }
+            // Mic volume: after the automatic gain (which would otherwise
+            // undo it), before the gate and the meter (so they hear it too).
+            mic_gain.process(&mut work, gate.mic_gain.get());
             // The gate: settings from the UI / PTT poller, then 10 ms through it.
             let before = (tx.mode(), tx.is_open());
             tx.set_mode(gate.tx_mode());

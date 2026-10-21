@@ -24,12 +24,20 @@ export const state = {
   waiting: new Map(),
   /** channelId -> unread @mentions of me */
   mentions: new Map(),
+  /** channelId -> what you'd typed there and not sent (the open channel's is the message box itself) */
+  drafts: new Map(),
+  /** Someone wrote below while you're scrolled up in the open channel (the "↓ New messages" pill) */
+  newBelow: false,
+  /** A message to open once connected ({ channelId, id }): a tapped browser push (sw.js) */
+  openMessage: null,
   view: 'chat', // chat | board
   config: null,
   /** channelId -> { messages, hasMore, loading, mode: 'latest' | 'older' } */
   history: new Map(),
   /** nonce -> optimistic message, shown dimmed until the server echoes it */
   pending: new Map(),
+  /** Pictures being prepared and uploaded right now (they aren't in the outbox until they're up). */
+  sendingPictures: 0,
   /**
    * Every `send` the server hasn't answered yet, in the order they were made
    * (chat.js › Sending): { nonce, frame, draft?, tries, out } — `out` = its
@@ -40,6 +48,8 @@ export const state = {
   typing: new Map(),
   voiceChannel: null, // server-confirmed voice channel
   voiceWanted: null, // the one we're joining / in; survives reconnects
+  /** The call this tab was in before the page reloaded: { channelId, at } → "You were in …" [Rejoin] (voice-ui.js). */
+  rejoin: null,
   /** This session's voice resume key (ready.resumeKey). */
   resumeKey: null,
   /** Our call while the socket is down: { sid, key, at, channelId } (PROTOCOL.md › Voice › Keeping calls across reconnects). */

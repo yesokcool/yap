@@ -65,6 +65,7 @@ struct ChannelListView: View {
             VStack(spacing: 0) {
                 AccountNotices98()
                 HangNotice98()
+                RejoinNotice98()
                 UserPanel()
                 if model.voice.isInVoice {
                     VoiceBar()

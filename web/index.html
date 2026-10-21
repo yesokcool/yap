@@ -96,6 +96,7 @@
       </header>
       <div class="banner" id="banner" hidden></div>
       <div class="update-bar" id="update-bar" hidden></div>
+      <div class="update-bar" id="rejoin-bar" hidden></div>
       <div class="update-bar alert-bar" id="signin-bar" hidden></div>
       <div class="update-bar" id="weak-bar" hidden></div>
       <div class="update-bar hang-bar" id="hang-bar" hidden></div>
@@ -108,6 +109,7 @@
       <div class="messages" id="messages" role="region" aria-labelledby="channel-title">
         <button class="jump-pill" id="jump-pill" type="button" data-action="jump-unread" hidden>↑ Jump to first unread</button>
         <div class="message-list" id="message-list"></div>
+        <div class="new-pill-wrap" aria-live="polite"><button class="jump-pill new-pill" id="new-pill" type="button" data-action="new-below" hidden>↓ New messages</button></div>
       </div>
       <div class="board-view" id="board-view" hidden></div>
       <div class="draw-view" id="draw-view" hidden></div>
@@ -483,6 +485,7 @@
             </div>
             <small class="muted" id="music-vad-note" hidden>Music mode keeps your mic open in voice activity mode, so quiet passages don't cut out.</small>
           </div>
+          <label class="field"><span>Mic volume <output id="mic-volume-out">100%</output> <small class="muted">— how loud you are to everyone; past 100% boosts a quiet mic</small></span><input type="range" name="micVolume" min="0" max="200" step="5"></label>
           <div class="field mic-level">
             <span data-show-mode="vad">Sensitivity <small class="muted">— speak; the bar should cross the line</small></span>
             <span data-show-mode="ptt open">Mic level <small class="muted">— speak; the bar shows what your mic hears</small></span>

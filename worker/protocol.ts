@@ -430,7 +430,7 @@ export type ClientMessage =
   /** Change what's playing: a new video (starts at 0, playing), play/pause, or seek. */
   | { t: 'watch.set'; videoId?: string; playing?: boolean; position?: number }
   /** Queue: add a video id, or remove the item at an index (≤ 20 queued). */
-  | { t: 'watch.queue'; add?: string; remove?: number }
+  | { t: 'watch.queue'; add?: string; remove?: number; id?: string }
   /** The video ended: go to the next in the queue (only if `expect` is still what's playing). */
   | { t: 'watch.next'; expect: string }
   | { t: 'emoji.delete'; id: string }

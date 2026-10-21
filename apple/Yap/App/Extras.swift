@@ -368,3 +368,40 @@ enum CatchUp {
     /// something new (one is just that channel's dot), like the web.
     static let showsFrom = 2
 }
+
+// MARK: - New messages below
+
+/// The "↓ New messages" pill: you're scrolled up in the open channel and a
+/// message from someone else comes in below. It goes once you're at the
+/// bottom (or tap it to get there); a channel switch starts over (one per
+/// open channel). The web's `#new-below`.
+struct NewMessagesPill: Equatable {
+    /// Showing.
+    private(set) var shows = false
+    /// The list is at its end (the newest message on screen).
+    private(set) var atBottom = true
+    /// The newest message so far (id, time), to tell a new one from a page of older ones.
+    private var newest: (id: String, ts: Int)?
+
+    static func == (a: Self, b: Self) -> Bool {
+        a.shows == b.shows && a.atBottom == b.atBottom && a.newest?.id == b.newest?.id
+    }
+
+    mutating func scrolled(atBottom bottom: Bool) {
+        atBottom = bottom
+        if bottom { shows = false }
+    }
+
+    /// The channel's newest message is now `message` (nil: nothing loaded).
+    mutating func newest(_ message: Message?, myUid: String) {
+        guard let message else { return }
+        defer { newest = (message.id, message.ts) }
+        guard let before = newest, message.id != before.id, message.ts > before.ts else { return }
+        if message.uid != myUid, !atBottom { shows = true }
+    }
+
+    /// Tapped: on the way to the bottom.
+    mutating func tapped() {
+        shows = false
+    }
+}

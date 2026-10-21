@@ -16,6 +16,29 @@ pub fn show(title: &str, body: &str) {
     });
 }
 
+/// The Dock icon's badge: how many mentions are unread (none at 0). macOS
+/// only, and on the main thread (the UI calls it from its frame).
+#[cfg(target_os = "macos")]
+pub fn dock_badge(count: u32) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::NSString;
+    let Some(cls) = AnyClass::get(c"NSApplication") else { return };
+    let label = (count > 0).then(|| NSString::from_str(&if count > 99 { "99+".to_string() } else { count.to_string() }));
+    // SAFETY: plain AppKit messages to the shared application and its Dock
+    // tile, on the main thread; a missing one is checked, not messaged.
+    unsafe {
+        let app: *mut AnyObject = msg_send![cls, sharedApplication];
+        let Some(app) = app.as_ref() else { return };
+        let tile: *mut AnyObject = msg_send![app, dockTile];
+        let Some(tile) = tile.as_ref() else { return };
+        let _: () = msg_send![tile, setBadgeLabel: label.as_deref()];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn dock_badge(_count: u32) {}
+
 #[cfg(target_os = "windows")]
 mod platform {
     use windows::Data::Xml::Dom::XmlDocument;
@@ -73,7 +96,8 @@ mod platform {
 mod platform {
     pub fn show(title: &str, body: &str) -> Result<(), String> {
         std::process::Command::new("notify-send")
-            .args(["--app-name=Yap", "--icon=user-available", title, body])
+            // "--": a name or message starting with "-" is text, not an option (notify-send refused it).
+            .args(["--app-name=Yap", "--icon=user-available", "--", title, body])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()

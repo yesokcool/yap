@@ -465,6 +465,9 @@ impl Core {
                     if (elsewhere || !focused) && !quiet {
                         self.chime(Chime::Mention);
                     }
+                    if !focused && !quiet {
+                        self.shared.model.lock().attention += 1;
+                    }
                     if !focused && notify && !quiet {
                         let replied = message.reply.as_ref().is_some_and(|r| r.uid == self.shared.model.lock().config.uid);
                         let title = if replied { format!("{from} replied") } else { format!("{from} mentioned you") };

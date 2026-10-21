@@ -44,6 +44,77 @@ export const hasRelay = (servers) => servers.some((s) => [s.urls].flat().some((u
 
 const GHOST_MS = 30_000;
 
+// ── Rejoin after a reload ─────────────────────────────────────────────────
+// While you're in a call, this tab remembers where (sessionStorage: this tab
+// only, gone when it closes). After a reload, a refresh or a crash — anything
+// but leaving — a bar offers to go back in; a click is needed anyway to start
+// the audio. (PROTOCOL.md › Voice › Rejoin after a restart.)
+
+const CALL_KEY = 'yap.call';
+const REJOIN_MS = 10 * 60_000;
+let callNoteTimer = null;
+let rejoinTimer = null;
+
+/** In a call: where, and when we last were (again every 30 s, and as the page goes). */
+function noteCall() {
+  clearInterval(callNoteTimer);
+  callNoteTimer = setInterval(writeCallNote, 30_000);
+  writeCallNote();
+}
+
+function writeCallNote() {
+  if (!state.voiceChannel) return;
+  try {
+    sessionStorage.setItem(CALL_KEY, JSON.stringify({ channelId: state.voiceChannel, at: Date.now() }));
+  } catch {}
+}
+
+/** Left on purpose (or taken out): nothing to come back to. */
+function forgetCall() {
+  clearInterval(callNoteTimer);
+  callNoteTimer = null;
+  state.rejoin = null;
+  try {
+    sessionStorage.removeItem(CALL_KEY);
+  } catch {}
+}
+
+// What this tab's last page was in, read once as the page loads (before it joins anything).
+try {
+  const last = JSON.parse(sessionStorage.getItem(CALL_KEY) || 'null');
+  if (typeof last?.channelId === 'string' && Number.isFinite(last.at) && Date.now() - last.at <= REJOIN_MS) state.rejoin = last;
+} catch {}
+addEventListener('pagehide', writeCallNote);
+
+/** "You were in Lounge." [Rejoin] ×, while it's still a voice channel and you left it ≤ 10 minutes ago. */
+export function renderRejoinBar() {
+  const bar = $('rejoin-bar');
+  const last = state.rejoin;
+  const channel = last && state.channels.get(last.channelId);
+  const left = last ? last.at + REJOIN_MS - Date.now() : 0;
+  if (last && left <= 0) forgetCall();
+  const show = Boolean(channel?.kind === 'voice' && left > 0 && !state.voiceWanted && state.status === 'online');
+  bar.hidden = !show;
+  clearTimeout(rejoinTimer);
+  if (!show) return;
+  bar.innerHTML = `<span>You were in <b>${esc(channel.name)}</b>.</span><span class="spacer"></span>
+    <button class="btn small primary" type="button" data-action="rejoin-voice">Rejoin</button>
+    <button class="icon-btn tiny" type="button" data-action="rejoin-dismiss" aria-label="Dismiss" title="Dismiss">${icon('x')}</button>`;
+  rejoinTimer = setTimeout(renderRejoinBar, left + 50);
+}
+
+/** The bar's Rejoin: the same as clicking the channel. */
+export function rejoinVoice() {
+  const channelId = state.rejoin?.channelId;
+  $('app').classList.remove('sidebar-open');
+  if (channelId) joinVoice(channelId);
+}
+
+export function dismissRejoin() {
+  forgetCall();
+  renderRejoinBar();
+}
+
 export function onVoice(msg) {
   if (msg.sid === state.staleSid) return; // our own old session going (see onReady): no chime, no "reconnecting…"
   const session = state.sessions.get(msg.sid);
@@ -75,22 +146,32 @@ export function onVoice(msg) {
         for (const sid of [...state.ghosts.keys()]) dropGhost(sid);
         voice.hangupAll();
         voice.enter(others);
+        // Moved away from a screen we were watching: its picture can't follow us here.
+        if (state.screenSid && state.sessions.get(state.screenSid)?.voice?.channelId !== msg.channelId) stopWatchingScreen();
       }
       if (!state.rejoining) sounds.join();
       state.rejoining = false;
       endResume();
       callJoined(msg.channelId, others, { handover });
       startStats();
+      noteCall();
     } else if (!msg.channelId && state.voiceChannel) {
       voice.hangupAll();
       state.voiceChannel = null;
       // Not a switch we asked for (e.g. the channel was archived): we're out.
       if (state.voiceWanted === prev) {
         state.voiceWanted = null;
+        forgetCall();
         callEnded('Yap took you out of the channel (it may have been archived)');
+        // The rest of leaving, as leaveVoice() does it (voice.stop() ends a screen share too).
+        stopClips();
+        soundboard?.render();
+        stopWatchingScreen();
         voice.stop();
+        state.speaking.clear();
         sounds.leave();
         stopStats();
+        maybeUpdate(); // (an update that waited for the call can go now)
       }
     }
   } else if (state.voiceChannel) {
@@ -295,6 +376,7 @@ export async function joinVoice(channelId) {
   if (!channelId || state.voiceWanted === channelId) return;
   if (state.status !== 'online') return toast('Not connected yet.');
   state.voiceWanted = channelId;
+  state.rejoin = null; // (any voice channel: the "You were in …" bar has done its job)
   voice.setChannelBitrate(state.channels.get(channelId)?.bitrate ?? null);
   renderVoicePanel();
   renderHeader(); // a Place's "voice keeps going"
@@ -309,10 +391,12 @@ export async function joinVoice(channelId) {
   voice.setMuted(settings.muted);
   voice.setDeafened(settings.deafened);
   // `resume`: we keep calls across reconnects. `prev`/`proof`: this join continues our call from before the reconnect.
+  // `screen`: still sharing (back after a reconnect, or moving to another channel: it goes on there, like the desktop app).
   const resume = state.resume && state.resume.channelId === channelId ? state.resume : null;
   conn.send({
     t: 'voice.join', channelId, muted: settings.muted || !voice.micOk, deafened: settings.deafened, resume: true,
-    ...(resume ? { prev: resume.sid, proof: resume.key, ...(voice.screenStream ? { screen: true } : {}) } : {}),
+    ...(resume ? { prev: resume.sid, proof: resume.key } : {}),
+    ...(voice.screenStream ? { screen: true } : {}),
   });
 }
 
@@ -321,6 +405,7 @@ export function leaveVoice() {
   state.voiceWanted = null;
   state.voiceChannel = null;
   state.rejoining = false;
+  forgetCall();
   endResume();
   for (const sid of [...state.ghosts.keys()]) dropGhost(sid, { quiet: true });
   conn?.send({ t: 'voice.leave' });
@@ -401,11 +486,23 @@ export function syncDuck() {
 
 function startStats() {
   stopStats();
-  statsTimer = setInterval(async () => {
-    state.voiceStats = await voice.stats();
-    callStats(state.voiceStats);
-    renderVoicePanel();
+  let busy = false;
+  const timer = setInterval(async () => {
+    if (busy) return; // (a slow round still going: don't pile them up)
+    busy = true;
+    try {
+      const stats = await voice.stats();
+      if (statsTimer !== timer) return; // the call ended (or another began) meanwhile: not this one's numbers
+      state.voiceStats = stats;
+      callStats(stats);
+      renderVoicePanel();
+    } catch (err) {
+      console.warn('call stats failed', err);
+    } finally {
+      busy = false;
+    }
   }, 2000);
+  statsTimer = timer;
   syncDuck();
 }
 
@@ -538,6 +635,7 @@ function ownWeakTitle({ lost }) {
 }
 
 export function renderVoicePanel() {
+  renderRejoinBar();
   const panel = $('voice-panel');
   if (!state.voiceWanted) {
     panel.hidden = true;

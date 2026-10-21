@@ -414,6 +414,8 @@ pub fn places(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut V
 #[derive(Clone, Copy, PartialEq)]
 enum Bar {
     Hang,
+    /// "You were in Lounge." after a restart out of a call.
+    Rejoin,
     Offline,
     SigninAlert,
     /// The "Choose a password" prompt (`ready.weakPin`, until Later).
@@ -436,6 +438,7 @@ fn offline(m: &Model) -> bool {
 fn bars_now(app: &App, m: &Model) -> Vec<Bar> {
     let on = |b: &Bar| match b {
         Bar::Hang => super::extras::hang_notice(app, m).is_some(),
+        Bar::Rejoin => rejoin_offer(app, m).is_some(),
         Bar::Offline => offline(m),
         Bar::SigninAlert => m.signin_alert.is_some(),
         Bar::ChoosePassword => m.password_prompt().is_some(),
@@ -443,8 +446,33 @@ fn bars_now(app: &App, m: &Model) -> Vec<Bar> {
         // Only the owner and mods let people in (an older server told everyone).
         Bar::Joins => !m.join_requests.is_empty() && m.am_moderator(),
     };
-    let order = [Bar::Hang, Bar::SigninAlert, Bar::ChoosePassword, Bar::Offline, Bar::NoPassword, Bar::Joins];
+    let order = [Bar::Hang, Bar::Rejoin, Bar::SigninAlert, Bar::ChoosePassword, Bar::Offline, Bar::NoPassword, Bar::Joins];
     order.into_iter().filter(on).collect()
+}
+
+/// The call Yap was in before it restarted (`App::rejoin`), while it's still
+/// worth offering: connected, not in voice, the channel still there, under 10
+/// minutes ago. (channel id, name.)
+pub fn rejoin_offer(app: &App, m: &Model) -> Option<(String, String)> {
+    let call = app.rejoin.as_ref()?;
+    if m.status != Status::Online || m.voice_wanted.is_some() || !call.offer(&m.config.server, crate::core::now_ms()) {
+        return None;
+    }
+    m.channels.iter().find(|c| c.id == call.channel && c.is_voice()).map(|c| (c.id.clone(), c.name.clone()))
+}
+
+/// Once the call can't be offered any more (you joined voice, it's too old,
+/// you're on another server), it's gone for good this run.
+pub fn settle_rejoin(app: &mut App, m: &Model, ctx: &egui::Context) {
+    let Some(call) = &app.rejoin else { return };
+    let now = crate::core::now_ms();
+    if m.voice_wanted.is_some() || !call.offer(&m.config.server, now) {
+        app.rejoin = None;
+        return;
+    }
+    // Gone on time even if nothing else repaints.
+    let left = (call.at + crate::config::REJOIN_MS - now).max(0) as u64;
+    ctx.request_repaint_after(std::time::Duration::from_millis(left + 50));
 }
 
 /// A bar button: label, kind, size (None = the standard 75×23).
@@ -554,6 +582,24 @@ pub fn bars(app: &mut App, ui: &mut egui::Ui, m: &Model, acts: &mut Vec<Act>) {
                                 acts.push(Act::Cmd(Cmd::JoinVoice(c.clone())));
                             }
                             app.hang_dismissed = Some(id.clone());
+                        }
+                        None => {}
+                    }
+                });
+            }
+            Bar::Rejoin => {
+                let Some((id, name)) = rejoin_offer(app, m) else { continue };
+                look.bar(ui, |ui| {
+                    let words = format!("You were in {name}.");
+                    // Rejoin joins as clicking the channel does; Dismiss (the web's ×) forgets it.
+                    match look.row(ui, Some("volume"), &[(&words, true)], &[("Dismiss", theme::Btn::Normal, Some(vec2(64.0, 21.0))), ("Rejoin", theme::Btn::Default, Some(vec2(64.0, 21.0)))]) {
+                        Some(0) => {
+                            app.rejoin = None;
+                            acts.push(Act::Config(Box::new(|c| c.last_call = None)));
+                        }
+                        Some(_) => {
+                            app.rejoin = None;
+                            acts.push(Act::Cmd(Cmd::JoinVoice(id.clone())));
                         }
                         None => {}
                     }

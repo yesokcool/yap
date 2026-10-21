@@ -1,4 +1,5 @@
-//! Since you left: the "New since …" divider, its jump pill, and Catch up.
+//! Since you left: the "New since …" divider, its jump pill, "↓ New
+//! messages" while you're scrolled up, and Catch up.
 
 use super::*;
 
@@ -32,13 +33,24 @@ pub fn unread_divider(ui: &mut egui::Ui, words: &str, p: &Pal) -> Rect {
 
 /// "↑ Jump to first unread", over the top of the message list while the divider is off screen.
 pub fn jump_pill(ui: &mut egui::Ui, viewport: Rect, p: &Pal) -> bool {
-    let label = "↑ Jump to first unread";
+    pill(ui, viewport, "↑ Jump to first unread", true, "jump-unread", p)
+}
+
+/// "↓ New messages", over the bottom of the message list (just above the
+/// composer) while you're scrolled up and something new came in below.
+pub fn new_below_pill(ui: &mut egui::Ui, viewport: Rect, p: &Pal) -> bool {
+    pill(ui, viewport, "↓ New messages", false, "new-below", p)
+}
+
+/// A pill over the message list, at its `top` or bottom. Returns whether it was clicked.
+fn pill(ui: &mut egui::Ui, viewport: Rect, label: &str, top: bool, id: &str, p: &Pal) -> bool {
     let font = theme::small_font(theme::SMALL);
     let g = ui.painter().layout_no_wrap(label.into(), font, Color32::PLACEHOLDER);
     let size = vec2(g.size().x + 22.0, 20.0);
-    let r = Rect::from_center_size(pos2(viewport.center().x, viewport.top() + 8.0 + size.y / 2.0), size);
-    let resp = ui.interact(r, ui.id().with("jump-unread"), Sense::click());
-    let painter = ui.painter().clone().with_layer_id(egui::LayerId::new(egui::Order::Middle, ui.id().with("jump-unread-layer")));
+    let y = if top { viewport.top() + 8.0 + size.y / 2.0 } else { viewport.bottom() - 8.0 - size.y / 2.0 };
+    let r = Rect::from_center_size(pos2(viewport.center().x, y), size);
+    let resp = ui.interact(r, ui.id().with(id), Sense::click());
+    let painter = ui.painter().clone().with_layer_id(egui::LayerId::new(egui::Order::Middle, ui.id().with((id, "layer"))));
     // The web's tooltip-yellow tab with a thin dark outline.
     painter.rect_filled(r, 0.0, theme::INFO);
     painter.rect_stroke(r, 0.0, Stroke::new(1.0, p.dk), egui::StrokeKind::Inside);

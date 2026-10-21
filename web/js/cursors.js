@@ -78,8 +78,13 @@ export class BoardCursors {
       this.last = { x: e.clientX, y: e.clientY };
       this.#queueSend();
     }, { passive: true });
-    doc.addEventListener('mouseleave', () => {
+    // Left the board (for Yap's own page, another window…). A mouseout with nowhere to go says so in
+    // every browser; not every browser sends a document a mouseleave.
+    doc.addEventListener('mouseout', (e) => {
+      if (e.relatedTarget || !this.last) return;
       this.last = null;
+      clearTimeout(this.pending);
+      this.pending = null;
       this.hooks.send(null);
     });
     // Content moved under a still pointer, and others' anchors moved on screen.
@@ -171,6 +176,7 @@ export class BoardCursors {
   }
 
   #sweep() {
+    if (!this.remote.size) return;
     const now = Date.now();
     for (const [sid, { at }] of this.remote) if (now - at > STALE_MS) this.remote.delete(sid);
     this.#render();

@@ -64,6 +64,16 @@ function shapeStroke(tool, x0, y0, x1, y1) {
 
 const id = () => crypto.randomUUID().replace(/-/g, '').slice(0, 20);
 
+/**
+ * A canvas that crisp() reads back: kept in memory rather than on the GPU,
+ * where every getImageData would wait for the graphics card.
+ */
+function readable(width, height, canvas = document.createElement('canvas')) {
+  Object.assign(canvas, { width, height });
+  canvas.getContext('2d', { willReadFrequently: true });
+  return canvas;
+}
+
 /** Hard pixel edges: canvas anti-aliases every line, so snap alpha to on/off. */
 function crisp(ctx) {
   const { width, height } = ctx.canvas;
@@ -139,7 +149,7 @@ export class DrawBoard {
     this.wiggle = (() => { try { return localStorage.getItem('yap.wiggle') !== '0'; } catch { return true; } })();
     this.frame = 0;
     // The committed page: one canvas per layer per wiggle frame.
-    this.frames = Array.from({ length: LAYERS }, () => Array.from({ length: WIGGLE_FRAMES }, () => Object.assign(document.createElement('canvas'), { width: PIX_W, height: PIX_H })));
+    this.frames = Array.from({ length: LAYERS }, () => Array.from({ length: WIGGLE_FRAMES }, () => readable(PIX_W, PIX_H)));
 
     root.innerHTML = `
       <div class="draw-tools" role="toolbar" aria-label="Drawing tools">
@@ -180,7 +190,7 @@ export class DrawBoard {
       <div class="draw-gallery" aria-label="Saved drawings"></div>`;
     this.paper = root.querySelector('.draw-paper');
     this.sheets = [...root.querySelectorAll('.draw-layer')];
-    for (const c of this.sheets) Object.assign(c, { width: PIX_W, height: PIX_H });
+    for (const c of this.sheets) readable(PIX_W, PIX_H, c);
     this.thumbs = [...root.querySelectorAll('.layer-thumb')];
     this.clearPop = root.querySelector('.draw-clear-pop');
     this.palette = root.querySelector('.draw-palette');
@@ -198,13 +208,14 @@ export class DrawBoard {
       if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
         e.preventDefault();
         this.undo();
-      } else if (e.key === 'e') this.#setEraser(!this.eraser);
+      } else if (e.metaKey || e.ctrlKey || e.altKey) return; // the browser's and Yap's own shortcuts
+      else if (e.key === 'e') this.#setEraser(!this.eraser);
       else if (e.key === 'b' || e.key === 'p') this.#setTool('pen');
       else if (e.key === 'l') this.#setTool('line');
       else if (e.key === 'r') this.#setTool('rect');
       else if (e.key === 'o') this.#setTool('ellipse');
       else if (e.key === 't') this.#setTool('text');
-      else if (/^[1-9]$/.test(e.key) && Number(e.key) <= LAYERS && !e.metaKey && !e.ctrlKey && !e.altKey) this.#setLayer(Number(e.key) - 1);
+      else if (/^[1-9]$/.test(e.key) && Number(e.key) <= LAYERS) this.#setLayer(Number(e.key) - 1);
       else if (e.key === 'Escape') {
         this.#closeClear();
         this.#closePalette();
@@ -216,7 +227,7 @@ export class DrawBoard {
     });
     this.#syncTools();
     setInterval(() => {
-      if (!this.wiggle || this.root.hidden) return;
+      if (!this.wiggle || this.root.hidden || document.hidden) return;
       this.frame = (this.frame + 1) % WIGGLE_FRAMES;
       this.#paint();
     }, WIGGLE_MS);
@@ -232,7 +243,7 @@ export class DrawBoard {
   onState({ strokes, gallery }) {
     this.strokes = strokes;
     this.mine = strokes.filter((s) => s.uid === this.hooks.me()).map((s) => s.id);
-    this.live.clear();
+    this.#dropLive();
     this.gallery = gallery;
     this.#renderGallery();
     this.#redrawCommitted();
@@ -264,7 +275,7 @@ export class DrawBoard {
   onClear({ by }) {
     this.strokes = [];
     this.mine = [];
-    this.live.clear();
+    this.#dropLive();
     this.#redrawCommitted();
     this.#scheduleLive();
     const who = this.hooks.who(by);
@@ -281,6 +292,11 @@ export class DrawBoard {
     if (by !== this.hooks.me()) this.hooks.toast(`${who?.name ?? 'Someone'} cleared layer ${l + 1} (the page is in the gallery).`);
   }
 
+  /** Forget other people's strokes in progress (a fresh page or state); the one you're drawing stays. */
+  #dropLive() {
+    for (const key of this.live.keys()) if (key !== 'me') this.live.delete(key);
+  }
+
   onDrawing({ drawing }) {
     if (!this.gallery.some((d) => d.id === drawing.id)) this.gallery.unshift(drawing);
     this.#renderGallery();
@@ -293,7 +309,10 @@ export class DrawBoard {
     if (last) this.hooks.send({ t: 'draw.undo', id: last });
   }
 
-  /** Save what you see (hidden layers left out); `every` = all layers (Clear's archive). */
+  /**
+   * Save what you see (hidden layers left out); `every` = all layers (Clear's archive).
+   * Resolves to the gallery entry, or null when it couldn't be kept (the upload said why).
+   */
   async save({ download = true, gif = false, every = false } = {}) {
     const layers = this.#shown(every);
     const blob = gif ? this.#gif(layers) : await this.#png(layers);
@@ -305,7 +324,7 @@ export class DrawBoard {
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     }
-    await this.hooks.upload(blob);
+    return this.hooks.upload(blob);
   }
 
   /** The layers that show: yours (not hidden), or `every` one. */
@@ -320,15 +339,11 @@ export class DrawBoard {
 
   /** The page on white paper at its own pixel size, layer by layer; `frame` −1 = straight lines. */
   #flatten(layers, frame = -1) {
-    const out = document.createElement('canvas');
-    out.width = PIX_W;
-    out.height = PIX_H;
+    const out = readable(PIX_W, PIX_H);
     const ctx = out.getContext('2d');
     ctx.fillStyle = PAPER;
     ctx.fillRect(0, 0, PIX_W, PIX_H);
-    const sheet = document.createElement('canvas');
-    sheet.width = PIX_W;
-    sheet.height = PIX_H;
+    const sheet = readable(PIX_W, PIX_H);
     const sctx = sheet.getContext('2d');
     for (const l of layers) {
       sctx.clearRect(0, 0, PIX_W, PIX_H);
@@ -380,18 +395,20 @@ export class DrawBoard {
       if (tool === 'undo') this.undo();
       const left = this.hidden.size ? ' Hidden layers were left out.' : '';
       if (tool === 'save') {
-        await this.save();
-        this.hooks.toast(`Saved — downloaded and added to the gallery.${left}`);
+        await this.#once(async () => {
+          if (await this.save()) this.hooks.toast(`Saved — downloaded and added to the gallery.${left}`);
+        });
       }
       if (tool === 'gif') {
         if (!this.#anyOn(this.#shown())) return this.hooks.toast('Draw something first.');
-        await this.save({ gif: true });
-        this.hooks.toast(`Saved a GIF — downloaded and added to the gallery.${left}`);
+        await this.#once(async () => {
+          if (await this.save({ gif: true })) this.hooks.toast(`Saved a GIF — downloaded and added to the gallery.${left}`);
+        });
       }
       if (tool === 'share') {
         if (!this.#anyOn(this.#shown())) return this.hooks.toast('Draw something first.');
         // With Wiggle on, the chat gets the wiggling GIF.
-        await this.hooks.share(this.wiggle ? this.#gif(this.#shown()) : await this.#png(this.#shown()));
+        await this.#once(async () => this.hooks.share(this.wiggle ? this.#gif(this.#shown()) : await this.#png(this.#shown())));
       }
       if (tool === 'clear') this.#toggleClear(e.target.closest('[data-tool]'));
       this.#syncTools();
@@ -401,15 +418,30 @@ export class DrawBoard {
       if (!what) return;
       this.#closeClear();
       if (what === 'cancel') return;
-      // Archived first, every layer, wiggling — whichever way it's cleared.
-      if (this.strokes.length) await this.save({ download: false, gif: true, every: true });
-      this.hooks.send(what === 'page' ? { t: 'draw.clear' } : { t: 'draw.wipe', l: this.layer });
+      await this.#once(async () => {
+        // Archived first, every layer, wiggling — whichever way it's cleared. No archive, no clear.
+        if (this.strokes.length && !(await this.save({ download: false, gif: true, every: true }))) {
+          return this.hooks.toast("Couldn't keep this page in the gallery, so nothing was cleared. Try again in a moment.");
+        }
+        this.hooks.send(what === 'page' ? { t: 'draw.clear' } : { t: 'draw.wipe', l: this.layer });
+      });
     });
     this.root.querySelector('input[type=color]').addEventListener('input', (e) => {
       this.color = e.target.value;
       this.#setEraser(false);
       this.#syncTools();
     });
+  }
+
+  /** Save, GIF, Share and Clear one at a time: a double click makes one picture, not two. */
+  async #once(job) {
+    if (this.busy) return;
+    this.busy = true;
+    try {
+      await job();
+    } finally {
+      this.busy = false;
+    }
   }
 
   #setEraser(on) {
@@ -534,22 +566,28 @@ export class DrawBoard {
     const canvas = this.paper;
     canvas.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 || this.tool === 'text' || e.target.tagName !== 'CANVAS') return;
+      // Another finger while one draws: ignored. A primary pointer means the last stroke's
+      // end never came (its finger is long gone), so that one is kept first.
+      if (this.drawing) {
+        if (!e.isPrimary) return;
+        finish();
+      }
       canvas.setPointerCapture(e.pointerId);
       // Drawing on a layer you'd hidden shows it again.
       if (this.hidden.delete(this.layer)) this.#syncTools();
       if (this.tool !== 'pen') {
         const [x, y] = this.#toBoard(e);
-        this.drawing = { sk: id(), c: this.color, w: this.size, e: false, l: this.layer, shape: this.tool, x0: x, y0: y, ...shapeStroke(this.tool, x, y, x, y) };
+        this.drawing = { pointer: e.pointerId, sk: id(), c: this.color, w: this.size, e: false, l: this.layer, shape: this.tool, x0: x, y0: y, ...shapeStroke(this.tool, x, y, x, y) };
         this.live.set('me', this.drawing);
         return this.#scheduleLive();
       }
-      this.drawing = { sk: id(), c: this.color, w: this.size, e: this.eraser, l: this.layer, p: [...this.#toBoard(e)], sent: 0, lastSend: 0 };
+      this.drawing = { pointer: e.pointerId, sk: id(), c: this.color, w: this.size, e: this.eraser, l: this.layer, p: [...this.#toBoard(e)], sent: 0, lastSend: 0 };
       this.live.set('me', this.drawing);
       this.#pump(true);
       this.#scheduleLive();
     });
     canvas.addEventListener('pointermove', (e) => {
-      if (!this.drawing) return;
+      if (this.drawing?.pointer !== e.pointerId) return;
       if (this.drawing.shape) {
         const [x, y] = this.#toBoard(e);
         Object.assign(this.drawing, { k: undefined }, shapeStroke(this.drawing.shape, this.drawing.x0, this.drawing.y0, x, y));
@@ -567,8 +605,9 @@ export class DrawBoard {
       const stroke = { id: d.sk, uid: this.hooks.me(), c: d.c, w: d.w, e: d.e, p: d.p, ...(d.k ? { k: d.k } : {}), ...(d.l ? { l: d.l } : {}) };
       this.#add(stroke);
     };
-    canvas.addEventListener('pointerup', finish);
-    canvas.addEventListener('pointercancel', finish);
+    const end = (e) => this.drawing?.pointer === e.pointerId && finish();
+    canvas.addEventListener('pointerup', end);
+    canvas.addEventListener('pointercancel', end);
     // Text opens on click, after the browser has finished moving focus around.
     canvas.addEventListener('click', (e) => {
       if (this.tool === 'text' && e.target.tagName === 'CANVAS') this.#startText(e);
@@ -642,8 +681,7 @@ export class DrawBoard {
     const w = Math.max(0, Math.min(innerW, innerH * ratio));
     this.paper.style.width = `${w}px`;
     this.paper.style.height = `${w / ratio}px`;
-    this.#redrawCommitted();
-    this.#scheduleLive();
+    // Nothing to redraw: the page is always 640 × 400 pixels, and CSS scales it.
   }
 
   /** Re-render every layer and frame from scratch (undo, clear, wipe, resize, wiggle toggle). */
@@ -712,7 +750,10 @@ export class DrawBoard {
       for (const s of live[l]) this.#drawStroke(ctx, s, undefined, this.wiggle ? this.frame : -1);
       crisp(ctx);
     });
-    this.tags.innerHTML = tags;
+    if (tags !== this.tagsHtml) {
+      this.tagsHtml = tags;
+      this.tags.innerHTML = tags;
+    }
   }
 
   /**

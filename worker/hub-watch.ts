@@ -20,10 +20,13 @@ function watchPosition(s: WatchState, now = Date.now()) {
   return s.playing ? s.position + (now - s.at) / 1000 : s.position;
 }
 
-/** A video's title, from YouTube's public oEmbed (no key; the Worker asks, not the browser). */
+/**
+ * A video's title, from YouTube's public oEmbed (no key; the Worker asks, not the browser).
+ * At most 4 s: a slow YouTube shouldn't hold up the video (it plays without a title).
+ */
 async function youtubeTitle(id: string): Promise<string | null> {
   try {
-    const res = await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(`https://www.youtube.com/watch?v=${id}`)}`);
+    const res = await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(`https://www.youtube.com/watch?v=${id}`)}`, { signal: AbortSignal.timeout(4000) });
     if (!res.ok) return null;
     const body = (await res.json()) as { title?: string };
     return typeof body.title === 'string' ? body.title.slice(0, 200) : null;
@@ -80,8 +83,14 @@ export async function onWatchQueue(hub: HubHost, me: Attachment, msg: Extract<Cl
   }
   const s = watchState(hub);
   if (msg.remove !== undefined) {
-    const i = Number(msg.remove);
-    if (!Number.isInteger(i) || i < 0 || i >= s.queue.length) throw new ClientError('bad_index', 'No such queue item.');
+    let i = Number(msg.remove);
+    if (typeof msg.id === 'string') {
+      // By id: the index was what the person saw, and the queue may have moved
+      // since (the video ended and the next one came up). That one if it's still
+      // there, else the first with that id; none = it's already gone, nothing to do.
+      if (s.queue[i]?.id !== msg.id) i = s.queue.findIndex((q) => q.id === msg.id);
+      if (i < 0) return;
+    } else if (!Number.isInteger(i) || i < 0 || i >= s.queue.length) throw new ClientError('bad_index', 'No such queue item.');
     s.queue.splice(i, 1);
   }
   saveWatch(hub, s);

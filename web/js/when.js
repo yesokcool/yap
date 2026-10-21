@@ -207,7 +207,15 @@ export class WhenPlanner {
     return [...this.people].filter(([, set]) => [...set].some((s) => s >= from && s < to)).map(([uid]) => uid);
   }
 
+  /** Where someone is typing in the plan form (a friend painting re-renders it), to put them back after. */
+  typing() {
+    const el = document.activeElement;
+    if (!el?.name || !this.el.contains(el) || !el.closest('.when-plan')) return null;
+    return { name: el.name, from: el.selectionStart ?? null, to: el.selectionEnd ?? null };
+  }
+
   render() {
+    const caret = this.typing();
     const monday = mondayOf(this.week);
     const sunday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6);
     const fmt = (d) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
@@ -235,7 +243,7 @@ export class WhenPlanner {
         <div class="when-foot"></div>
         <div class="when-grids"></div>
       </div>`;
-    this.renderGrids();
+    this.renderGrids(caret);
   }
 
   /** Planned hangs: one push to whoever's free when each starts (PROTOCOL.md › Hang reminders). */
@@ -272,7 +280,7 @@ export class WhenPlanner {
       </form>`;
   }
 
-  renderGrids() {
+  renderGrids(caret = this.typing()) {
     const box = this.el.querySelector('.when-grids');
     if (!box) return;
     this.renderHangs();
@@ -347,6 +355,11 @@ export class WhenPlanner {
         ${future ? ` <button type="button" class="btn small" data-when="plan" data-at="${s * SLOT_MS}">🗓 Plan a hang then</button>` : ''}</p>`;
     } else {
       foot.innerHTML = this.loaded ? bestTimes(monday, answered, free, now) : '<p class="muted">Loading…</p>';
+    }
+    const again = caret && foot.querySelector(`.when-plan [name="${caret.name}"]`);
+    if (again) {
+      again.focus({ preventScroll: true });
+      if (caret.from !== null) again.setSelectionRange?.(caret.from, caret.to);
     }
   }
 }

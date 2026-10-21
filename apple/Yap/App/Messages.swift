@@ -204,7 +204,7 @@ extension ImageStore {
     /// opened with `open`, then downsampled.
     func sealedPicture(for url: URL, maxPixel: Int = 900, open: @escaping @MainActor (Data) throws -> Data) -> PlatformImage? {
         let key = "sealed:\(url.absoluteString)#\(maxPixel)"
-        if let hit = pictures[key] { return hit }
+        if let hit = cachedPicture(key) { return hit }
         loadSealedPicture(url, key: key, maxPixel: maxPixel, open: open)
         return nil
     }

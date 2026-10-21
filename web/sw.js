@@ -18,16 +18,25 @@ self.addEventListener('push', (event) => {
       renotify: true,
       icon: '/icon-192.png',
       badge: '/icon-192.png',
-      data: { url: '/' },
+      // A push about a message (a mention, a reply, "all" mode) opens that message.
+      data: typeof data.channelId === 'string' ? { channelId: data.channelId, messageId: typeof data.messageId === 'string' ? data.messageId : null } : {},
     });
   })());
 });
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
+  const { channelId, messageId } = event.notification.data ?? {};
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     const open = windows.find((w) => new URL(w.url).pathname === '/');
-    return open ? open.focus() : self.clients.openWindow('/');
+    if (open) {
+      // Yap is open: it goes to the message itself (no reload).
+      if (channelId) open.postMessage({ t: 'yap.open', channelId, messageId });
+      return open.focus();
+    }
+    // Closed: start it at the message (#channel=…&message=…, read once at boot).
+    const hash = channelId ? `#${new URLSearchParams({ channel: channelId, ...(messageId ? { message: messageId } : {}) })}` : '';
+    return self.clients.openWindow(`/${hash}`);
   })());
 });

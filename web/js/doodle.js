@@ -86,20 +86,23 @@ export class DoodlePad {
     };
     this.canvas.addEventListener('pointerdown', (e) => {
       e.preventDefault();
+      if (this.drawing && !e.isPrimary) return; // a second finger while one draws (Draw does the same)
       this.canvas.setPointerCapture(e.pointerId);
-      this.drawing = { color: this.erasing ? PAPER : this.pen, size: this.erasing ? 3 : 1, points: [at(e)] };
+      this.drawing = { pointer: e.pointerId, color: this.erasing ? PAPER : this.pen, size: this.erasing ? 3 : 1, points: [at(e)] };
       this.strokes.push(this.drawing);
       this.paint();
     });
     this.canvas.addEventListener('pointermove', (e) => {
-      if (!this.drawing) return;
+      if (this.drawing?.pointer !== e.pointerId) return;
       const p = at(e);
       const last = this.drawing.points.at(-1);
       if (p[0] === last[0] && p[1] === last[1]) return;
       this.drawing.points.push(p);
       this.paint();
     });
-    const end = () => (this.drawing = null);
+    const end = (e) => {
+      if (this.drawing?.pointer === e.pointerId) this.drawing = null;
+    };
     this.canvas.addEventListener('pointerup', end);
     this.canvas.addEventListener('pointercancel', end);
     this.el.addEventListener('click', async (e) => {

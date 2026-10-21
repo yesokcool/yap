@@ -318,10 +318,7 @@ export class Hub extends DurableObject<Env> {
           if (!this.allow(me.sid, 'cursor', 40, 25)) return;
           return this.onCursor(ws, me, msg);
         case 'notify.settings': return onNotifySettings(this, ws, me, msg);
-        case 'ping':
-          // One a minute per person (the maintainer, 2026-10-11).
-          if (!this.allow(me.uid, 'ping', 1, 1 / 60)) throw new ClientError('slow_down', 'You can ping again in a minute.');
-          return onPing(this, me, msg);
+        case 'ping': return onPing(this, me, msg);
         case 'draw.state': return onDrawState(this, ws);
         case 'draw.gallery': return this.send(ws, { t: 'draw.gallery', gallery: gallery(this) });
         case 'draw.seg':

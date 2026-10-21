@@ -39,6 +39,7 @@ public final class YapConnection {
     private var retryTask: Task<Void, Never>?
     private var runTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
+    private var openWatch: Task<Void, Never>?
     private var pongAt: ContinuousClock.Instant?
     private var pathMonitor: NWPathMonitor?
     private var lastPath: NetworkPathSignature?
@@ -50,6 +51,10 @@ public final class YapConnection {
     /// After a network change (Wi-Fi ↔ cellular, with the screen off too):
     /// a socket that doesn't answer this fast is on the old network.
     var probeTimeout: Duration = .seconds(4)
+    /// An upgrade that hasn't finished by then is stuck (a network that
+    /// died under it, a captive portal): try again. URLSession would wait
+    /// 60 s, and nothing (coming back on screen, a new network) hurried it.
+    var openTimeout: Duration = .seconds(12)
 
     public init(url: URL, protocols: [String] = [], session: URLSession = .shared) {
         self.url = url
@@ -70,6 +75,13 @@ public final class YapConnection {
         self.task = task
         task.resume()
         runTask = Task { [weak self] in await self?.run(task, gen: gen) }
+        openWatch = Task { [weak self] in
+            guard let timeout = self?.openTimeout else { return }
+            try? await Task.sleep(for: timeout)
+            guard let self, !Task.isCancelled, gen == self.generation, !self.isOpen else { return }
+            self.log.info("socket didn't open in time")
+            self.lost(badKey: false)
+        }
     }
 
     /// The main invite key changed (`key`, `ready.key`): reconnects use the
@@ -147,6 +159,8 @@ public final class YapConnection {
             guard gen == generation else { return }
             isOpen = true
             retry = 0
+            openWatch?.cancel()
+            openWatch = nil
             expectPong(after: sentAt, within: pongTimeout, gen: gen)
             startHeartbeat(gen: gen)
             onOpen?()
@@ -233,7 +247,8 @@ public final class YapConnection {
         log.info("network changed: \(path.interfaces, privacy: .public)")
         if isOpen {
             sendPing(timeout: probeTimeout)
-        } else if retryTask != nil {
+        } else if retryTask != nil || task != nil {
+            // Waiting to retry, or an upgrade under way on the old route: go now.
             retry = 0
             connect()
         }
@@ -262,6 +277,8 @@ public final class YapConnection {
         isOpen = false
         heartbeatTask?.cancel()
         heartbeatTask = nil
+        openWatch?.cancel()
+        openWatch = nil
         runTask?.cancel()
         runTask = nil
         task?.cancel(with: .goingAway, reason: nil)

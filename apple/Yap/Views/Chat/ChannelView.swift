@@ -159,6 +159,32 @@ struct ChannelView: View {
                 .well()
                 .onChange(of: model.jump, initial: true) { _, target in chat.takeJump(target, proxy: proxy) }
                 .onChange(of: chat.editing?.message.id) { _, id in chat.showEditing(id, proxy: proxy) }
+                // "↓ New messages": at the end of the list, or not; and what the newest message is.
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    geometry.visibleRect.maxY >= geometry.contentSize.height - 24
+                } action: { _, atBottom in
+                    chat.newBelow.scrolled(atBottom: atBottom)
+                }
+                .onChange(of: history?.messages.last?.id, initial: true) {
+                    chat.newBelow.newest(history?.messages.last, myUid: client.uid)
+                }
+                .overlay(alignment: .bottom) {
+                    if chat.newBelow.shows, let last = rows.last {
+                        Button {
+                            chat.newBelow.tapped()
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.down").font(.system(size: 9, weight: .bold))
+                                Text("New messages")
+                            }
+                        }
+                        .buttonStyle(.win98)
+                        .padding(.bottom, 6)
+                        .accessibilityLabel("New messages")
+                        .accessibilityHint("Scrolls to the newest message")
+                    }
+                }
                 .overlay(alignment: .top) {
                     if chat.pill.show(channelId: channelId, unreadAfter: chat.unreadAfter, client: model.client) {
                         Button {
@@ -395,16 +421,24 @@ struct TypingIndicator: View {
     var channelId: String
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            let typers = model.client.typers(in: channelId, now: context.date)
-            Text(typers.isEmpty ? " " : text(typers))
-                .font(Theme.small)
-                .italic()
-                .foregroundStyle(Theme.grayText)
-                .lineLimit(1)
-                .padding(.horizontal, 6)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        // Ticks only while someone's typing (an open channel used to redraw this every second).
+        if model.client.typing[channelId]?.isEmpty == false {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                line(model.client.typers(in: channelId, now: context.date))
+            }
+        } else {
+            line([])
         }
+    }
+
+    private func line(_ typers: [User]) -> some View {
+        Text(typers.isEmpty ? " " : text(typers))
+            .font(Theme.small)
+            .italic()
+            .foregroundStyle(Theme.grayText)
+            .lineLimit(1)
+            .padding(.horizontal, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func text(_ typers: [User]) -> String {

@@ -101,6 +101,7 @@ impl Shared {
         g.vad_threshold.set(m.config.vad_threshold);
         g.noise_suppression.store(m.config.noise_suppression, Ordering::Relaxed);
         g.auto_gain.store(m.config.auto_gain, Ordering::Relaxed);
+        g.mic_gain.set(m.config.mic_volume);
         g.echo_cancellation.store(m.config.echo_cancellation, Ordering::Relaxed);
         g.ptt_click.store(m.config.ptt_click, Ordering::Relaxed);
         self.audio.mixer.lower_media.store(m.config.lower_media, Ordering::Relaxed);
@@ -437,7 +438,9 @@ impl Core {
             }
         }
         // Shutting down: leave voice politely (or others keep our call for a
-        // while, thinking we're only reconnecting), save settings.
+        // while, thinking we're only reconnecting), save settings (with the
+        // call as of now, for "You were in …" at the next launch).
+        self.shared.model.lock().note_call(now_ms());
         self.call_ended("you quit Yap");
         self.say_goodbye_in_voice().await;
         self.shared.screen.share.stop();
@@ -689,6 +692,8 @@ impl Core {
             m.speaking = speaking;
             changed = true;
         }
+        // The call we're in, for "You were in …" after a restart.
+        m.note_call(now_ms());
         // Typing indicators expire.
         let now = Instant::now();
         for t in m.typing.values_mut() {

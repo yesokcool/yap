@@ -354,9 +354,8 @@ public final class MicCheck {
         #if os(iOS)
         guard source == .microphone else { return }
         // Back to the app's everyday session (never stops someone's music).
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.ambient, options: [.mixWithOthers])
-        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        AudioSessionSetup.everyday()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         #endif
     }
 }
