@@ -3,13 +3,13 @@
 // encrypted Personal space's key.
 import { PIN_RE, deviceLabel, hashPin, needsRehash, newToken, passwordRule, tempPassword, tokenHash, verifyPin, weakPassword } from './auth';
 import type { Attachment } from './attachment';
-import { COLOR_RE, ClientError, cleanName, cleanVaultWrap, personalId } from './validate';
+import { COLOR_RE, ClientError, cleanName, cleanVaultWrap, personalId, sameName } from './validate';
 import { LIMITS, PROTOCOL_VERSION, type ClientMessage, type Device, type Role, type ServerMessage, type VaultWrap } from './protocol';
 import type { HubHost } from './hub-host';
 import { deliver, pushTargets } from './hub-pushes';
 
 /** How long a one-time sign-in pass (device.handoff) stays good. */
-const HANDOFF_MS = 15 * 60_000;
+const HANDOFF_MS = 5 * 60_000;
 
 /**
  * users.weak_secret: 0 = fine, 1 = should be replaced (an old PIN, or a
@@ -66,13 +66,14 @@ export async function onHello(hub: HubHost, ws: WebSocket, me: Attachment, msg: 
     const name = cleanName(msg.login.name, LIMITS.nameChars);
     const pin = String(msg.login.pin ?? '');
     checkLockout(hub, name, me.ip ?? '');
+    // (Compared here, not with SQLite's lower(), which only knows A–Z.)
     const row = hub.sql
-      .exec<{ id: string; pin_hash: string | null; role: Role; secret_kind: string | null; weak_secret: number | null }>(
-        `SELECT id, pin_hash, role, secret_kind, weak_secret FROM users WHERE lower(name) = lower(?) AND role != 'banned'
-         AND id NOT IN (SELECT alias FROM user_aliases)`,
-        name,
+      .exec<{ id: string; name: string; pin_hash: string | null; role: Role; secret_kind: string | null; weak_secret: number | null }>(
+        `SELECT id, name, pin_hash, role, secret_kind, weak_secret FROM users WHERE role != 'banned'
+         AND id NOT IN (SELECT alias FROM user_aliases) ORDER BY created_at`,
       )
-      .toArray()[0];
+      .toArray()
+      .find((r) => sameName(r.name, name));
     if (row && !row.pin_hash) {
       throw new ClientError('no_pin', `${name} hasn't set a password yet. Use a device that's already signed in to set one (Settings › Account), or ask the owner or a mod to reset it.`);
     }
@@ -200,11 +201,7 @@ export function onRevokeDevice(hub: HubHost, ws: WebSocket, me: Attachment, id: 
 
 /** "Not you?": every other device (OBS links too) is signed out at once. */
 export function onSignOutOthers(hub: HubHost, ws: WebSocket, me: Attachment) {
-  const rows = hub.sql
-    .exec<{ token_hash: string }>('SELECT token_hash FROM devices WHERE user_id = ? AND token_hash != ?', me.uid, me.tokenHash ?? '')
-    .toArray();
-  for (const r of rows) hub.sql.exec('DELETE FROM devices WHERE token_hash = ?', r.token_hash);
-  kickDevices(hub, new Set(rows.map((r) => r.token_hash)));
+  signOutDevices(hub, me.uid, me.tokenHash);
   hub.send(ws, { t: 'devices', devices: devicesOf(hub, me) });
 }
 
@@ -268,9 +265,22 @@ export async function onSetPin(hub: HubHost, ws: WebSocket, me: Attachment, msg:
     throw new ClientError('bad_login', row.secret_kind === 'password' ? 'Your current password is wrong.' : 'Your current password or PIN is wrong.');
   }
   hub.sql.exec("UPDATE users SET pin_hash = ?, secret_kind = 'password', weak_secret = ? WHERE id = ?", await hashPin(pin, hub.pepper), WEAK.no, me.uid);
+  // A new password signs out every other device (OBS links too): whoever knew
+  // the old one may have signed in with it (security review, 2026-10-24).
+  const signedOut = signOutDevices(hub, me.uid, me.tokenHash);
   // (`account.token` stays in the protocol, but every signed-in connection
   // already has a device token, so there's never a new one to hand out.)
-  hub.send(ws, { t: 'account', hasPin: true, kind: 'password' });
+  hub.send(ws, { t: 'account', hasPin: true, kind: 'password', signedOut });
+}
+
+/** Revoke all of `uid`'s devices but `keep` (this one), and close their sockets. How many went. */
+function signOutDevices(hub: HubHost, uid: string, keep?: string): number {
+  const rows = hub.sql
+    .exec<{ token_hash: string; scope: string | null }>('SELECT token_hash, scope FROM devices WHERE user_id = ? AND token_hash != ?', uid, keep ?? '')
+    .toArray();
+  for (const r of rows) hub.sql.exec('DELETE FROM devices WHERE token_hash = ?', r.token_hash);
+  kickDevices(hub, new Set(rows.map((r) => r.token_hash)));
+  return rows.filter((r) => r.scope !== 'handoff').length; // (an unused sign-in pass isn't a device)
 }
 
 export function onSignOut(hub: HubHost, ws: WebSocket, me: Attachment) {
@@ -284,7 +294,7 @@ export async function onResetPin(hub: HubHost, ws: WebSocket, me: Attachment, ms
   const target = hub.user(hub.canonical(String(msg.uid)));
   if (!target || target.role === 'banned' || target.role === 'pending') throw new ClientError('no_user', 'No such member.');
   if (target.role === 'owner' && target.id !== me.uid) throw new ClientError('forbidden', "Can't reset the owner's password.");
-  const pin = await setTemporary(hub, target);
+  const pin = await setTemporary(hub, target, target.id === me.uid ? me.tokenHash : undefined);
   hub.log(me.uid, 'member.resetPin', target.id, null);
   hub.send(ws, { t: 'pin.reset', uid: target.id, pin });
 }
@@ -298,11 +308,17 @@ export async function resetPin(hub: HubHost, uid: string) {
   return { ok: true, name: target.name, pin };
 }
 
-/** A temporary password replaces whatever they had (and clears any lockout); it asks to be replaced after sign-in. */
-async function setTemporary(hub: HubHost, target: { id: string; name: string }) {
+/**
+ * A temporary password replaces whatever they had (and clears any lockout);
+ * it asks to be replaced after sign-in. Every device of theirs is signed out
+ * (but `keep`, the resetter's own when they reset themselves): a reset is how
+ * a leaked password is fixed, so whoever used it mustn't stay in.
+ */
+async function setTemporary(hub: HubHost, target: { id: string; name: string }, keep?: string) {
   const password = tempPassword();
   hub.sql.exec("UPDATE users SET pin_hash = ?, secret_kind = 'password', weak_secret = ? WHERE id = ?", await hashPin(password, hub.pepper), WEAK.temporary, target.id);
   hub.sql.exec('DELETE FROM login_failures WHERE name = ?', target.name.toLowerCase());
+  signOutDevices(hub, target.id, keep);
   return password;
 }
 
@@ -333,7 +349,7 @@ export function toMods(hub: HubHost, msg: ServerMessage) {
 export const WAITING = 'Waiting for the owner or a mod to let you in.';
 
 // ── Sign-in passes for a new home-screen app or device ────────────────
-// A device row with scope 'handoff': good once, for 15 minutes. Expired
+// A device row with scope 'handoff': good once, for 5 minutes (15 until 2026-10-24). Expired
 // ones are cleaned up whenever a new one is made.
 
 export async function onHandoff(hub: HubHost, ws: WebSocket, me: Attachment) {

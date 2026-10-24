@@ -92,9 +92,9 @@ export async function upload(path, body, params, type = body.type || 'applicatio
 /** WebSocket subprotocols carrying the key: ["yap", "key.<key>"] (only letters, digits, - and _ fit in one). */
 export const keyProtocols = (key = settings.key) => (/^[A-Za-z0-9_-]+$/.test(key) ? ['yap', `key.${key}`] : ['yap']);
 
-/** The socket's address. The key rides in the subprotocol, or (when it can't) in ?key=. */
+/** The socket's address. The key rides in the subprotocol, or (when it can't) in ?key=; no key (an OBS link), neither. */
 export const socketUrl = (key = settings.key) =>
-  `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws${keyProtocols(key).length > 1 ? '' : `?key=${encodeURIComponent(key)}`}`;
+  `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws${!key || keyProtocols(key).length > 1 ? '' : `?key=${encodeURIComponent(key)}`}`;
 
 export function save(patch = {}) {
   Object.assign(settings, patch);

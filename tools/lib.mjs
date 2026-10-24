@@ -20,8 +20,18 @@ export function keychain(service) {
   }
 }
 
-/** The friendly, user-facing lines in commit messages ("Changelog: …"), in order. */
-export const changelogLines = (text) => text.split('\n').map((line) => /^Changelog:\s*(.+)$/.exec(line)?.[1].trim()).filter(Boolean);
+/** The friendly, user-facing lines in commit messages ("Changelog: …"), in order, each once. */
+export const changelogLines = (text) => [...new Set(text.split('\n').map((line) => /^Changelog:\s*(.+)$/.exec(line)?.[1].trim()).filter(Boolean))];
+
+/**
+ * What a desktop update's v2 signature (`sig2` in latest.json) signs, as
+ * UTF-8: `yap-update-v2`, the platform key, the version exactly as the
+ * manifest has it and the file's SHA-256 in lowercase hex, joined by "\n",
+ * nothing after. The apps check the same bytes (`signed_message` in
+ * desktop/src/update.rs), so a signed build can't be relabelled as another
+ * version or handed to another platform.
+ */
+export const updateMessage = (platform, version, sha256) => `yap-update-v2\n${platform}\n${version}\n${sha256.toLowerCase()}`;
 
 /** Stop, saying why (exit 1). */
 export function fail(message, status = 1) {

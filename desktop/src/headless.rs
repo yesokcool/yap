@@ -195,6 +195,10 @@ async fn run_async(args: Args) -> i32 {
         eprintln!("--server is required");
         return 2;
     }
+    if let Some(why) = crate::config::insecure(&cfg.server) {
+        eprintln!("--server {}: {why}", cfg.server);
+        return 2;
+    }
     println!("{} yap headless: {} as {} (uid {}), bitrate {}", ts(start), cfg.server, cfg.name, cfg.uid, cfg.bitrate);
 
     let config_path = std::env::temp_dir().join(format!("yap-headless-{}.json", cfg.uid));

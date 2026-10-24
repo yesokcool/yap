@@ -106,11 +106,14 @@ export function rollDice(body: string): { body: string; roll: Roll } | null {
 
 /**
  * A soundboard clip: WAV, PCM 16-bit mono, 8–48 kHz, up to `maxMs`. Returns
- * its length and a loudness cap — `gain = min(1, 0.25 / rms, 0.71 / peak)`,
- * about −12 dBFS RMS and −3 dBFS peak, never louder than it came in — or why
- * it's refused. Clients play it at most at `gain` (PROTOCOL.md › Soundboard).
+ * its length, a loudness cap — `gain = min(1, 0.25 / rms, 0.71 / peak)`,
+ * about −12 dBFS RMS and −3 dBFS peak, never louder than it came in — and
+ * `wav`, the clip to store: exactly the samples measured, under a header made
+ * here (RIFF, fmt, data; nothing else), so no app can read a different clip
+ * from it than the one measured (security review, 2026-10-24). Or why it's
+ * refused. Clients play it at most at `gain` (PROTOCOL.md › Soundboard).
  */
-export function checkWav(b: Uint8Array, maxMs: number): { ms: number; gain: number } | string {
+export function checkWav(b: Uint8Array, maxMs: number): { ms: number; gain: number; wav: Uint8Array } | string {
   const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
   const ascii = (at: number, n: number) => String.fromCharCode(...b.subarray(at, at + n));
   if (b.length < 44 || ascii(0, 4) !== 'RIFF' || ascii(8, 4) !== 'WAVE') return 'Send a WAV file.';
@@ -142,5 +145,26 @@ export function checkWav(b: Uint8Array, maxMs: number): { ms: number; gain: numb
   }
   if (peak < 1e-3) return 'That clip is silent.';
   const rms = Math.sqrt(sum / samples);
-  return { ms, gain: Math.round(Math.min(1, 0.25 / rms, 0.71 / peak) * 1000) / 1000 };
+  return { ms, gain: Math.round(Math.min(1, 0.25 / rms, 0.71 / peak) * 1000) / 1000, wav: pcmWav(b.subarray(data.start, data.start + samples * 2), fmt.rate) };
+}
+
+/** A plain 16-bit mono PCM WAV of these samples: the 44-byte header, then the data. */
+function pcmWav(samples: Uint8Array, rate: number): Uint8Array {
+  const out = new Uint8Array(44 + samples.length);
+  const view = new DataView(out.buffer);
+  const ascii = (at: number, s: string) => [...s].forEach((c, i) => (out[at + i] = c.charCodeAt(0)));
+  ascii(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length, true);
+  ascii(8, 'WAVEfmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  ascii(36, 'data');
+  view.setUint32(40, samples.length, true);
+  out.set(samples, 44);
+  return out;
 }

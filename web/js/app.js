@@ -24,7 +24,7 @@ import { renderJumpPill, renderMessages, renderNewPill, renderTyping, tapMessage
 import { addLocalNote, isQuietNow, jumpTo, loadLatest, loadOlder, markRead, onDeleted, onHistory, onMessage, onPing, onSendError, onSendsLost, openAndJump, openChannel, queueSend, rememberSince, sendOutbox, updateTitle, welcomeIn } from './app/chat.js';
 import { askDelete, bindComposer, cancelEdit, cancelReply, clearStaged, deleteMessage, emojiPicker, gifPicker, openReactPicker, reactPicker, renderStaged, saveToPersonal, shrinkStaged, startEdit, startReply, toggleEmojis, toggleGifs } from './app/composer.js';
 import { openMemberMenu, openPeople, renderMembers } from './app/people.js';
-import { addToHomeScreen, bindPinDialog, bindWelcome, onHelloError, passwordLater, renderAccountBars, renderDevices, renderHomeBar, showPinDialog, showWelcome, startOver, toggleReveal } from './app/account.js';
+import { addToHomeScreen, bindPinDialog, bindWelcome, isStandalone, onHelloError, passwordLater, renderAccountBars, renderDevices, renderHomeBar, showPinDialog, showWelcome, startOver, toggleReveal } from './app/account.js';
 import { askUnlock, bindVaultDialog, forgetSealedImages, showVaultDialog, syncVault } from './app/personal.js';
 import { bindSearch, onSearchResults, openSearch, openSwitcher, renderResultList, runSearch } from './app/search.js';
 import { doodlePad, markAllRead, onUnreadCounts, openCatchup, openDoodle, openPicture, openShelf, openSoundboard, renderHangs, renderShelf, requestUnreadCounts, sendQuiet, setAway, soundboard, viewDoodle } from './app/extras.js';
@@ -131,10 +131,17 @@ function readInviteFromUrl() {
   // A home-screen shortcut (or link) made with "Add to Home Screen" carries a
   // one-time sign-in pass and your name. Never replaces a sign-in we already have.
   const handoff = hash.get('handoff');
-  if (handoff && !settings.token) save({ token: handoff });
+  // Such a link in a plain browser tab could be anyone's (a friend can post a
+  // link with their own pass): once in, ask whether that account is yours
+  // (onReady). The Home Screen app and the iPhone/Mac app's own pages don't ask.
+  const ask = Boolean(handoff) && hash.get('embed') !== '1' && !isStandalone();
+  if (handoff && !settings.token) {
+    save({ token: handoff });
+    if (ask) state.linkSignIn = { was: settings.uid };
+  }
   // Already signed in here: keep the pass in case this device's token turns
   // out to be signed out (then it signs us back in instead of asking).
-  else if (handoff) state.spareHandoff = handoff;
+  else if (handoff) state.spareHandoff = { pass: handoff, ask };
   const name = hash.get('name');
   if (name && !settings.name) save({ name });
   const place = hash.get('place');
@@ -407,7 +414,10 @@ function handle(msg) {
       state.weakReason = null;
       renderAccountBars();
       $('pin-dialog').close();
-      return toast('Password saved. Sign in anywhere with your name and password.');
+      // (The server signs out your other devices with a new password: say how many.)
+      return toast(msg.signedOut
+        ? `Password saved. ${msg.signedOut === 1 ? 'Your other device was' : `Your ${msg.signedOut} other devices were`} signed out: sign in there with the new password.`
+        : 'Password saved. Sign in anywhere with your name and password.');
     case 'devices':
       state.devices = msg.devices;
       return renderDevices();
@@ -518,6 +528,11 @@ function onReady(msg) {
   state.uploadToken = msg.uploadToken ?? null;
   syncVault(msg.vault ?? null);
   if (msg.storageWarning) setTimeout(() => toast('Heads up: Yap\'s storage is over 80% full. Settings › Owner & mods shows how much.'), 1500);
+  // Signed in by a link in a plain tab, as an account this browser wasn't on: is it yours?
+  if (state.linkSignIn) {
+    if (msg.uid !== state.linkSignIn.was) confirmLinkSignIn(msg.users.find((u) => u.id === msg.uid)?.name ?? 'someone');
+    state.linkSignIn = null;
+  }
   // Merged accounts: the server answers with the canonical id; keep it.
   if (msg.uid && msg.uid !== settings.uid) save({ uid: msg.uid });
   const me = msg.users.find((u) => u.id === settings.uid);
@@ -631,6 +646,25 @@ function openFromPush(channelId, id) {
 const RESUME_MS = 20_000;
 
 let resumeTimer = null;
+
+/**
+ * After a sign-in link in a plain tab (readInviteFromUrl) put this browser on
+ * an account: is it yours? Anyone can post a link with their own pass, and
+ * what you then write would go to their account. "Not me" signs this device
+ * out again.
+ */
+async function confirmLinkSignIn(name) {
+  const yes = await confirmSheet({
+    title: `Signed in as ${name}`,
+    text: `That link signed this browser in as ${name}. Is that you? If someone sent you their own link, choose “Not me” and you’re signed out again.`,
+    ok: 'That’s me',
+    cancel: 'Not me',
+  });
+  if (yes) return;
+  conn?.send({ t: 'account.signout' });
+  save({ token: '', name: '', uid: '' });
+  setTimeout(() => location.reload(), 300);
+}
 
 function onDisconnect({ detail } = {}) {
   // A wrong key with a token the server doesn't know (signed out meanwhile): nothing gets in

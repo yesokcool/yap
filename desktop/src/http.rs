@@ -10,13 +10,29 @@ fn get(url: &str, key: &str) -> Result<ureq::http::Response<ureq::Body>, ureq::E
     if key.is_empty() { req.call() } else { req.header("X-Yap-Key", key).call() }
 }
 
-fn agent() -> ureq::Agent {
+/// Middleware for every HTTP agent in the app: plain `http://` only to this
+/// computer (`config::insecure`). (Redirects are followed inside it; only the
+/// server we already trust with the key could send one.)
+pub fn secure_only(req: ureq::http::Request<ureq::SendBody>, next: ureq::middleware::MiddlewareNext) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+    let uri = req.uri();
+    if uri.scheme_str() != Some("https") && !uri.host().is_some_and(crate::config::is_loopback) {
+        return Err(ureq::Error::RequireHttpsOnly(format!("{uri} (plain http:// only works for a server on this computer)")));
+    }
+    next.handle(req)
+}
+
+/// The settings every agent here shares: `timeout`, the server's error pages
+/// read as answers, our user agent, and `secure_only`.
+pub fn agent_config(timeout: Duration) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
     ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
+        .timeout_global(Some(timeout))
         .http_status_as_error(false)
         .user_agent(concat!("yap-desktop/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into()
+        .middleware(secure_only)
+}
+
+fn agent() -> ureq::Agent {
+    agent_config(Duration::from_secs(10)).build().into()
 }
 
 /// `/api/check`'s answer; only `ok` matters here (the reply's `keyRequired`
@@ -74,23 +90,29 @@ struct IceResponse {
     ice_servers: Vec<IceServer>,
 }
 
-/// `GET /api/ice` — STUN always, short-lived TURN when the server has a key.
+/// `GET /api/ice` — STUN always, short-lived TURN when the server has a key;
+/// `ice_fallback` when it can't be asked.
 pub fn ice(server: &str, key: &str) -> Vec<IceServer> {
-    let fallback = || {
-        vec![IceServer {
-            urls: Urls::One("stun:stun.cloudflare.com:3478".into()),
-            username: None,
-            credential: None,
-        }]
-    };
-    match get(&format!("{server}/api/ice"), key) {
-        Ok(mut res) if res.status() == 200 => res
-            .body_mut()
-            .read_json::<IceResponse>()
-            .map(|r| r.ice_servers)
-            .unwrap_or_else(|_| fallback()),
-        _ => fallback(),
+    fetch_ice(server, key).unwrap_or_else(|_| ice_fallback())
+}
+
+/// A public STUN server, for when the server can't be asked (never a relay).
+pub fn ice_fallback() -> Vec<IceServer> {
+    vec![IceServer {
+        urls: Urls::One("stun:stun.cloudflare.com:3478".into()),
+        username: None,
+        credential: None,
+    }]
+}
+
+/// `GET /api/ice` as the server answers it, or why it couldn't be asked (Hide
+/// my IP needs to tell "no relay" from "couldn't ask").
+pub fn fetch_ice(server: &str, key: &str) -> Result<Vec<IceServer>, String> {
+    let mut res = get(&format!("{server}/api/ice"), key).map_err(|e| e.to_string())?;
+    if res.status() != 200 {
+        return Err(format!("HTTP {}", res.status()));
     }
+    res.body_mut().read_json::<IceResponse>().map(|r| r.ice_servers).map_err(|e| e.to_string())
 }
 
 #[derive(Deserialize)]
@@ -137,10 +159,7 @@ struct ImageResponse {
 /// `POST /api/image?sid&ut` (key in `X-Yap-Key`) with the picture's bytes → its media id.
 pub fn upload_image(server: &str, key: &str, sid: &str, ut: &str, bytes: Vec<u8>, mime: &str) -> Result<String, String> {
     let url = format!("{server}/api/image?sid={}&ut={}", percent_encode(sid), percent_encode(ut));
-    let mut req = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(120)))
-        .http_status_as_error(false)
-        .user_agent(concat!("yap-desktop/", env!("CARGO_PKG_VERSION")))
+    let mut req = agent_config(Duration::from_secs(120))
         .build()
         .new_agent()
         .post(&url)
@@ -160,10 +179,7 @@ pub fn upload_image(server: &str, key: &str, sid: &str, ut: &str, bytes: Vec<u8>
 /// `POST /api/blob?sid&ut`: an encrypted picture (opaque bytes) → its media id.
 pub fn upload_blob(server: &str, key: &str, sid: &str, ut: &str, bytes: Vec<u8>) -> Result<String, String> {
     let url = format!("{server}/api/blob?sid={}&ut={}", percent_encode(sid), percent_encode(ut));
-    let mut req = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(120)))
-        .http_status_as_error(false)
-        .user_agent(concat!("yap-desktop/", env!("CARGO_PKG_VERSION")))
+    let mut req = agent_config(Duration::from_secs(120))
         .build()
         .new_agent()
         .post(&url)
@@ -192,10 +208,7 @@ struct DrawingResponse {
 /// A drawing for the gallery: PNG or GIF (`mime`; the server sniffs the bytes).
 pub fn upload_drawing(server: &str, key: &str, sid: &str, ut: &str, bytes: Vec<u8>, mime: &str) -> Result<crate::protocol::SavedDrawing, String> {
     let url = format!("{server}/api/drawing?sid={}&ut={}", percent_encode(sid), percent_encode(ut));
-    let mut req = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(120)))
-        .http_status_as_error(false)
-        .user_agent(concat!("yap-desktop/", env!("CARGO_PKG_VERSION")))
+    let mut req = agent_config(Duration::from_secs(120))
         .build()
         .new_agent()
         .post(&url)
@@ -315,12 +328,7 @@ pub fn post_json(url: &str, body: &serde_json::Value) -> Result<(), String> {
 }
 
 fn upload_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(60)))
-        .http_status_as_error(false)
-        .user_agent(concat!("yap-desktop/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .new_agent()
+    agent_config(Duration::from_secs(60)).build().new_agent()
 }
 
 #[derive(Deserialize)]
@@ -371,6 +379,19 @@ pub fn upload_doodle(server: &str, key: &str, sid: &str, ut: &str, bytes: Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every request goes over https://, or plain http:// to this computer;
+    /// anything else is refused before a byte is sent.
+    #[test]
+    fn plain_http_is_refused_before_sending() {
+        for url in ["http://yap.example.invalid/api/check", "http://192.168.1.4:8787/api/ice", "http://localhost@yap.example.invalid/"] {
+            assert!(matches!(agent().get(url).call(), Err(ureq::Error::RequireHttpsOnly(_))), "{url}");
+            assert!(check(url.trim_end_matches("/api/check"), "key").is_err());
+        }
+        // This computer: tried (nothing listens on port 9).
+        let local = agent().get("http://127.0.0.1:9/api/check").call();
+        assert!(local.is_err() && !matches!(local, Err(ureq::Error::RequireHttpsOnly(_))));
+    }
 
     #[test]
     fn server_config_extras_are_optional() {

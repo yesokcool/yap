@@ -2,8 +2,13 @@
  * OBS voice output: a Browser Source that joins a voice channel listen-only
  * and plays it, with an optional overlay of who's talking. The link comes
  * from Settings › Voice › Advanced › Stream to OBS:
- *   /obs#key=<invite key>&listen=<listen-only token>&channel=<voice channel id>
+ *   /obs#listen=<listen-only token>&channel=<voice channel id>
  *        [&only=<name>]   play just one person (one source per person)
+ *        [&others=1]      everyone but its own account (your own mic already goes into OBS)
+ *        [&key=<invite key>]  links made before 2026-10-24 carry the main invite key; it's not
+ *                         needed (the token alone opens the socket and /api/ice) and no longer added
+ * By default it plays everyone in the call, its own account too, from whichever
+ * device that is: talk on your phone, record the game on your PC.
  *        [&overlay=0]     audio only, nothing drawn
  *        [&keepalive=0]   never play the pause tone below (to hear in OBS what it's for)
  * The token can only listen (the server enforces it); the apps leave it out
@@ -51,6 +56,7 @@ const key = params.get('key') ?? '';
 const token = params.get('listen') ?? '';
 const channelId = params.get('channel') ?? '';
 const only = (params.get('only') ?? '').toLowerCase();
+const others = params.get('others') === '1';
 const overlay = params.get('overlay') !== '0';
 const keepAliveWanted = params.get('keepalive') !== '0';
 const $ = (id) => document.getElementById(id);
@@ -163,13 +169,17 @@ setInterval(() => {
   for (const peer of voice.peers.values()) peer.resume();
 }, 3000);
 
-/** Mute everyone but `only` (when set): their <audio> element, not a gain. */
+/** Is this session someone the link plays (`&only=`, `&others=1`)? */
+function wanted(session) {
+  if (others) return session?.uid !== state.uid;
+  if (only) return state.users.get(session?.uid)?.name?.toLowerCase() === only;
+  return true;
+}
+
+/** Mute whoever isn't wanted (`&only=`, `&others=1`): their <audio> element, not a gain. */
 function applyOnly() {
-  if (!only) return;
-  for (const sid of voice.peers.keys()) {
-    const name = state.users.get(state.sessions.get(sid)?.uid)?.name?.toLowerCase();
-    voice.setProximity(sid, name === only ? 1 : 0);
-  }
+  if (!only && !others) return;
+  for (const sid of voice.peers.keys()) voice.setProximity(sid, wanted(state.sessions.get(sid)) ? 1 : 0);
 }
 
 /** Not listening: its account isn't in the channel (and wasn't for the last 5 minutes). */
@@ -195,7 +205,7 @@ function render() {
     return;
   }
   const people = [...state.sessions.values()].filter((s) => s.voice?.channelId === channelId && s.client !== 'obs');
-  const shown = only ? people.filter((s) => state.users.get(s.uid)?.name?.toLowerCase() === only) : people;
+  const shown = people.filter(wanted);
   stage.innerHTML = shown.map((s) => {
     const u = state.users.get(s.uid);
     const face = u?.avatar ? `<img src="/media/${esc(u.avatar)}" alt="">` : u?.look ? esc(u.look) : esc(initial(u?.name ?? '?'));
@@ -203,14 +213,15 @@ function render() {
   }).join('');
 }
 
-/** STUN only, for when /api/ice says no: an OBS link made before the owner reset the main link still has the old key (worker/ice.ts has the same two). */
+/** STUN only, for when /api/ice says no (worker/ice.ts has the same two). */
 const FALLBACK_ICE = [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }];
 
 async function join() {
   if (state.joining || state.inCall) return;
   state.joining = true;
   try {
-    const ice = await fetch('/api/ice', { headers: { 'X-Yap-Key': key } })
+    // Its own token proves it may ask (an old link's key is sent too, in case this server predates that).
+    const ice = await fetch('/api/ice', { headers: { 'X-Yap-Token': token, ...(key ? { 'X-Yap-Key': key } : {}) } })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((j) => j.iceServers, () => FALLBACK_ICE);
     await voice.prepare(ice);
@@ -303,8 +314,8 @@ conn.addEventListener('close', () => {
   voice.hangupAll();
 });
 
-if (!key || !token || !channelId) {
-  note('This link is missing its key, token or channel. Copy it again from Yap › Settings › Voice › Advanced › Stream to OBS.');
+if (!token || !channelId) {
+  note('This link is missing its token or channel. Copy it again from Yap › Settings › Voice › Advanced › Stream to OBS.');
 } else if (globalThis.obsstudio) {
   conn.connect(); // OBS plays audio without a click
 } else {

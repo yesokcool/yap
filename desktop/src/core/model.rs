@@ -369,7 +369,28 @@ pub struct DrawModel {
     pub loaded: bool,
 }
 
+/// Strokes in progress kept at once (one that's quiet for 8 s isn't drawn, and goes first).
+const MAX_LIVE: usize = 64;
+
 impl DrawModel {
+    /// `draw.seg`: more of a stroke someone is drawing. A stroke keeps at most
+    /// what a finished one may have (`drawing::MAX_NUMBERS`), and at most
+    /// `MAX_LIVE` are kept: an endless stream of pieces can't grow the board.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_live(&mut self, sid: String, sk: &str, c: String, w: f32, e: bool, l: u8, p: Vec<f32>) {
+        let key = format!("{sid}:{sk}");
+        if !self.live.contains_key(&key) && self.live.len() >= MAX_LIVE {
+            self.live.retain(|_, s| s.at.elapsed() < Duration::from_secs(8));
+            if self.live.len() >= MAX_LIVE {
+                return;
+            }
+        }
+        let entry = self.live.entry(key).or_insert_with(|| LiveStroke { sid, c, w, e, l, p: vec![], at: Instant::now() });
+        let room = crate::drawing::MAX_NUMBERS.saturating_sub(entry.p.len()) & !1;
+        entry.p.extend(p.into_iter().take(room));
+        entry.at = Instant::now();
+    }
+
     /// `draw.wipe`: layer `l` emptied for everyone. Its strokes go (mine with
     /// them, so undo can't bring them back); strokes in progress stay. Returns
     /// how many went.
@@ -925,6 +946,15 @@ mod draw_tests {
         assert_eq!(d.mine, ["a", "d"], "undo can't bring a wiped stroke back");
         assert_eq!(d.version, 8, "the board redraws");
         assert_eq!(d.live.len(), 1, "a stroke still being drawn stays");
+        // Live pieces are capped: per stroke, and in how many strokes.
+        for _ in 0..100 {
+            d.add_live("x".into(), "live", "#000000".into(), 14.0, false, 2, vec![1.0; 400]);
+        }
+        assert_eq!(d.live["x:live"].p.len(), crate::drawing::MAX_NUMBERS);
+        for k in 0..200 {
+            d.add_live("y".into(), &format!("s{k}"), "#000000".into(), 14.0, false, 0, vec![1.0, 2.0]);
+        }
+        assert_eq!(d.live.len(), MAX_LIVE);
         // The bottom layer (where every stroke from before layers is).
         assert_eq!(d.wipe(0), 2);
         assert_eq!(d.strokes.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["d"]);

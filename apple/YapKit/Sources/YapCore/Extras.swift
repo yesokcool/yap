@@ -23,8 +23,8 @@ public struct Away: Codable, Sendable, Hashable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
-        until = try? c.decodeIfPresent(Int.self, forKey: .until)
-        since = try? c.decodeIfPresent(Int.self, forKey: .since)
+        until = (try? c.decodeIfPresent(Int.self, forKey: .until)).flatMap { $0 }.map(WireNumber.millis)
+        since = (try? c.decodeIfPresent(Int.self, forKey: .since)).flatMap { $0 }.map(WireNumber.millis)
     }
 
     /// Clients hide it once `until` has passed (the server drops it soon after).
@@ -129,7 +129,8 @@ public struct Roll: Codable, Sendable, Hashable {
         kind = (try? c.decodeIfPresent(String.self, forKey: .kind)) ?? "roll"
         spec = (try? c.decodeIfPresent(String.self, forKey: .spec)) ?? ""
         rolls = (try? c.decodeIfPresent([Int].self, forKey: .rolls)) ?? []
-        total = (try? c.decodeIfPresent(Int.self, forKey: .total)) ?? rolls.reduce(0, +)
+        // (wrapping: a sum of a server's numbers must never trap)
+        total = (try? c.decodeIfPresent(Int.self, forKey: .total)) ?? rolls.reduce(0, &+)
     }
 
     public var isFlip: Bool { kind == "flip" }
@@ -229,7 +230,7 @@ public struct UnreadCount: Decodable, Sendable, Hashable {
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             id = try c.decode(String.self, forKey: .id)
-            ts = (try? c.decodeIfPresent(Int.self, forKey: .ts)) ?? 0
+            ts = WireNumber.millis((try? c.decodeIfPresent(Int.self, forKey: .ts)) ?? 0)
             uid = (try? c.decodeIfPresent(String.self, forKey: .uid)) ?? ""
             body = (try? c.decodeIfPresent(String.self, forKey: .body)) ?? ""
         }
@@ -249,9 +250,9 @@ public struct UnreadCount: Decodable, Sendable, Hashable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        n = (try? c.decodeIfPresent(Int.self, forKey: .n)) ?? 0
+        n = WireNumber.count((try? c.decodeIfPresent(Int.self, forKey: .n)) ?? 0)
         first = try? c.decodeIfPresent(First.self, forKey: .first)
-        mentions = (try? c.decodeIfPresent(Int.self, forKey: .mentions)).flatMap { $0 }.map { max(0, $0) }
+        mentions = (try? c.decodeIfPresent(Int.self, forKey: .mentions)).flatMap { $0 }.map(WireNumber.count)
     }
 
     /// "12", "999+".
@@ -281,11 +282,11 @@ public struct Hang: Codable, Sendable, Hashable, Identifiable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
-        at = (try? c.decodeIfPresent(Int.self, forKey: .at)) ?? 0
+        at = WireNumber.millis((try? c.decodeIfPresent(Int.self, forKey: .at)) ?? 0)
         title = (try? c.decodeIfPresent(String.self, forKey: .title)) ?? "Hang"
         channelId = try? c.decodeIfPresent(String.self, forKey: .channelId)
         uid = (try? c.decodeIfPresent(String.self, forKey: .uid)) ?? ""
-        createdAt = (try? c.decodeIfPresent(Int.self, forKey: .createdAt)) ?? 0
+        createdAt = WireNumber.millis((try? c.decodeIfPresent(Int.self, forKey: .createdAt)) ?? 0)
     }
 
     public var date: Date { Date(timeIntervalSince1970: Double(at) / 1000) }

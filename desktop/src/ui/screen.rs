@@ -43,9 +43,12 @@ impl ScreenUi {
             self.popped = false;
             return;
         }
-        if let Some(p) = shared.screen.watch.take_picture() {
-            let size = [p.width as usize, p.height as usize];
-            let img = egui::ColorImage::from_rgba_unmultiplied(size, &p.rgba);
+        // The decoder shrinks what's bigger than this GPU takes; the texture is checked again anyway.
+        let max = ctx.input(|i| i.max_texture_side);
+        shared.screen.watch.set_max_side(max);
+        if let Some(p) = shared.screen.watch.take_picture().filter(|p| p.rgba.len() == p.width as usize * p.height as usize * 4) {
+            let img = super::images::fit_texture(egui::ColorImage::from_rgba_unmultiplied([p.width as usize, p.height as usize], &p.rgba), max);
+            let size = img.size;
             match self.tex.as_mut() {
                 Some(t) if self.size == size => t.set(img, egui::TextureOptions::LINEAR),
                 _ => {

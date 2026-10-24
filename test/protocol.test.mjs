@@ -2684,6 +2684,134 @@ if (KEY && ADMIN) {
 A.close();
 B.close();
 
+// ── Security review fixes (2026-10-24) ──────────────────────────────────
+await test('a new password signs out your other devices and OBS links (and says how many); a reset signs out all of theirs', async () => {
+  const name = `Moving ${RUN}`;
+  const one = await new Client(name).open();
+  await one.hello();
+  const two = await raw();
+  helloWith(two, { login: { name, pin: TEST_PASSWORD } });
+  const second = await reply(two);
+  assert.equal(second.uid, one.uid);
+  one.send({ t: 'obs.create' });
+  const { token: obsToken } = await one.next((m) => m.t === 'obs.created');
+  const twoClosed = closeOf(two);
+  one.send({ t: 'account.pin', pin: 'lantern-meadow-quilt-73', current: TEST_PASSWORD });
+  const done = await one.next((m) => m.t === 'account');
+  assert.equal(done.signedOut, 2, 'the other device and the OBS link');
+  assert.equal((await twoClosed)[0], 4001, 'its socket closes as signed out');
+  for (const token of [second.token, obsToken]) {
+    const c = await raw();
+    helloWith(c, { token });
+    assert.equal((await reply(c)).code, 'bad_token');
+    c.close();
+  }
+  const still = await raw();
+  helloWith(still, { token: one.token });
+  assert.equal((await reply(still)).uid, one.uid, 'the device that changed it stays signed in');
+  still.close();
+  if (ADMIN) {
+    const oneClosed = closeOf(one);
+    const viaApi = await (await admin(`/api/admin/reset-pin?uid=${one.uid}`, { method: 'POST' })).json();
+    assert.equal(viaApi.ok, true);
+    assert.equal((await oneClosed)[0], 4001, 'a reset signs out every one of their devices');
+    const c = await raw();
+    helloWith(c, { token: one.token });
+    assert.equal((await reply(c)).code, 'bad_token');
+    c.close();
+  }
+});
+
+// (Alice and Bob's connections are closed by now: these bring their own.)
+const C = await new Client(`Wren ${RUN}`).open();
+await C.hello();
+const D = await new Client(`Jules ${RUN}`).open();
+await D.hello();
+
+await test('OBS links need no invite key: their listen token opens the socket and /api/ice', async () => {
+  C.send({ t: 'obs.create' });
+  const { token } = await C.next((m) => m.t === 'obs.created');
+  const ice = await fetch(`${BASE}/api/ice`, { headers: { 'X-Yap-Token': token } });
+  assert.equal(ice.status, 200);
+  assert.ok(Array.isArray((await ice.json()).iceServers));
+  if (KEY) {
+    assert.equal((await fetch(`${BASE}/api/ice`, { headers: { 'X-Yap-Token': 'made-up' } })).status, 401, 'a made-up token gets nothing');
+    assert.equal((await fetch(`${BASE}/api/ice`)).status, 401);
+  }
+  const obs = await new Client('obs-no-key').open('');
+  obs.send({ t: 'hello', v: 1, client: 'obs', token });
+  const ready = await obs.next((m) => m.t === 'ready');
+  assert.deepEqual([ready.uid, ready.key], [C.uid, undefined]);
+  C.send({ t: 'obs.revoke' });
+  await C.next((m) => m.t === 'obs.revoked');
+  obs.close();
+});
+
+await test('names that look like someone else’s are refused (any case, accents, Cyrillic look-alikes); renames go in the mod log', async () => {
+  const theirs = nameOf(D);
+  const lookalike = theirs.replace(/e/g, '\u0435'); // Cyrillic е
+  assert.notEqual(lookalike, theirs);
+  const newcomer = await raw();
+  helloWith(newcomer, { signup: { name: lookalike, pin: TEST_PASSWORD, color: '#123456' } });
+  assert.equal((await reply(newcomer)).code, 'name_taken');
+  newcomer.close();
+  for (const name of [lookalike, theirs.toUpperCase(), theirs.replace('e', 'é')]) {
+    C.send({ t: 'profile', name });
+    assert.equal(await sendErr(C, 'profile'), 'name_taken', name);
+  }
+  const mine = nameOf(C);
+  C.send({ t: 'profile', name: `Ada ${RUN}` });
+  await D.next((m) => m.t === 'user' && m.user.id === C.uid && m.user.name === `Ada ${RUN}`);
+  C.send({ t: 'profile', name: mine });
+  await D.next((m) => m.t === 'user' && m.user.id === C.uid && m.user.name === mine);
+  C.send({ t: 'profile', color: '#224466' }); // no new name: no entry, and keeping your own name is never "taken"
+  await D.next((m) => m.t === 'user' && m.user.id === C.uid && m.user.color === '#224466');
+  D.send({ t: 'modlog' });
+  const renames = (await D.next((m) => m.t === 'modlog')).entries.filter((e) => e.action === 'member.rename' && e.actor === C.uid);
+  assert.deepEqual(renames.slice(0, 2).map((e) => e.detail), [`"Ada ${RUN}" → "${mine}"`, `"${mine}" → "Ada ${RUN}"`]);
+});
+
+await test('a relayed ICE candidate with an impossible line index is dropped (older iPhone/Mac apps crash on one)', async () => {
+  const name = `Sig ${RUN}`;
+  C.send({ t: 'channel.create', name, kind: 'voice' });
+  const ch = (await D.next((m) => m.t === 'channel' && m.channel.name === name)).channel.id;
+  C.send({ t: 'voice.join', channelId: ch });
+  await D.next((m) => m.t === 'voice' && m.sid === C.ready.sid && m.channelId === ch);
+  D.send({ t: 'voice.join', channelId: ch });
+  await C.next((m) => m.t === 'voice' && m.sid === D.ready.sid && m.channelId === ch);
+  const candidate = (c, sdpMLineIndex) => ({ t: 'signal', to: D.ready.sid, data: { candidate: { candidate: c, sdpMid: '0', sdpMLineIndex } } });
+  C.send(candidate('candidate:huge', 3_000_000_000));
+  C.send(candidate('candidate:negative', -1));
+  C.send(candidate('candidate:fine', 0));
+  assert.equal((await D.next((m) => m.t === 'signal' && m.from === C.ready.sid)).data.candidate.candidate, 'candidate:fine', 'only the sane one arrives');
+  C.send({ t: 'voice.leave' });
+  D.send({ t: 'voice.leave' });
+  await D.next((m) => m.t === 'voice' && m.sid === D.ready.sid && m.channelId === null);
+  C.send({ t: 'channel.archive', channelId: ch });
+  await D.next((m) => m.t === 'channel.archived' && m.channelId === ch);
+});
+
+await test('a tiny picture declaring a huge size is refused; a clip is stored under the server’s own WAV header', async () => {
+  // 20000 × 16, two 1 × 1 frames: 66 bytes that crashed desktop apps when drawn.
+  const frame = [0x21, 0xf9, 4, 0, 10, 0, 0, 0, 0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 0x4c, 0x01, 0];
+  const bomb = Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x20, 0x4e, 16, 0, 0x80, 0, 0, 0, 0, 0, 255, 255, 255, ...frame, ...frame, 0x3b]);
+  for (const [path, params] of [['/api/image', {}], ['/api/emoji', { name: `bomb${RUN}` }], ['/api/drawing', {}]]) {
+    const res = await postTo(path, C, bomb, params);
+    assert.deepEqual([res.status, (await res.json()).code], [400, 'too_big'], path);
+  }
+  const clip = wav(600);
+  const tail = Buffer.alloc(24); // a second fmt after the data, saying 1 Hz: another app's reader took it
+  tail.write('fmt ', 0); tail.writeUInt32LE(16, 4); tail.writeUInt16LE(1, 8); tail.writeUInt16LE(1, 10); tail.writeUInt32LE(1, 12); tail.writeUInt32LE(2, 16); tail.writeUInt16LE(2, 20); tail.writeUInt16LE(16, 22);
+  const up = await (await postTo('/api/sound', C, Buffer.concat([clip, tail]), { name: `tail ${RUN}` })).json();
+  assert.equal(up.ok, true, JSON.stringify(up));
+  const stored = Buffer.from(await (await fetch(`${BASE}/media/${up.sound.media}`)).arrayBuffer());
+  assert.deepEqual(stored, clip, 'the measured samples under a plain header, nothing after');
+  C.send({ t: 'sound.delete', id: up.sound.id });
+  await D.next((m) => m.t === 'sound.deleted' && m.id === up.sound.id);
+});
+C.close();
+D.close();
+
 // Last: it can trip the per-IP limit for ~10 s.
 await test('restore import refuses a server that already has people', async () => {
   const res = await admin('/api/admin/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ phase: 'check' }) });

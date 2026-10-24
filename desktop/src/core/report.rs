@@ -720,7 +720,7 @@ impl Core {
             InputMode::Ptt => "push to talk".into(),
             InputMode::Open => "always on".into(),
         };
-        let relay = if c.relay_only && m.relay == Some(false) { "on (but this server has no voice relay)".into() } else { on_off(c.relay_only) };
+        let relay = if c.relay_only && m.relay == Some(false) { "on (but this server has no voice relay: no calls)".into() } else { on_off(c.relay_only) };
         [
             ("Quality", format!("{}{}", kbps(c.bitrate), shared.map(|b| format!(" (this channel: {} for everyone)", kbps(b))).unwrap_or_default())),
             ("Input mode", mode),
@@ -796,7 +796,8 @@ impl Core {
         if relay_only && self.voice.has_relay() {
             log.note(0, "Hiding your IP: everything goes through the voice relay");
         } else if relay_only {
-            log.note(0, "Hide my IP is on, but this server has no voice relay: connecting directly");
+            // (A call doesn't start like this any more: Hide my IP never connects directly.)
+            log.note(0, "Hide my IP is on, but there's no voice relay: connecting to no one");
         }
         for (key, name) in &there {
             log.joined(0, key, name, None);

@@ -100,6 +100,9 @@ public final class YapClient {
     /// connection, in case they resume ("reconnecting…"); they stay listed.
     public internal(set) var heldSessions: Set<String> = []
     public var pinChange: PinChange = .idle
+    /// How many of my other devices the last new password signed out (nil:
+    /// an older server didn't say).
+    public internal(set) var passwordSignedOut: Int?
     public var pinReset: PinReset?
 
     public internal(set) var channelsById: [String: Channel] = [:]
@@ -202,6 +205,10 @@ public final class YapClient {
     @ObservationIgnored public var onHangNow: ((Hang) -> Void)?
     /// I was just let in from the waiting room (the app chimes).
     @ObservationIgnored public var onAdmitted: (() -> Void)?
+    /// This device just forgot its sign-in (signed out here, signed out by the
+    /// server, another server): the app also signs out its in-app web view,
+    /// whose web app keeps a sign-in of its own.
+    @ObservationIgnored public var onSignedOut: (() -> Void)?
     /// Saved to Personal: the first time with encryption on, say what the server sees.
     @ObservationIgnored public var savedToPersonalBefore: () -> Bool = { true }
 
@@ -249,10 +256,16 @@ public final class YapClient {
         self.credentials = credentials
         clientLabel = client
         self.urlSession = urlSession
-        endpoint = credentials.endpoint
+        // A plain-http server saved by an older version (to another computer) isn't used: paste its https link.
+        let saved = credentials.endpoint
+        let usable = saved?.isSafeToUse == true ? saved : nil
+        endpoint = usable
         uid = credentials.uid ?? ""
         lastRead = credentials.lastRead
-        if credentials.endpoint == nil {
+        if saved != nil, usable == nil {
+            phase = .needsInvite
+            authError = AuthError(code: "plain_http", message: ServerEndpoint.InviteProblem.plainHTTP.message, mode: .login)
+        } else if usable == nil {
             phase = .needsInvite
         } else if credentials.token == nil {
             phase = .signedOut

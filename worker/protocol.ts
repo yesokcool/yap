@@ -389,7 +389,7 @@ export type ClientMessage =
   /** Browser pushes (Web Push): this browser's subscription, or forget it. */
   | { t: 'push.subscribe'; endpoint: string; keys: { p256dh: string; auth: string } }
   | { t: 'push.unsubscribe'; endpoint: string }
-  /** A one-time sign-in pass (15 min) for a new home-screen app or device: hello with it as `token`. */
+  /** A one-time sign-in pass (5 min) for a new home-screen app or device: hello with it as `token`. */
   | { t: 'device.handoff' }
   /** Store (or replace) your wrapped Personal space key; null removes it (back to unencrypted). */
   | { t: 'vault.set'; wrap: VaultWrap | null }
@@ -507,8 +507,11 @@ export type ServerMessage =
   | { t: 'when'; uid: string; slots: number[] }
   /** Instead of `ready` for a newcomer: wait until the owner or a mod lets you in (then `ready` arrives). */
   | { t: 'pending'; message: string; uid: string; token?: string }
-  /** Password set/changed (`kind` is always "password" now); `token` is never sent any more. */
-  | { t: 'account'; hasPin: boolean; token?: string; kind?: 'pin' | 'password' }
+  /**
+   * Password set/changed (`kind` is always "password" now); `token` is never sent any more.
+   * `signedOut`: how many of your other devices (OBS links too) the new password signed out.
+   */
+  | { t: 'account'; hasPin: boolean; token?: string; kind?: 'pin' | 'password'; signedOut?: number }
   | { t: 'devices'; devices: Device[] }
   /** Someone signed in to your account on a new device (sent to your other devices). */
   | { t: 'signin.alert'; device: Device }
@@ -577,6 +580,20 @@ export const LIMITS = {
   /** Doodle reactions. */
   doodleBytes: 64 * 1024,
   doodlePx: 256,
+  /**
+   * Any stored picture (pictures, emojis, avatars, drawings, doodles): at most
+   * this many pixels a side and in all; an animated one (GIF, WebP) at most
+   * `animatedPx` a side and `framePixels` over all its frames. A tiny file can
+   * declare a huge picture, and apps decode every frame in full.
+   */
+  picturePx: 8192,
+  pictureMegapixels: 50,
+  /** Custom emojis and avatars, which are only ever shown small (clients shrink them first). */
+  iconPx: 2048,
+  animatedPx: 4096,
+  framePixels: 150_000_000,
+  /** What one account may upload in a day (UTC), all kinds together. */
+  uploadBytesPerDay: 300 * 1024 * 1024,
   pollOptions: 10,
   pollOptionChars: 80,
   pollQuestionChars: 300,

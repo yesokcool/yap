@@ -81,10 +81,14 @@ public enum Vault {
         return (wrap, key)
     }
 
+    /// The stretching a wrap may ask for (the server takes 100k–10M): more
+    /// than `UInt32` traps, and billions would hang the unlock for hours.
+    public static let iterationRange = 1...10_000_000
+
     /// Unwrap with the passcode; `.wrongPasscode` if it doesn't fit.
     public static func open(_ wrap: VaultWrap, passcode: String) throws -> SymmetricKey {
         guard let salt = Data(base64URL: wrap.salt), let iv = Data(base64URL: wrap.iv), let ct = Data(base64URL: wrap.ct),
-              ct.count > 16, wrap.iter > 0 else { throw Failure.badWrap }
+              ct.count > 16, iterationRange.contains(wrap.iter) else { throw Failure.badWrap }
         let kek = passcodeKey(passcode, salt: salt, iterations: wrap.iter)
         do {
             let box = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: iv), ciphertext: ct.dropLast(16), tag: ct.suffix(16))
@@ -122,7 +126,7 @@ public enum Vault {
                 CCKeyDerivationPBKDF(CCPBKDFAlgorithm(kCCPBKDF2),
                                      pw.baseAddress?.assumingMemoryBound(to: CChar.self), password.count,
                                      s.baseAddress?.assumingMemoryBound(to: UInt8.self), salt.count,
-                                     CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256), UInt32(iterations),
+                                     CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256), UInt32(clamping: iterations),
                                      &derived, derived.count)
             }
         }

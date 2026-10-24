@@ -481,6 +481,11 @@ impl Core {
             self.set_status(Status::Setup, "");
             return;
         }
+        // A saved (or --server) plain-http address: the Sign On screen says why, and asks for the https:// link.
+        if let Some(why) = crate::config::insecure(&server) {
+            self.set_status(Status::BadKey, why);
+            return;
+        }
         if !can_hello {
             self.set_status(Status::SignIn, "");
             return;

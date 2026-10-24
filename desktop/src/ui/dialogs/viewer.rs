@@ -20,13 +20,13 @@ pub struct Viewer {
 pub(super) fn viewer(app: &mut App, ui: &mut egui::Ui, p: &Pal, acts: &mut Vec<Act>, v: &mut Viewer, keep: &mut bool) {
     let tex = if v.pixel { app.images.get_pixel(&v.url, true) } else { app.images.get_full(&v.url, v.key) };
     if let Some((_, sz)) = tex
-        && (v.size.0 <= 0.0 || v.size.1 <= 0.0)
+        && !crate::ui::chat::sane_size(v.size.0, v.size.1)
     {
         v.size = (sz.x, sz.y);
     }
     let screen = ui.ctx().content_rect();
     let max = vec2((screen.width() * 0.82 - 40.0).max(200.0), (screen.height() * 0.78 - 110.0).max(140.0));
-    let (w, h) = if v.size.0 > 0.0 && v.size.1 > 0.0 { v.size } else { (480.0, 320.0) };
+    let (w, h) = if crate::ui::chat::sane_size(v.size.0, v.size.1) { v.size } else { (480.0, 320.0) };
     let grow = if v.pixel { 8.0 } else { 1.0 };
     let s = (max.x / w).min(max.y / h).min(grow);
     let size = vec2(w * s, h * s).round();

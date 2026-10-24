@@ -131,6 +131,12 @@ from what you're typing in; the app saves its own window
 `YAP_DEBUG_SHOT_AFTER` seconds in — default 6 — and quits; needs no
 screen-recording permission and works with the screen locked).
 
+A server's address is `https://` (a bare host gets it). Plain `http://` (and
+`ws://`) is refused, with a message, for anything but this computer
+(`localhost`, 127.0.0.0/8, `::1`): the invite key, the device token and your
+password would travel unencrypted. That goes for `--server`, a pasted invite
+link, the saved settings and every request the app makes.
+
 Settings live in `~/.config/yap/config.json` (Linux),
 `%APPDATA%\Yap\config.json` (Windows), `~/Library/Application Support/Yap/config.json`
 (macOS); device tokens in `tokens.json` next to it, the last three call
@@ -176,8 +182,9 @@ has no install button. People using it get new versions from the server's
    `yap-update-signing-key`
    (`security add-generic-password -a "$USER" -s yap-update-signing-key -w`
    asks for it). It refuses a binary that doesn't contain the
-   matching public key, so you can't ship an update the apps would reject. It
-   never prints the private key. It writes `web/downloads/` (gitignored);
+   matching public key, so you can't ship an update the apps would reject.
+   Each file gets both signatures (Updates below). It never prints the
+   private key. It writes `web/downloads/` (gitignored);
    deploy the server from the same machine afterwards.
 
    ```sh
@@ -239,9 +246,11 @@ has no install button. People using it get new versions from the server's
   after a PIN's prompt was put off.
 - **Account protection:** Settings › Account says **Change password** (**Set
   a password** while you're still on a PIN): Current password ("Current
-  password or PIN" while on one), New password with "8 characters or more.",
-  Show; a refusal shows under the fields in the server's words and keeps
-  them. It also lists where you're signed in (`account.devices`): sign one
+  password or PIN" while on one), New password with "8 characters or more."
+  and "Your other devices will be signed out." (the server signs out every
+  other device and OBS link; the saved toast says "Signed out your 2 other
+  devices." from `account.signedOut`), Show; a refusal shows under the fields
+  in the server's words and keeps them. It also lists where you're signed in (`account.devices`): sign one
   out (`account.revoke`) or all the others (`account.signoutOthers`, asked
   first in the web's words). "Sign out of this computer" (a red danger
   button) asks once first. A `signin.alert` shows "New sign-in: <device>,
@@ -616,9 +625,12 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   voice panel,
   **Hide my IP address in calls** (`"relay_only"` in config.json, like the
   web's `relayOnly`: every peer connection gathers TURN relay candidates only,
-  `iceTransportPolicy: relay`, and never falls back to host candidates; it's
-  greyed out until `/api/ice` hands out a `turn:` relay — this stack can't use
-  `turns:` — and a change applies from the next call),
+  `iceTransportPolicy: relay`, and never falls back to host candidates or a
+  direct call: when `/api/ice` has no `turn:` relay — this stack can't use
+  `turns:` — or doesn't answer, the app doesn't join and says why. It's
+  greyed out until there's a relay, unless it's on (then it can always be
+  turned off, and its note says calls can't connect); a change applies from
+  the next call),
   join/leave/mute blips. **Channel quality:** the voice panel's ⋯ (next to
   the channel name) sets one bitrate for everyone in the channel
   (`channel.bitrate`) or "each person's own"; the panel only says "Sound:
@@ -859,16 +871,38 @@ A build with an update key (see Self-update above) fetches
 
 ```json
 { "version": "0.2.0", "date": "2026-10-05", "notes": ["…"],
-  "files": { "linux-x86_64":   { "path": "/downloads/yap-linux-x86_64", "size": 123, "sha256": "<hex>", "sig": "<base64>" },
+  "files": { "linux-x86_64":   { "path": "/downloads/yap-linux-x86_64", "size": 123, "sha256": "<hex>",
+                                 "sig": "<base64>", "sig2": "<base64>" },
              "windows-x86_64": { … }, "macos-aarch64": { … } } }
 ```
 
-If `version` is newer (semver) than the running one, an **Update to X** button
+Each file has two Ed25519 signatures, made by `tools/publish-desktop.mjs`
+with the same key:
+
+- **`sig2`** (required by every app after desktop 0.16.0) signs this exact UTF-8 text, four
+  lines joined by `\n` with nothing after the last:
+
+  ```
+  yap-update-v2
+  <platform key, e.g. linux-x86_64>
+  <version, exactly as in the manifest>
+  <the file's SHA-256, lowercase hex>
+  ```
+
+  (`signed_message` in `src/update.rs`, `updateMessage` in `tools/lib.mjs`.)
+  So whoever controls `latest.json` can't relabel an older signed build as
+  newer, or serve one platform's build to another.
+- **`sig`** signs the raw file bytes. Only apps from before `sig2` check it;
+  it stays so they still update.
+
+If `version` is newer (semver) than the running one and its entry has a
+`sig2`, an **Update to X** button
 appears in the status bar (the notes are in its tooltip and in the dialog it
 opens); Settings › About has **Check for updates**. Nothing installs until you
 click **Install and restart**: Yap downloads the file next to its executable
-(a hidden `.yap.update-*.tmp`), checks the size, the SHA-256 and an **Ed25519
-signature over the raw file bytes** against the public key built into the
+(a hidden `.yap.update-*.tmp`, at most 256 MB), checks that the version is
+newer than its own, the size, the SHA-256 and the **`sig2` signature over its
+own platform, that version and the hash** against the public key built into the
 binary (`YAP_UPDATE_PUBKEY` at build time, read with `option_env!` in
 `src/update.rs`), and only then swaps the executable (Windows: the running
 `yap.exe` is renamed to `yap.exe.old` and the new one moved in; Linux/macOS:
@@ -894,8 +928,9 @@ after the manifest keys:
 signed, not an `.app`). The version comes from `Cargo.toml`.
 
 `tests/update-e2e.mjs` checks the whole path against a local server and a
-throwaway key: tampered bytes, a signature from another key and a size lie are
-refused with the executable untouched; a good update is swapped in and
+throwaway key: tampered bytes, a signature from another key, an old build
+relabelled as newer, another platform's signature, and a size lie are
+refused with the executable untouched; a manifest with only `sig` isn't offered; a good update is swapped in and
 relaunched with the same arguments; leftovers are cleaned; a build without a
 key never asks; a release build ignores the overrides
 (`node desktop/tests/update-e2e.mjs`, port `YAP_UPDATE_PORT`, default 8796;
@@ -1541,7 +1576,8 @@ Windows yet (a named pipe would do; its global keys see everything there).
 - **Hide my IP address in calls** against a server with a real TURN relay:
   the call connects (a little more delay), and the peer only ever sees the
   relay's address (chrome://webrtc-internals on a web peer shows no host or
-  srflx candidates from us).
+  srflx candidates from us). Against a server without one, joining says "Hide
+  my IP is on, but this server has no voice relay…" and connects to no one.
 - Noise suppression quality and the voice-activity threshold on a real mic.
 - **Updating on Windows and Linux** (the rename-the-running-exe swap and the
   relaunch are only exercised on macOS by the tests), and a first download

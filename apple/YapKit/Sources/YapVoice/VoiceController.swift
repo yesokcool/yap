@@ -18,7 +18,9 @@ public struct VoiceSettings: Codable, Sendable, Equatable {
     /// uid → gain (1 = normal, 0…2).
     public var volumes: [String: Double] = [:]
     /// "Hide my IP address in calls": voice only through the server's TURN
-    /// relay (when it has one), so the people you talk to never see your address.
+    /// relay, so the people you talk to never see your address. Without a
+    /// relay that means no voice at all, never a direct connection (the call
+    /// says so: `VoiceController.relayMissing`).
     public var relayOnly = false
     /// iPhone: Bluetooth headphones play in high quality (A2DP) while the
     /// phone's own mic listens, instead of the headset's narrowband call mode.
@@ -129,6 +131,9 @@ public enum ConnectionHint: Sendable, Equatable {
     case needsRelay
     /// ICE failed although there is a relay ("can't connect").
     case cantConnect
+    /// Hide my IP address is on and there's no relay to go through: nobody
+    /// can be reached (it never falls back to a direct connection).
+    case hiddenNoRelay
     /// More than 3 % of their audio patched over, or a slow round trip.
     case weak(concealed: Double, rttMs: Double?)
 }
@@ -324,6 +329,7 @@ public final class VoiceController: VoiceCoordinator {
         if let demo, let uid = client.sessions[sid]?.uid, let hint = demo.hints[uid] { return hint }
         if keeper.isGhost(sid) { return .reconnecting }
         guard channelId != nil, sid != client.mySid, let state = engine.peerStates[sid] else { return nil }
+        if relayMissing, state != .connected { return .hiddenNoRelay }
         if engine.failed.contains(sid), state != .connected { return engine.hasRelay ? .cantConnect : .needsRelay }
         if let weak = engine.weak[sid] { return .weak(concealed: weak.concealed, rttMs: weak.rttMs) }
         return nil
@@ -335,6 +341,13 @@ public final class VoiceController: VoiceCoordinator {
     public var ownConnectionWeak: Bool {
         if demo?.ownWeak == true { return true }
         return engine.ownLinkWeak && isInVoice
+    }
+
+    /// In a call with Hide my IP address on and no voice relay (none on this
+    /// server, or `/api/ice` didn't answer): nobody can be reached, and the
+    /// call says so instead of quietly connecting directly.
+    public var relayMissing: Bool {
+        wantedChannelId != nil && engine.relayOnly && !engine.hasRelay
     }
 
     /// Someone in voice is speaking (their ring): the engine's levels (or a screenshot's).
@@ -389,8 +402,7 @@ public final class VoiceController: VoiceCoordinator {
         guard wantedChannelId == channelId else { return }
         let ice = await ServerAPI(endpoint: endpoint).iceServers()
         guard wantedChannelId == channelId, client.isConnected else { return }
-        relayAvailable = IceServerConfig.hasRelay(ice)
-        engine.relayOnly = settings.relayOnly && IceServerConfig.hasRelay(ice)
+        applyRelaySetting(ice)
         #if os(iOS)
         if requestsMicPermission { AudioSessionSetup.configure(highQualityBluetooth: settings.highQualityBluetooth) }
         #endif
@@ -646,6 +658,14 @@ public final class VoiceController: VoiceCoordinator {
         guard let feeder else { return }
         feeder.setDelivering(!engine.screenViewers.isEmpty)
         if joined { feeder.refresh() }
+    }
+
+    /// Hide my IP address: relay only whenever it's on. It fails closed: no
+    /// relay (or `/api/ice` didn't answer) means nobody can be reached, never
+    /// a direct connection that shows my address (`relayMissing` says so).
+    func applyRelaySetting(_ ice: [IceServerConfig]) {
+        relayAvailable = IceServerConfig.hasRelay(ice)
+        engine.relayOnly = settings.relayOnly
     }
 
     /// Asks the server whether it has a voice relay (Settings shows "Hide my
@@ -982,7 +1002,7 @@ extension VoiceController {
         lines.append("Echo cancellation: \(processing)")
         lines.append("Automatic gain: \(processing)")
         lines.append("Music mode: not in this app")
-        lines.append("Hide my IP address: \(engine.relayOnly ? "on" : settings.relayOnly ? "on, but this server has no voice relay" : "off")")
+        lines.append("Hide my IP address: \(!engine.relayOnly ? "off" : engine.hasRelay ? "on" : "on, but this server has no voice relay (nobody can be reached)")")
         lines.append("Redundancy (RED): \(engine.redundancy ? "on" : "off")")
         lines.append("Lower shared media while friends talk: \(settings.dipSharedMedia ? "on" : "off")")
         #if os(iOS)

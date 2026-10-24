@@ -425,14 +425,14 @@ public struct Message: Codable, Sendable, Hashable, Identifiable {
         channelId = try c.decode(String.self, forKey: .channelId)
         uid = try c.decode(String.self, forKey: .uid)
         body = try c.decodeIfPresent(String.self, forKey: .body) ?? ""
-        ts = try c.decodeIfPresent(Int.self, forKey: .ts) ?? 0
+        ts = WireNumber.millis(try c.decodeIfPresent(Int.self, forKey: .ts) ?? 0)
         // A malformed GIF shouldn't hide the rest of the message.
         gif = try? c.decodeIfPresent(Gif.self, forKey: .gif)
         image = try? c.decodeIfPresent(ImageRef.self, forKey: .image)
         reactions = (try? c.decodeIfPresent([Reaction].self, forKey: .reactions)) ?? []
-        editedAt = try? c.decodeIfPresent(Int.self, forKey: .editedAt)
+        editedAt = (try? c.decodeIfPresent(Int.self, forKey: .editedAt)).flatMap { $0 }.map(WireNumber.millis)
         reply = try? c.decodeIfPresent(Reply.self, forKey: .reply)
-        pinnedAt = try? c.decodeIfPresent(Int.self, forKey: .pinnedAt)
+        pinnedAt = (try? c.decodeIfPresent(Int.self, forKey: .pinnedAt)).flatMap { $0 }.map(WireNumber.millis)
         poll = try? c.decodeIfPresent(Poll.self, forKey: .poll)
         roll = try? c.decodeIfPresent(Roll.self, forKey: .roll)
     }
@@ -711,6 +711,15 @@ public struct ModLogEntry: Codable, Sendable, Hashable, Identifiable {
             let role = ["mod": "a mod", "member": "a member", "owner": "the owner"][detail ?? ""] ?? detail ?? "a member"
             return "made \(who) \(role)"
         case "member.resetPin": return "reset \(who)'s password"
+        case "member.rename":
+            // detail: `"Old name" → "New name"`
+            // (the arrow's own quotes are never the outer ones: `" → "` alone is no names).
+            guard let detail, detail.hasPrefix("\""), detail.hasSuffix("\""),
+                  let arrow = detail.range(of: "\" → \"", options: .backwards),
+                  arrow.lowerBound > detail.startIndex, arrow.upperBound < detail.endIndex else { return "changed their name" }
+            let from = detail[detail.index(after: detail.startIndex)..<arrow.lowerBound]
+            let to = detail[arrow.upperBound..<detail.index(before: detail.endIndex)]
+            return "changed their name from “\(from)” to “\(to)”"
         case "member.merge": return "merged a duplicate account into \(who)'s"
         case "member.unmerge": return "split a merged account back out"
         case "owner.claim": return "became the owner"

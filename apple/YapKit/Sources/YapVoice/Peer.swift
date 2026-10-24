@@ -198,8 +198,9 @@ final class Peer {
         case .screen:
             return // the engine handles these
         case .candidate(let c):
-            guard !c.candidate.isEmpty else { return }
-            let candidate = RTCIceCandidate(sdp: c.candidate, sdpMLineIndex: Int32(c.sdpMLineIndex ?? 0), sdpMid: c.sdpMid)
+            // A candidate for an m-line no description has is dropped, not trapped on.
+            guard !c.candidate.isEmpty, let index = c.mLineIndex else { return }
+            let candidate = RTCIceCandidate(sdp: c.candidate, sdpMLineIndex: index, sdpMid: c.sdpMid)
             do {
                 try await pc.add(candidate)
             } catch {

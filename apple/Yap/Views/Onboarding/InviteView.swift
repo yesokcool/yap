@@ -98,8 +98,12 @@ struct InviteView: View {
     }
 
     private func check() {
-        guard let endpoint = ServerEndpoint.parse(invite: link) else {
-            error = "That doesn't look like a Yap invite link."
+        let endpoint: ServerEndpoint
+        do {
+            endpoint = try ServerEndpoint.read(invite: link)
+        } catch {
+            // Not a link, or plain http:// to another computer.
+            self.error = error.message
             return
         }
         error = nil

@@ -33,14 +33,14 @@ export const voice = new Voice({
 export async function fetchIce() {
   try {
     const res = await api('/api/ice');
-    return (await res.json()).iceServers;
-  } catch {
-    return [{ urls: 'stun:stun.cloudflare.com:3478' }];
-  }
+    const { iceServers } = await res.json();
+    if (Array.isArray(iceServers)) return iceServers;
+  } catch {}
+  return [{ urls: 'stun:stun.cloudflare.com:3478' }];
 }
 
 /** Does this server hand out a TURN relay (needed for relay-only voice)? */
-export const hasRelay = (servers) => servers.some((s) => [s.urls].flat().some((u) => /^turns?:/.test(u)));
+export const hasRelay = (servers) => Array.isArray(servers) && servers.some((s) => [s?.urls].flat().some((u) => /^turns?:/.test(u)));
 
 const GHOST_MS = 30_000;
 
@@ -380,9 +380,14 @@ export async function joinVoice(channelId) {
   voice.setChannelBitrate(state.channels.get(channelId)?.bitrate ?? null);
   renderVoicePanel();
   renderHeader(); // a Place's "voice keeps going"
+  // "Hide my IP" fails closed: relay only, always. With no relay to be had (none on this
+  // server, or /api/ice failing twice), nobody is reached at all, and you're told why,
+  // rather than your address quietly going to everyone in the call.
+  voice.relayOnly = settings.relayOnly;
   try {
-    const ice = await fetchIce();
-    voice.relayOnly = settings.relayOnly && hasRelay(ice);
+    let ice = await fetchIce();
+    if (settings.relayOnly && !hasRelay(ice)) ice = await fetchIce();
+    if (settings.relayOnly && !hasRelay(ice)) toast("Hide my IP is on, but this server's voice relay isn't available, so you can't connect to anyone. Turn it off in Settings › Voice › Advanced to talk directly.");
     await voice.prepare(ice);
   } catch (err) {
     console.warn('voice setup failed', err);

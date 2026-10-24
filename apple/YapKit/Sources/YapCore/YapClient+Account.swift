@@ -41,12 +41,17 @@ extension YapClient {
     /// same server with a new key (the old one was rotated) keeps this device
     /// signed in; another server starts over.
     public func useInvite(_ endpoint: ServerEndpoint) {
+        guard endpoint.isSafeToUse else {
+            authError = AuthError(code: "plain_http", message: ServerEndpoint.InviteProblem.plainHTTP.message, mode: .login)
+            return
+        }
         let sameServer = self.endpoint?.baseURL == endpoint.baseURL
         if !sameServer {
             connection?.stop()
             connection = nil
             credentials.token = nil
             resetServerState()
+            onSignedOut?()
         }
         credentials.endpoint = endpoint
         self.endpoint = endpoint
@@ -89,6 +94,9 @@ extension YapClient {
             // A goodbye first, so nobody keeps our call waiting for us to come back.
             if let mySid, sessions[mySid]?.voice != nil { connection.send(.voiceLeave) }
             connection.send(.accountSignout)
+            // The server closes it (4001) once it's done: that's no news to us.
+            connection.onMessage = nil
+            connection.onClose = nil
             // Let the frame go out before closing our end.
             Task { [connection] in
                 try? await Task.sleep(for: .milliseconds(400))
@@ -115,6 +123,7 @@ extension YapClient {
         pendingHello = nil
         resetServerState()
         uid = ""
+        onSignedOut?()
     }
 
     /// Sign out and forget the server too (paste a new invite).
@@ -128,6 +137,7 @@ extension YapClient {
     /// Set or change my password (`account.pin`; `current` = my password,
     /// or my old PIN while I'm on one).
     public func changePassword(to pin: String, current: String?) {
+        passwordSignedOut = nil
         pinChange = .saving
         if !send(.accountPin(pin: pin, current: current?.isEmpty == true ? nil : current)) {
             pinChange = .failed("Not connected right now. Try again in a moment.")
@@ -166,6 +176,15 @@ extension YapClient {
             voice?.clientConnectionDropped()
             authError = AuthError(code: "bad_key", message: "That invite link doesn't work anymore. Paste the new one.", mode: .login)
             phase = .needsInvite
+        case .signedOut:
+            // Signed out from another device, or by a new password (mine or
+            // a mod's reset): the same clean slate as `bad_token`, without
+            // reconnecting to hear it.
+            connection?.stop()
+            connection = nil
+            endSession()
+            authError = AuthError(code: "bad_token", message: Self.friendly(code: "bad_token", message: "", attempted: nil), mode: .login)
+            phase = .signedOut
         case .lost:
             let wasOnline = mySid != nil
             mySid = nil
@@ -323,6 +342,7 @@ extension YapClient {
         vaultBefore = nil
         secretKind = nil
         pinChange = .idle
+        passwordSignedOut = nil
         pinReset = nil
         lastTypingSent = [:]
         plainWaiter?([])

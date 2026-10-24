@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
 pub const ITERATIONS: u32 = 600_000;
+/// The most rounds a wrap may ask for (a little under a minute on a slow computer).
+const MAX_ITERATIONS: u32 = 10_000_000;
 const AAD_WRAP: &[u8] = b"yap:wrap:v1";
 const AAD_NOTE: &[u8] = b"yap:note:v1";
 const AAD_BLOB: &[u8] = b"yap:blob:v1";
@@ -114,7 +116,8 @@ pub fn unlock(wrap: &Wrap, passcode: &str) -> Result<Key, String> {
     let salt = unb64u(&wrap.salt)?;
     let iv = unb64u(&wrap.iv)?;
     let ct = unb64u(&wrap.ct)?;
-    if iv.len() != 12 {
+    // (The rounds come from the server: a few billion would keep this thread busy for hours.)
+    if iv.len() != 12 || !(1..=MAX_ITERATIONS).contains(&wrap.iter) {
         return Err("bad wrap".into());
     }
     let k = kek(passcode, &salt, wrap.iter);
@@ -306,6 +309,10 @@ mod tests {
         assert!(unlock(&wrap, "purple tiger rivers").is_err());
         let (_, other) = create("another one entirely", FAST);
         assert!(decrypt_note(&other, &body).is_err());
+        // Rounds a server can't make us spend hours on (nor none at all).
+        for iter in [u32::MAX, MAX_ITERATIONS + 1, 0] {
+            assert_eq!(unlock(&Wrap { iter, ..wrap.clone() }, "purple tiger river").unwrap_err(), "bad wrap");
+        }
     }
 
     #[test]

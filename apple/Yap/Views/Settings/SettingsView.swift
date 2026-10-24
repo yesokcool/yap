@@ -441,8 +441,9 @@ struct VoiceAdvancedGroup98: View {
                 voice.settings.relayOnly = $0
                 VoiceOptions.changed(model)
             }))
-            .disabled(voice.relayAvailable == false)
-            Text(VoiceOptions.relayNote(available: voice.relayAvailable))
+            // Never stuck on: without a relay it can still be turned off.
+            .disabled(voice.relayAvailable == false && !voice.settings.relayOnly)
+            Text(VoiceOptions.relayNote(available: voice.relayAvailable, on: voice.settings.relayOnly))
                 .font(Theme.small)
                 .foregroundStyle(Theme.hint)
                 .fixedSize(horizontal: false, vertical: true)
@@ -667,6 +668,10 @@ struct ChangePasswordView: View {
                     Text("\(PasswordText.new):").font(Theme.chrome).foregroundStyle(Theme.text)
                     PasswordField98(text: $new, isNew: true, shown: show)
                     PasswordRule98()
+                    Text(PasswordText.othersSignedOut)
+                        .font(Theme.small)
+                        .foregroundStyle(Theme.grayText)
+                        .fixedSize(horizontal: false, vertical: true)
                     Check98(title: PasswordText.show, isOn: $show)
                     if let failure {
                         ErrorLine(text: failure)
@@ -689,7 +694,7 @@ struct ChangePasswordView: View {
             }
             .onChange(of: client.pinChange) { _, state in
                 if state == .saved {
-                    client.notice = YapClient.Notice(text: PasswordText.saved(onPin: onPin))
+                    client.notice = YapClient.Notice(text: PasswordText.saved(onPin: onPin, signedOut: client.passwordSignedOut))
                     dismiss()
                 }
             }

@@ -64,7 +64,7 @@ extension Question {
     }
 
     static func resetPassword(_ name: String, perform: @escaping () -> Void) -> Question {
-        Question(title: "Reset \(name)’s password?", text: "They get a temporary password to sign in with; their old one stops working.",
+        Question(title: "Reset \(name)’s password?", text: "They get a temporary password to sign in with; their old one stops working and all their devices are signed out.",
                  action: "Reset password", danger: true, perform: { _ in perform() })
     }
 

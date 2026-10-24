@@ -77,10 +77,18 @@ public enum MessageFormatter {
             lock.lock()
             defer { lock.unlock() }
             if key != self.key || regex == nil {
-                regex = try? NSRegularExpression(pattern: "(^|[^A-Za-z0-9_@\\x{E000}\\x{E001}])@(\(who.joined(separator: "|")))(?![A-Za-z0-9_\\x{E000}])", options: [.caseInsensitive])
+                regex = Self.pattern(who)
                 self.key = key
             }
-            return regex!
+            // A pattern too big for ICU (thousands of very long names): @everyone and @here still light up.
+            return regex ?? Self.everyoneOnly
+        }
+
+        /// @everyone and @here alone: a constant, it always compiles.
+        static let everyoneOnly = pattern(["everyone", "here"])!
+
+        static func pattern(_ who: [String]) -> NSRegularExpression? {
+            try? NSRegularExpression(pattern: "(^|[^A-Za-z0-9_@\\x{E000}\\x{E001}])@(\(who.joined(separator: "|")))(?![A-Za-z0-9_\\x{E000}])", options: [.caseInsensitive])
         }
     }
 

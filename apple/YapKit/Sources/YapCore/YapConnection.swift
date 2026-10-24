@@ -18,6 +18,9 @@ public final class YapConnection {
         /// with 4003 (a wrong key may only say `hello { token }`, and that
         /// token didn't work). No retry.
         case badKey
+        /// This device was signed out (closed with 4001: signed out from
+        /// another device, a new password, a reset): its token is gone. No retry.
+        case signedOut
         /// `stop()` was called. No retry.
         case stopped
     }
@@ -80,7 +83,7 @@ public final class YapConnection {
             try? await Task.sleep(for: timeout)
             guard let self, !Task.isCancelled, gen == self.generation, !self.isOpen else { return }
             self.log.info("socket didn't open in time")
-            self.lost(badKey: false)
+            self.lost(.lost)
         }
     }
 
@@ -100,6 +103,15 @@ public final class YapConnection {
     /// for `hello { token }` only.
     static func endedForWrongKey(status: Int?, closeCode: Int) -> Bool {
         status == 401 || closeCode == wrongKeyCloseCode
+    }
+
+    /// The close code for a device that was signed out (PROTOCOL.md › Devices).
+    static let signedOutCloseCode = 4001
+
+    /// Why a socket ended, from the upgrade's status and the close code.
+    static func reason(status: Int?, closeCode: Int) -> CloseReason {
+        if endedForWrongKey(status: status, closeCode: closeCode) { return .badKey }
+        return closeCode == signedOutCloseCode ? .signedOut : .lost
     }
 
     /// Give up for good (signed out, banned, turned away): no more reconnects.
@@ -145,7 +157,7 @@ public final class YapConnection {
     /// Tests: lose the socket as if the network had (it reconnects by itself).
     func dropForTesting() {
         guard isOpen || task != nil else { return }
-        lost(badKey: false)
+        lost(.lost)
     }
 
     // MARK: - Internals
@@ -176,7 +188,7 @@ public final class YapConnection {
         } catch {
             guard gen == generation else { return }
             let status = (task.response as? HTTPURLResponse)?.statusCode
-            lost(badKey: Self.endedForWrongKey(status: status, closeCode: task.closeCode.rawValue))
+            lost(Self.reason(status: status, closeCode: task.closeCode.rawValue))
         }
     }
 
@@ -221,7 +233,7 @@ public final class YapConnection {
             guard let self, gen == self.generation, self.isOpen else { return }
             if !Heartbeat.answered(sentAt: sentAt, pongAt: self.pongAt) {
                 self.log.info("heartbeat timed out")
-                self.lost(badKey: false)
+                self.lost(.lost)
             }
         }
     }
@@ -254,11 +266,11 @@ public final class YapConnection {
         }
     }
 
-    private func lost(badKey: Bool) {
+    private func lost(_ reason: CloseReason) {
         teardown()
         generation += 1
-        onClose?(badKey ? .badKey : .lost)
-        guard !isStopped, !badKey else {
+        onClose?(reason)
+        guard !isStopped, reason == .lost else {
             isStopped = true
             return
         }

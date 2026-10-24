@@ -697,7 +697,7 @@ impl Core {
                         }
                     }
                     Preview::Wav(bytes) => {
-                        if let Ok(w) = crate::audio::wav::decode_mono(&bytes) {
+                        if let Ok(w) = crate::audio::wav::decode_clip(&bytes, crate::protocol::SOUND_MS) {
                             // Not measured yet: the same target the server will use.
                             let (peak, rms) = crate::audio::clips::measure(&w.samples);
                             let gain = (0.25 / rms.max(1e-6)).min(0.71 / peak.max(1e-6)).min(1.0) * vol;

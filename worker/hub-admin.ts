@@ -12,6 +12,9 @@ import type { HubHost } from './hub-host';
 /** Databases on the Free plan cap out around here; warn owner/mods at 80%. */
 export const DB_LIMIT_BYTES = 1024 ** 3;
 
+/** Custom emojis: a burst of 30 per account, then one every 2 s (addEmoji; Hub.isUploader checks it first). */
+export const EMOJI_RATE = 0.5;
+
 const BITRATES = new Set([32000, 64000, 96000, 128000, 192000, 256000, 384000, 510000]);
 
 export type AddEmojiResult = { ok: true; emoji: Emoji } | { ok: false; status: number; code: string; message: string };
@@ -374,7 +377,7 @@ export async function addEmoji(hub: HubHost, input: { id: string; name: string; 
     const uploader = hub.uploader(input.sid, input.ut);
     if (!uploader) return { ok: false, status: 401, code: 'no_session', message: 'Connect first, then upload.' };
     uid = (uploader.deserializeAttachment() as Attachment).uid;
-    if (!hub.allow(input.sid!, 'emoji', 30, 0.5)) return { ok: false, status: 429, code: 'slow_down', message: 'Too many uploads at once — give it a minute.' };
+    if (!hub.allow(uid, 'emoji', 30, EMOJI_RATE)) return { ok: false, status: 429, code: 'slow_down', message: 'Too many uploads at once — give it a minute.' };
   }
   if (!EMOJI_NAME_RE.test(input.name)) {
     return { ok: false, status: 400, code: 'bad_name', message: 'Emoji names are 2–32 letters, numbers or underscores.' };

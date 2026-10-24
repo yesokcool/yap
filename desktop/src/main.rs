@@ -293,6 +293,10 @@ fn main() {
 
     if let Some(install) = update_mode {
         let (srv, _) = config::parse_invite(server.as_deref().unwrap_or(""));
+        if let Some(why) = config::insecure(&srv) {
+            eprintln!("yap: --server {srv}: {why}");
+            std::process::exit(2);
+        }
         std::process::exit(update_cli(&srv, install));
     }
 
@@ -306,6 +310,10 @@ fn main() {
     let mut cfg = config::Config::load(&path);
     if let Some(s) = server {
         let (srv, k) = config::parse_invite(&s);
+        // (A plain-http one is taken, and refused when connecting: the Sign On screen says why.)
+        if let Some(why) = config::insecure(&srv) {
+            eprintln!("yap: --server {srv}: {why}");
+        }
         cfg.server = srv;
         if let Some(k) = k {
             cfg.key = k;

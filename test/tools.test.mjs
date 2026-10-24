@@ -148,6 +148,22 @@ await test('restore: the files the backup uses, and sealed pictures; nothing els
   assert.deepEqual(server.phases, ['check', 'begin', 'messages', 'finish']);
 });
 
+await test('publish-desktop: the v2 update signature signs exactly what the apps check', async () => {
+  const { updateMessage } = await import('../tools/lib.mjs');
+  const hash = 'AB'.repeat(32);
+  // The same string desktop/src/update.rs › signed_message_format expects.
+  assert.equal(updateMessage('linux-x86_64', '1.2.3', hash), `yap-update-v2\nlinux-x86_64\n1.2.3\n${'ab'.repeat(32)}`);
+  // A throwaway key: what it signs for one version or platform doesn't verify for another.
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+  const sig = crypto.sign(null, Buffer.from(updateMessage('linux-x86_64', '1.2.3', hash)), privateKey);
+  assert.ok(crypto.verify(null, Buffer.from(updateMessage('linux-x86_64', '1.2.3', hash)), publicKey, sig));
+  assert.ok(!crypto.verify(null, Buffer.from(updateMessage('linux-x86_64', '9.9.9', hash)), publicKey, sig));
+  assert.ok(!crypto.verify(null, Buffer.from(updateMessage('windows-x86_64', '1.2.3', hash)), publicKey, sig));
+  const script = fs.readFileSync(path.join(ROOT, 'tools/publish-desktop.mjs'), 'utf8');
+  assert.match(script, /sig2: sig2\.toString\('base64'\)/, 'latest.json carries sig2');
+  assert.match(script, /sig: sig\.toString\('base64'\)/, 'and still sig, for apps from before v2');
+});
+
 await test('emoji data: the iPhone/Mac app bundles the same file the web serves', async () => {
   const web = fs.readFileSync(path.join(ROOT, 'web/emoji-data.json'));
   const apple = fs.readFileSync(path.join(ROOT, 'apple/YapKit/Sources/YapCore/Resources/emoji-data.json'));

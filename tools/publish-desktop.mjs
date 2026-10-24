@@ -5,9 +5,12 @@
  * apps' click-to-update (PROTOCOL.md › Updates):
  *   web/downloads/yap-<version>-<platform>[.exe]   the files, signed
  *   web/downloads/latest.json                      what the apps check
- * Each file is signed (Ed25519, raw bytes). The apps verify against the
- * public key built into them (desktop/README.md › Self-update), so nothing
- * unsigned can ever install.
+ * Each file is signed twice (Ed25519): `sig2` over its platform, the version
+ * and its SHA-256 (`updateMessage` in tools/lib.mjs), which apps since v2
+ * require, so a signed build can't be relabelled as newer or handed to another
+ * platform; and `sig` over the raw bytes, for the apps from before it. The
+ * apps verify against the public key built into them (desktop/README.md ›
+ * Self-update), so nothing unsigned can ever install.
  *
  * The signing key (base64 of the PKCS#8 DER private key, or a PEM block):
  *   - env YAP_UPDATE_SIGNING_KEY, else
@@ -28,7 +31,7 @@
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { ROOT, changelogLines, fail, git, keychain } from './lib.mjs';
+import { ROOT, changelogLines, fail, git, keychain, updateMessage } from './lib.mjs';
 
 const root = ROOT;
 const out = join(root, 'web/downloads');
@@ -83,7 +86,7 @@ const notes = process.argv.flatMap((a, i, all) => (a === '--note' && all[i + 1] 
 if (!notes.length) {
   const last = git('tag', '-l', 'desktop-v*', '--sort=-v:refname').split('\n')[0];
   const log = git('log', '--format=%B%x00', ...(last ? [`${last}..HEAD`] : []), '--', 'desktop');
-  for (const line of changelogLines(log)) if (!notes.includes(line)) notes.push(line);
+  notes.push(...changelogLines(log));
 }
 
 const { privateKey, publicKey, publicB64, source } = loadSigningKey();
@@ -99,16 +102,19 @@ for (const [platform, { file, ext }] of Object.entries(PLATFORMS)) {
   if (!bytes.includes(Buffer.from(publicB64, 'ascii'))) {
     die(`${shown}/${file} wasn't built with this signing key's public key, so installed apps would refuse the update. Rebuild with YAP_UPDATE_PUBKEY=${publicB64} (or put it in desktop/update-pubkey.txt), or sign with the key it was built for.`);
   }
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const message = Buffer.from(updateMessage(platform, version, sha256), 'utf8');
   const sig = sign(null, bytes, privateKey);
-  if (!verify(null, bytes, publicKey, sig)) die(`the signature of ${shown}/${file} doesn't verify`);
-  ready.push({ platform, name: `yap-${version}-${platform}${ext}`, bytes, sig });
+  const sig2 = sign(null, message, privateKey);
+  if (!verify(null, bytes, publicKey, sig) || !verify(null, message, publicKey, sig2)) die(`the signatures of ${shown}/${file} don't verify`);
+  ready.push({ platform, name: `yap-${version}-${platform}${ext}`, bytes, sha256, sig, sig2 });
 }
 
 mkdirSync(out, { recursive: true });
 const files = {};
-for (const { platform, name, bytes, sig } of ready) {
+for (const { platform, name, bytes, sha256, sig, sig2 } of ready) {
   writeFileSync(join(out, name), bytes);
-  files[platform] = { path: `/downloads/${name}`, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), sig: sig.toString('base64') };
+  files[platform] = { path: `/downloads/${name}`, size: bytes.length, sha256, sig: sig.toString('base64'), sig2: sig2.toString('base64') };
   console.log(`${platform.padEnd(15)} ${name} ${(bytes.length / 1e6).toFixed(1)} MB`);
 }
 

@@ -15,7 +15,7 @@ the subprotocol on the WebSocket.
 | `GET /api/config` (*key*) | `{ gifs: { provider: "klipy", appKey } \| null, links: [{ id, name, url, view?, description? }], minecraft?: { name, address }, push: { publicKey } \| null, ntfy: { server }, source: string \| null }`. Client-side config for invited users. `links` is the same list as `ready.links` (older clients read it here); a link with `view` opens inside the app (today only `"board"`, and only on servers with a board). `minecraft` is there only when the server has one set (`MINECRAFT_SERVER`). `push.publicKey` = the VAPID key for browser pushes (null when the server has none). `ntfy.server` = the ntfy server this Yap pushes through (`NTFY_SERVER`, else `https://ntfy.sh`): subscribe to your topic there. `source` = where this server's source code is (the Source link). |
 | `GET /api/minecraft` (*key*) | `{ name, address, online, checkedAt, ms?, version?, motd?, players?: { online, max, names }, error? }` for the server's Minecraft server, if it has one; 404 otherwise (Server List Ping from the Worker, cached ~30 s). `error` says why a ping failed. Poll ~once a minute. |
 | `GET /board` (+ the root paths in the server's `BOARD_PATHS`) | The optional board (another Worker, bound as `BOARD`), served same-origin so pointers can be drawn over it. 404 when the server has none. |
-| `GET /api/ice` (*key*) | `{ iceServers: [...] }` in `RTCIceServer` shape. STUN always; plus a TURN relay when the server has one (a fixed login, or short-lived Cloudflare credentials). Fetch right before joining voice. |
+| `GET /api/ice` (*key*, or `X-Yap-Token: <a device token>`) | `{ iceServers: [...] }` in `RTCIceServer` shape. STUN always; plus a TURN relay when the server has one (a fixed login, or short-lived Cloudflare credentials). Fetch right before joining voice. An OBS link has no invite key and sends its listen token instead. |
 | `GET /ws` (*key*) | WebSocket upgrade, 426 without one. A wrong, old or missing key opens a token-only socket (*Resetting the main link*), not a 401. |
 | `POST /api/image?sid=S&ut=U` (*key*) | A picture for a message: PNG, GIF, WebP or JPEG (sniffed from the bytes; no SVG), ≤ 1.9 MB → `{ ok: true, id, mime }`; then `send { image: { id, width, height } }`. |
 | `POST /api/avatar?sid=S&ut=U` (*key*) | Your picture: image bytes ≤ 512 KB (clients square-crop to 256 px) → `{ ok: true }`. Broadcast as a `user` update; `User.avatar` = media id. |
@@ -33,15 +33,27 @@ the subprotocol on the WebSocket.
 `uploadToken` from that session's own `ready`: session ids are visible to
 everyone, the token isn't), and the raw bytes as the body. The server checks
 the session before it stores anything, then the bytes themselves (never the
-filename or `Content-Type`). Each session may upload 10 files at once, then
-one every 6 s; emojis have their own limit (above).
+filename or `Content-Type`). Each **account** may upload 10 files at once,
+then one every 6 s (more connections don't add more; emojis have their own
+limit, above), and **300 MB a day** in all (UTC days; `quota` past it).
+**Pictures** (messages, avatars, drawings, emojis, doodles) must be at most
+**8192 pixels a side and 50 megapixels** (emojis and avatars: 2048 a side), and an animated one (GIF, animated
+WebP or PNG) at most **4096 a side and 150 million pixels over all its
+frames**, read from the file's own headers (a few hundred bytes can declare a
+picture that crashes the apps decoding it); clients shrink photos long before
+that. A **clip** is stored with a WAV header the server writes (RIFF, `fmt `,
+`data`, nothing else), so its id is that of the stored file, not of the bytes
+sent.
 
 **Failures.** Upload routes answer `{ ok: false, code, message }` with the
 status: 400 `bad_name` (emoji names: 2–32 letters, digits or `_`) or
-`too_big` (a doodle bigger than 256 × 256), 401 `no_session` (`/api/emoji`),
-403 `no_session` (the other uploads: no such session, or past the upload
-limit), 409 `name_taken` or `duplicate`, 413 `too_big`, 415 `bad_type` or
-`bad_sound`, 429 `slow_down`. `/api/avatar`, `/api/drawing` and `/api/sound`
+`too_big` (a picture past the size above, or a doodle bigger than 256 × 256;
+also a picture whose size can't be read: "That picture looks broken."), 401
+`no_session` (`/api/emoji`, or a session that went mid-upload), 403
+`no_session` (the other uploads: no such session, or past the upload limit),
+409 `name_taken` or `duplicate`, 413 `too_big`, 415 `bad_type` or
+`bad_sound`, 429 `slow_down` or `quota` (today's 300 MB are used up: show the
+message). `/api/avatar`, `/api/drawing` and `/api/sound`
 can also be refused after the bytes were checked (the session went, or it's
 changing its picture or saving too fast): `{ ok: false, message }`, status
 400, no `code`. A wrong or missing invite key is a plain-text 401, a missing
@@ -89,8 +101,13 @@ working." [**Reset link**] [Cancel]; then the new link with Copy.
 
 ## Identity
 
-**Accounts are a name + a password** (8–128 characters). Names are unique
-(case-insensitive). Accounts made before 2026-10-11 may still have a 6-digit
+**Accounts are a name + a password** (8–128 characters). Names are unique,
+and so is what they **look like** (since 2026-10-24): no case, no accents,
+full-width and other compatibility forms folded, and Cyrillic or Greek
+letters that look Latin read as Latin, so nobody can be "Cleo" with a
+Cyrillic "е", "CLEO" or "Cléo" next to the real one (`name_taken`).
+Names are stored in NFC. Signing in takes the name as it is, in any case. A
+new name goes in the mod log (`member.rename`, detail `"Old" → "New"`). Accounts made before 2026-10-11 may still have a 6-digit
 **PIN**: it keeps working for signing in until that person sets a password,
 and nothing new can be set as a PIN. The wire still says `pin` (`login.pin`,
 `account.pin`, `member.resetPin`, `bad_pin`, `weak_pin`) so older apps keep
@@ -117,7 +134,11 @@ with no password gets a temporary one through `member.resetPin`.
 
 - `account.pin { pin, current? }` sets/changes your password (`current`, your
   password or old PIN, required when changing) → `account { hasPin, token?,
-  kind: "password" }` (`token` is never sent any more; clients may ignore it).
+  kind: "password", signedOut }` (`token` is never sent any more; clients may
+  ignore it). A new password **signs out every other device** of yours, OBS
+  links included (their sockets close with 4001): whoever knew the old one may
+  have signed in with it. `signedOut` = how many went (absent from older
+  servers); say so ("Your 2 other devices were signed out").
   The new one must be a password: 8–128 characters (`bad_pin` otherwise), and
   **guessable ones are refused** (`weak_pin`, "That password is too easy to
   guess."): very common passwords, your own name, one character repeated,
@@ -150,7 +171,9 @@ with no password gets a temporary one through `member.resetPin`.
 - `account.signout` revokes this device's token and closes the socket.
 - Owner/mod: `member.resetPin { uid }` → `pin.reset { uid, pin }`: `pin` is a
   temporary **password** to hand over (three short words and two digits, like
-  `maple-river-stone-42`); signing in with it brings up the prompt above.
+  `maple-river-stone-42`); signing in with it brings up the prompt above. A
+  reset **signs out all of that person's devices** (OBS links too; not the one
+  you're on when you reset your own): it's how a leaked password is fixed.
   Admin API: `POST /api/admin/reset-pin?uid=` (the same).
 - **Waiting room:** a new account gets `pending` instead of `ready` and can't
   do anything else ("Waiting for the owner or a mod to let you in."). Only the
@@ -213,8 +236,8 @@ with no password gets a temporary one through `member.resetPin`.
 | `channel.bitrate` | `channelId, bitrate \| null` | Voice quality for everyone in that channel (32k–510k from a fixed list); null = each person's own setting. → `channel`. |
 | `modlog` | | → `modlog` (last 200: who did what to whom; never message text). |
 | `push.subscribe` / `push.unsubscribe` | `endpoint, keys {p256dh, auth}` / `endpoint` | Browser pushes (Web Push, `/sw.js`). The server encrypts per RFC 8291 and signs with VAPID (`VAPID_PRIVATE_JWK` secret; public key in `/api/config` as `push.publicKey`). Pushes follow your push mode (subscribing a new browser with it off turns on pings & mentions; sending the same subscription again leaves the mode alone) and go to ntfy and every browser you subscribed; 404/410 from a push service forgets that browser. A browser push's payload is JSON `{title, body, tag, channelId?, messageId?}`: the ids are there when it's about a message (an @mention, a reply, `all` mode), and tapping it opens that message (`/sw.js` asks an open tab to jump, or opens `/#channel=<id>&message=<id>`). For those pushes, ntfy's click link is that same address. |
-| `device.handoff` | | A one-time sign-in pass (15 min) → `device.handoff {token}`. Hello with it as `token`: it's spent and `ready` carries a new lasting token for that device. Used by Add to Home Screen (`/#key=&handoff=&name=`), since home-screen apps don't share Safari's storage, and by the native apps whenever they open the web app (Draw, Space, Watch…: `/#key=&place=&handoff=&name=`; in-app pages add `&embed=1`, which hides the web's own sidebar and header for that tab). A pass that arrives while the browser still has a token is kept and used if that token turns out to be signed out. Limited to 5 at once, then one per 20 s; a refusal comes back as `error {re: 'device.handoff'}`. |
-| `obs.create` / `obs.revoke` | | A listen-only device token for an OBS Browser Source (`/obs#key=&listen=&channel=[&only=Name][&overlay=0]`) → `obs.created {token}` / turn all of yours off → `obs.revoked {count}` (their sockets close). A listen-only session may only send `hello`, `voice.join/leave/state` (always muted) and `signal`; it carries `client: "obs"` (apps don't list it in the channel or chime for it) and never gets the main key. |
+| `device.handoff` | | A one-time sign-in pass (5 min; 15 before 2026-10-24) → `device.handoff {token}`. Hello with it as `token`: it's spent and `ready` carries a new lasting token for that device. Used by Add to Home Screen (`/#key=&handoff=&name=`), since home-screen apps don't share Safari's storage, and by the native apps whenever they open the web app (Draw, Space, Watch…: `/#key=&place=&handoff=&name=`; in-app pages add `&embed=1`, which hides the web's own sidebar and header for that tab). A pass that arrives while the browser still has a token is kept and used if that token turns out to be signed out. The web app asks **"Signed in as <name>. Is that you?"** (from `ready`, never the link's `name`) when a link opened in a plain browser tab signs it in to an account it wasn't on: anyone can post a link with their own pass, and what you then wrote would go to their account. "Not me" signs out again. Home Screen apps and `&embed=1` pages don't ask. Limited to 5 at once, then one per 20 s; a refusal comes back as `error {re: 'device.handoff'}`. |
+| `obs.create` / `obs.revoke` | | A listen-only device token for an OBS Browser Source (`/obs#listen=&channel=[&only=Name \| &others=1][&overlay=0]`: everyone in the call, the link's own account too, from whichever device it's on; just one person; or everyone but its own account. No invite key since 2026-10-24: the token alone opens a socket, *Resetting the main link*, and `/api/ice`; older links carry `key=`, which still works) → `obs.created {token}` / turn all of yours off → `obs.revoked {count}` (their sockets close). A listen-only session may only send `hello`, `voice.join/leave/state` (always muted) and `signal`; it carries `client: "obs"` (apps don't list it in the channel or chime for it) and never gets the main key. |
 | `stats` | | Owner/mods: → `stats {chatBytes, mediaBytes, limitBytes}`. |
 | `edit` | `id, body` | Your own messages only (mods can delete but not edit). Earlier versions are kept in `message_edits` until the message is deleted. Empty body → `empty` unless the message has a GIF or a picture. |
 | `typing` | `channelId` | Send at most every ~3.5 s while the user types. Display for ~6 s. |
@@ -620,7 +643,10 @@ Short clips anyone in a voice channel can play for everyone in it.
   ogg…), trim, mix to mono, resample to 24 kHz and encode WAV themselves. The
   Worker checks the header and length and **measures loudness**: `gain =
   min(1, 0.25 / rms, 0.71 / peak)` (≈ −12 dBFS RMS, −3 dBFS peak; never
-  louder than uploaded). `name` 1–24 chars (board; chimes are named after
+  louder than uploaded); what's stored is those samples under a header the
+  server writes, so every app reads the clip that was measured (an uploaded
+  file's extra chunks, or a second `fmt `, could make another app read it at
+  another rate). `name` 1–24 chars (board; chimes are named after
   you), `emoji` optional (one emoji). → `{ ok, sound }` and `sound.added
   { sound }` to everyone; a chime also sets your `User.chime` to `s:<id>`.
   ≤ 60 board sounds. Bytes at `/media/<media>` (`audio/wav`).
@@ -885,7 +911,9 @@ fresh start). Measured with the old path killed for good: audio back after
 ```
 
 Apply signals from a peer strictly in order (queue them); don't send
-end-of-candidates (`null`).
+end-of-candidates (`null`). The server drops a candidate whose
+`sdpMLineIndex` isn't a whole number from 0 to 63 (older iPhone/Mac apps
+crash on one that doesn't fit 32 bits); clients still check what peers send.
 
 **Opus tuning.** Before setting each local description (offer *and*
 answer), rewrite the Opus `a=fmtp` line of **every audio section** (keep
@@ -1250,13 +1278,17 @@ can't do that is a breaking one (`PROTOCOL_VERSION`).
 Worker requests):
 ```json
 { "version": "0.2.0", "date": "2026-10-05", "notes": ["…"],
-  "files": { "windows-x86_64": { "path": "/downloads/<name>", "size": 123, "sha256": "<hex>", "sig": "<base64>" } } }
+  "files": { "windows-x86_64": { "path": "/downloads/<name>", "size": 123, "sha256": "<hex>", "sig": "<base64>", "sig2": "<base64>" } } }
 ```
-Platforms: `linux-x86_64`, `windows-x86_64`, `macos-aarch64`. `sig` is an
-Ed25519 signature over the file's raw bytes; the apps carry the publisher's
+Platforms: `linux-x86_64`, `windows-x86_64`, `macos-aarch64`. `sig2` is an
+Ed25519 signature over the UTF-8 text `yap-update-v2\n<platform>\n<version>\n<sha256 lowercase hex>`
+(nothing after the hash), so a signed build can't be relabelled as another
+version or served to another platform; apps after desktop 0.16.0 require it,
+and install only a version newer than their own. `sig` signs the file's raw
+bytes, for apps from before `sig2`. The apps carry the publisher's
 public key (compiled in at build time: `YAP_UPDATE_PUBKEY` or
 `desktop/update-pubkey.txt`) and refuse anything it doesn't verify, so even a
-compromised server can't push a binary. Builds without a key don't
+compromised server can't push a binary, or an old one. Builds without a key don't
 self-update. `tools/publish-desktop.mjs` signs (with `YAP_UPDATE_SIGNING_KEY`,
 or a macOS Keychain item) and publishes.
 Apps check at launch and every 6 h and install only when the person clicks.

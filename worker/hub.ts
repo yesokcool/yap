@@ -4,6 +4,7 @@ import { LISTEN_ALLOWED, visible, type Attachment } from './attachment';
 import { MEMBER_ROLES, toChannel, toSession, toUser, voiceResume, type ChannelRow, type UserRow } from './rows';
 import { migrate } from './schema';
 import { b64urlEncode, hex, sameSecret } from './encoding';
+import { tokenHash } from './auth';
 import { inviteKey } from './access';
 import { settings } from './settings';
 import { cleanAway } from './extras';
@@ -18,7 +19,9 @@ import {
   cleanName,
   isEmoji,
   isPersonal,
+  nameKey,
   personalId,
+  signalOk,
 } from './validate';
 import {
   CHIMES,
@@ -38,7 +41,7 @@ import {
   type WeakReason,
 } from './protocol';
 import { WAITING, WEAK, devicesOf, onHandoff, onHello, onObsCreate, onObsRevoke, onResetPin, onRevokeDevice, onSetPin, onSignOut, onSignOutOthers, onVaultSet, resetPin, setTestPin, vaultOf } from './hub-accounts';
-import { DB_LIMIT_BYTES, addChannels, addEmoji, archiveChannels, checkInvite, invites, links, mergeUsers, modLog, onApprove, onBan, onChannelArchive, onChannelBitrate, onChannelCreate, onClaimOwner, onEmojiDelete, onEmojiRename, onInviteCreate, onInviteRevoke, onLinkAdd, onResetMain, resetMainKey, onLinkRemove, onRole, onStats, setRole, stats, unarchiveChannels, unmergeUser, type AddEmojiResult } from './hub-admin';
+import { DB_LIMIT_BYTES, EMOJI_RATE, addChannels, addEmoji, archiveChannels, checkInvite, invites, links, mergeUsers, modLog, onApprove, onBan, onChannelArchive, onChannelBitrate, onChannelCreate, onClaimOwner, onEmojiDelete, onEmojiRename, onInviteCreate, onInviteRevoke, onLinkAdd, onResetMain, resetMainKey, onLinkRemove, onRole, onStats, setRole, stats, unarchiveChannels, unmergeUser, type AddEmojiResult } from './hub-admin';
 import { exportPage, importBackup } from './hub-backup';
 import { addDrawing, gallery, onDrawClear, onDrawSeg, onDrawState, onDrawStroke, onDrawUndo, onDrawWipe } from './hub-draw';
 import { addSound, hangs, onHangCancel, onHangSet, onSoundDelete, onSoundPlay, nextHangAt, onWhenGet, onWhenSet, sounds, startDueHangs } from './hub-extras';
@@ -648,6 +651,7 @@ export class Hub extends DurableObject<Env> {
     const target = this.sockets().find((ws) => (ws.deserializeAttachment() as Attachment).sid === msg.to);
     const them = target?.deserializeAttachment() as Attachment | undefined;
     if (!target || !them || !((me.vc && them.vc === me.vc) || them.screen || me.screen)) throw new ClientError('no_peer', 'That session is gone.');
+    if (!signalOk(msg.data)) return; // (quietly, like a signal over the limit)
     this.send(target, { t: 'signal', from: me.sid, data: msg.data });
   }
 
@@ -683,7 +687,8 @@ export class Hub extends DurableObject<Env> {
     const current = this.user(me.uid)!;
     const name = msg.name === undefined ? current.name : cleanName(msg.name, LIMITS.nameChars);
     if (!name) throw new ClientError('bad_name', 'Pick a name.');
-    if (this.nameTaken(name, me.uid)) throw new ClientError('name_taken', `Someone here is already called ${name}.`);
+    const renamed = name !== current.name;
+    if (renamed && this.nameTaken(name, me.uid)) throw new ClientError('name_taken', `Someone here is already called ${name} (or something that looks just like it).`);
     const color = msg.color !== undefined && COLOR_RE.test(msg.color) ? msg.color.toLowerCase() : current.color;
     const avatar = msg.avatar === null ? null : current.avatar; // set via /api/avatar; null removes
     let look = current.look;
@@ -704,6 +709,8 @@ export class Hub extends DurableObject<Env> {
       values.push(msg.chime === null ? null : this.cleanChime(me.uid, msg.chime));
     }
     this.sql.exec(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, ...values, me.uid);
+    // In the mod log (which everyone can read), so a new name can always be traced to who had it.
+    if (renamed) this.log(me.uid, 'member.rename', me.uid, `"${current.name}" → "${name}"`);
     this.broadcast({ t: 'user', user: this.user(me.uid)! });
   }
 
@@ -738,6 +745,16 @@ export class Hub extends DurableObject<Env> {
     });
   }
 
+  /**
+   * Worker RPC (/api/ice): is this a live device token? An OBS link calls with
+   * its listen token and no invite key. (Not a sign-in pass: those are spent once.)
+   */
+  async isDevice(token: string): Promise<boolean> {
+    if (!token || token.length > 128) return false;
+    const hash = await tokenHash(token);
+    return this.sql.exec("SELECT 1 FROM devices WHERE token_hash = ? AND (scope IS NULL OR scope != 'handoff')", hash).toArray().length > 0;
+  }
+
   /** Worker RPC: is this media id a custom emoji (live or deleted)? Those are cached for a year. */
   async isEmoji(id: string): Promise<boolean> {
     return this.sql.exec('SELECT 1 FROM emojis WHERE id = ?', id).toArray().length > 0;
@@ -745,17 +762,47 @@ export class Hub extends DurableObject<Env> {
 
   /**
    * Worker RPC, before it stores an emoji: is this a signed-in member's
-   * session? Spends nothing (a picker uploads many at once; addEmoji has its
-   * own limit).
+   * session, with emoji uploads left? Spends nothing (a picker uploads many
+   * at once; addEmoji spends from the same per-account limit).
    */
   async isUploader(sid: string, ut: string): Promise<boolean> {
-    return Boolean(this.uploader(sid, ut));
+    const ws = this.uploader(sid, ut);
+    if (!ws) return false;
+    const bucket = this.peek((ws.deserializeAttachment() as Attachment).uid, 'emoji');
+    return !bucket || bucket.n + ((Date.now() - bucket.at) / 1000) * EMOJI_RATE >= 1;
   }
 
-  /** Worker RPC, before it stores any upload: is this a signed-in member's session, under the upload rate? */
+  /**
+   * Worker RPC, before it reads an upload: is this a signed-in member's
+   * session, under the upload rate? The rate is per account, so more
+   * connections don't mean more uploads.
+   */
   async canUpload(sid: string, ut: string): Promise<boolean> {
-    if (!this.uploader(sid, ut)) return false;
-    return this.allow(sid, 'upload', 10, 1 / 6);
+    const ws = this.uploader(sid, ut);
+    if (!ws) return false;
+    return this.allow((ws.deserializeAttachment() as Attachment).uid, 'upload', 10, 1 / 6);
+  }
+
+  /**
+   * Worker RPC, right before it stores an upload: spend `bytes` of the
+   * uploader's allowance for today (UTC; LIMITS.uploadBytesPerDay), kept in
+   * meta `uploads:<uid>` so it survives hibernation. Nothing is ever erased
+   * for this: it only stops one account from filling the free plan's storage.
+   */
+  async spendUpload(sid: string, ut: string, bytes: number): Promise<{ ok: true } | { ok: false; status: number; code: string; message: string }> {
+    const ws = this.uploader(sid, ut);
+    if (!ws) return { ok: false, status: 401, code: 'no_session', message: 'Connect first, then upload.' };
+    const { uid } = ws.deserializeAttachment() as Attachment;
+    const key = `uploads:${uid}`;
+    const day = Math.floor(Date.now() / 86_400_000);
+    const raw = this.sql.exec<{ value: string }>('SELECT value FROM meta WHERE key = ?', key).toArray()[0]?.value;
+    const was = raw ? (JSON.parse(raw) as { day: number; bytes: number }) : null;
+    const used = was?.day === day ? was.bytes : 0;
+    if (used + bytes > LIMITS.uploadBytesPerDay) {
+      return { ok: false, status: 429, code: 'quota', message: `That's all the uploading for today (${Math.round(LIMITS.uploadBytesPerDay / 1024 ** 2)} MB a day each). Try again tomorrow.` };
+    }
+    this.sql.exec('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, JSON.stringify({ day, bytes: used + bytes }));
+    return { ok: true };
   }
 
   // ── RPC (called by the Worker, not over the socket) ────────────────────
@@ -1009,14 +1056,17 @@ export class Hub extends DurableObject<Env> {
   }
 
   /** Is `name` (case-insensitive) used by any live account other than `uid`? */
+  /** Does any live account other than `uid` have a name that looks like `name` (nameKey: case, accents, look-alike letters)? */
   nameTaken(name: string, uid: string): boolean {
+    const key = nameKey(name);
     return this.sql
-      .exec(
-        `SELECT id FROM users WHERE lower(name) = lower(?) AND id != ? AND role != 'banned'
+      .exec<{ name: string }>(
+        `SELECT name FROM users WHERE id != ? AND role != 'banned'
          AND id NOT IN (SELECT alias FROM user_aliases)`,
-        name, uid,
+        uid,
       )
-      .toArray().length > 0;
+      .toArray()
+      .some((r) => nameKey(r.name) === key);
   }
 
   user(id: string): User | undefined {

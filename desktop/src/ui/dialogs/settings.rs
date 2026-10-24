@@ -504,7 +504,9 @@ fn hear_yourself(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>, st:
 }
 
 /// "Hide my IP address in calls" (the web's relayOnly): voice only through
-/// the server's TURN relay. Off and greyed out until the server has one.
+/// the server's TURN relay, and no call at all without one (it never falls
+/// back to connecting directly). Greyed out until the server has a relay,
+/// unless it's on: then it can always be turned off.
 pub(super) fn relay_toggle(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>, st: &mut SettingsState) {
     if !st.asked_relay && m.status == Status::Online {
         st.asked_relay = true;
@@ -512,21 +514,23 @@ pub(super) fn relay_toggle(ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec
     }
     ui.add_space(4.0);
     let available = m.relay == Some(true);
-    let mut on = m.config.relay_only && available;
-    let r = ui.add_enabled_ui(available, |ui| theme::checkbox(ui, &mut on, "Hide my IP address in calls", p)).inner;
+    let mut on = m.config.relay_only;
+    let r = ui.add_enabled_ui(available || on, |ui| theme::checkbox(ui, &mut on, "Hide my IP address in calls", p)).inner;
     if r.changed() {
         acts.push(Act::Config(Box::new(move |c| c.relay_only = on)));
     }
-    note(
-        ui,
-        match m.relay {
-            Some(true) if m.voice_wanted.is_some() => "Sends your voice through the server's voice relay instead of straight to friends (a little more delay). A change applies from the next call you join.",
-            Some(true) => "Sends your voice through the server's voice relay instead of straight to friends (a little more delay).",
-            Some(false) => "Needs the voice relay, which isn't switched on for this server yet.",
-            None => "Checking whether this server has a voice relay…",
-        },
-        p,
-    );
+    note(ui, relay_note(m.relay, m.config.relay_only, m.voice_wanted.is_some()), p);
+}
+
+/// The words under Hide my IP: what it does, or why it can't.
+fn relay_note(relay: Option<bool>, on: bool, in_call: bool) -> &'static str {
+    match relay {
+        Some(true) if in_call => "Sends your voice through the server's voice relay instead of straight to friends (a little more delay). A change applies from the next call you join.",
+        Some(true) => "Sends your voice through the server's voice relay instead of straight to friends (a little more delay).",
+        Some(false) if on => "This server has no voice relay, so while this is on you can't connect to anyone in a call. Turn it off to talk again.",
+        Some(false) => "Needs the voice relay, which isn't switched on for this server yet.",
+        None => "Checking whether this server has a voice relay…",
+    }
 }
 
 /// Settings › Notifications in the web's groups: On this device, then Quiet
@@ -764,6 +768,11 @@ pub(super) fn log_words(m: &Model, e: &crate::protocol::ModLogEntry) -> String {
             other => format!("made {who} {other}"),
         },
         "member.resetPin" => format!("reset {who}'s password"),
+        // Someone changed their own name: actor and target are them, the detail `"Old" → "New"`.
+        "member.rename" => match d.strip_prefix('"').and_then(|r| r.strip_suffix('"')).and_then(|r| r.split_once("\" → \"")) {
+            Some((from, to)) => format!("changed their name from “{from}” to “{to}”"),
+            None => "changed their name".into(),
+        },
         "member.merge" => format!("merged a duplicate account into {who}'s"),
         "member.unmerge" => "split a merged account back out".into(),
         "owner.claim" => "became the owner".into(),
@@ -1087,6 +1096,15 @@ pub(super) fn device_combo(ui: &mut egui::Ui, id: &str, current: &str, list: Opt
 mod tests {
     use super::*;
 
+    /// With Hide my IP on and no relay, the note says calls can't connect (and the box can be unticked).
+    #[test]
+    fn hide_my_ip_note() {
+        assert!(relay_note(Some(false), true, false).contains("can't connect to anyone"));
+        assert!(relay_note(Some(false), false, false).starts_with("Needs the voice relay"));
+        assert!(relay_note(Some(true), true, true).contains("next call"));
+        assert!(relay_note(None, true, false).starts_with("Checking"));
+    }
+
     #[test]
     fn mod_log_words_match_the_web() {
         let mut m = Model::new(Config::default());
@@ -1115,6 +1133,8 @@ mod tests {
         assert_eq!(log_words(&m, &e("invite.resetMain", None, None)), "reset the main link");
         assert_eq!(log_words(&m, &e("invite.resetMain", None, Some("YAP_KEY"))), "set the main link back to the server’s first one");
         assert_eq!(log_words(&m, &e("member.kick", Some("ada"), Some("x"))), "did “member kick” (x)");
+        assert_eq!(log_words(&m, &e("member.rename", Some("ada"), Some("\"Ada\" → \"Ada L.\""))), "changed their name from “Ada” to “Ada L.”");
+        assert_eq!(log_words(&m, &e("member.rename", Some("ada"), None)), "changed their name");
         assert_eq!(actor_name(&m, Some("admin")), "The owner (admin key)");
         let mut admin = e("member.role", Some("ada"), Some("member"));
         admin.actor = Some("admin".into());

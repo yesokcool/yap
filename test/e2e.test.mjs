@@ -538,6 +538,33 @@ await test('inside the iPhone/Mac app: Draw opens signed in, embedded (no web si
   await ctx.close();
 });
 
+await test('a sign-in link opened in a plain tab asks whose account it is (named by the server, not the link); “Not me” signs out again', async () => {
+  const uid = await a.evaluate(() => yap.settings.uid);
+  const name = await a.evaluate(() => yap.state.users.get(yap.settings.uid)?.name);
+  for (const answer of ['ok', 'cancel']) {
+    // A friend posts a link with a pass of their own (here: a's), naming someone else.
+    const pass = await a.evaluate(() => new Promise((resolve) => {
+      yap.state.handoffWaiter = resolve;
+      yap.ui.send({ t: 'device.handoff' });
+    }));
+    const ctx = await newContext({ viewport: { width: 900, height: 640 } }, `someone's sign-in link (${answer})`);
+    const p = await ctx.newPage();
+    await p.goto(`${BASE}/#key=${encodeURIComponent(KEY)}&handoff=${encodeURIComponent(pass)}&name=Somebody%20Else`);
+    await p.waitForSelector('#confirm-dialog[open]', { timeout: 10000 });
+    assert.equal(await p.textContent('#confirm-title'), `Signed in as ${name}`);
+    if (answer === 'ok') {
+      await p.click('#confirm-ok');
+      await p.waitForFunction(() => !document.getElementById('confirm-dialog').open);
+      assert.equal(await p.evaluate(() => yap.settings.uid), uid, 'that’s me: stays signed in');
+    } else {
+      await p.click('#confirm-cancel');
+      await p.waitForSelector('#welcome-dialog[open]', { timeout: 10000 });
+      assert.equal(await p.evaluate(() => yap.settings.token), '', 'not me: signed out again');
+    }
+    await ctx.close();
+  }
+});
+
 await test('one look: a saved Apple or Arch skin opens as Windows 98, keeping light or dark; Settings has no skin picker', async () => {
   // What an older page left in storage (or what an older iPhone/Mac app still writes before every load).
   for (const [skin, theme] of [['apple', 'light'], ['arch', 'dark'], ['apple', 'system']]) {
@@ -1357,7 +1384,7 @@ await test('offline: a message you send waits, says so, and goes out when you ar
 
 await test('12 messages in a burst: the server takes 10 and says slow down, the rest go out a moment later, each once, in order', async () => {
   for (const p of [a, b]) await p.click('[data-action="open-channel"][data-id="general"]');
-  // A new connection starts with the whole allowance (10 at once, then one a second).
+  // The account's whole allowance (10 at once, then one a second; per account, so a reconnect adds nothing): long refilled by now.
   const slowDowns = [];
   const listen = (ws) => ws.on('framereceived', ({ payload }) => String(payload).includes('"slow_down"') && slowDowns.push(payload));
   a.on('websocket', listen);
@@ -2913,11 +2940,13 @@ await test('OBS link: a listen-only page joins the call and receives audio', asy
   // "Only one person" and "Sound only" are plain options that shape the link.
   await a.selectOption('#obs-only', 'Ben');
   await a.check('#obs-sound-only');
-  assert.match(await a.inputValue('#obs-link'), /\/obs#key=.+&listen=.+&channel=lounge&only=Ben&overlay=0$/);
+  assert.match(await a.inputValue('#obs-link'), /\/obs#listen=[^&]+&channel=lounge&only=Ben&overlay=0$/, 'no invite key in an OBS link');
+  await a.selectOption('#obs-only', ' others');
+  assert.match(await a.inputValue('#obs-link'), /\/obs#listen=[^&]+&channel=lounge&others=1&overlay=0$/, 'everyone but you');
   await a.selectOption('#obs-only', '');
   await a.uncheck('#obs-sound-only');
   const link = await a.inputValue('#obs-link');
-  assert.match(link, /\/obs#key=.+&listen=.+&channel=lounge$/);
+  assert.match(link, /\/obs#listen=[^&]+&channel=lounge$/, 'everyone, you too: the default');
   await a.keyboard.press('Escape');
   const obs = await a.context().newPage();
   await obs.addInitScript(() => {

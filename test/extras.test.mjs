@@ -97,6 +97,21 @@ t('clips: only 16-bit mono PCM WAV, length checked, loud ones capped, quiet ones
   assert.equal(typeof checkWav(wav(500, 0), 5000), 'string', 'silent');
   assert.equal(typeof checkWav(wav(500, 0.5, { channels: 2 }), 5000), 'string', 'stereo');
   assert.equal(typeof checkWav(new Uint8Array(100), 5000), 'string', 'not a WAV');
+  // What's stored is the measured clip under the server's own header: nothing the sender added survives.
+  const plain = wav(1000, 0.5);
+  assert.deepEqual(checkWav(plain, 5000).wav, plain, 'a plain clip is stored as it came');
+  const tail = Buffer.alloc(8 + 16);
+  tail.write('fmt ', 0); tail.writeUInt32LE(16, 4); tail.writeUInt16LE(1, 8); tail.writeUInt16LE(1, 10); tail.writeUInt32LE(1, 12); tail.writeUInt32LE(2, 16); tail.writeUInt16LE(2, 20); tail.writeUInt16LE(16, 22);
+  const crafted = new Uint8Array(Buffer.concat([Buffer.from(plain), tail])); // a second fmt (rate 1) after the data: another app's parser read it
+  const stored = checkWav(crafted, 5000);
+  assert.equal(stored.wav.length, plain.length, 'the trailing chunk is gone');
+  assert.deepEqual(stored.wav, plain);
+  assert.equal(Buffer.from(stored.wav).readUInt32LE(24), 24000, 'at the rate that was measured');
+  const extra = Buffer.alloc(12); // an unknown chunk before the data
+  extra.write('LIST', 0); extra.writeUInt32LE(4, 4); extra.write('INFO', 8);
+  const listed = Buffer.concat([Buffer.from(plain.subarray(0, 36)), extra, Buffer.from(plain.subarray(36))]);
+  listed.writeUInt32LE(listed.length - 8, 4);
+  assert.deepEqual(checkWav(new Uint8Array(listed), 5000).wav, plain, 'other chunks dropped');
 });
 
 let failed = 0;

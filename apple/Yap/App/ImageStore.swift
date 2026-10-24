@@ -182,6 +182,11 @@ final class ImageStore {
         failedAt[key] = now
     }
 
+    /// Avatars and custom emoji are drawn small: decoded no bigger than
+    /// this, however big the file says it is (a few hundred bytes can claim
+    /// 20000 × 20000, gigabytes once decoded in full).
+    static let smallImagePixels = 512
+
     private func load(_ url: URL) {
         let key = url.absoluteString
         guard !loading.contains(url), mayTry(key) else { return }
@@ -189,9 +194,15 @@ final class ImageStore {
         Task {
             defer { loading.remove(url) }
             guard let (data, response) = try? await URLSession.shared.data(from: url),
-                  (response as? HTTPURLResponse)?.statusCode ?? 200 < 400,
-                  let image = PlatformImage(data: data) else { return failed(key) }
-            images[url] = image
+                  (response as? HTTPURLResponse)?.statusCode ?? 200 < 400 else { return failed(key) }
+            let side = Self.smallImagePixels
+            let small = await Task.detached(priority: .userInitiated) { Self.downsample(data, maxPixel: side) }.value
+            guard let small else { return failed(key) }
+            #if os(iOS)
+            images[url] = UIImage(cgImage: small)
+            #else
+            images[url] = NSImage(cgImage: small, size: NSSize(width: small.width, height: small.height))
+            #endif
         }
     }
 }

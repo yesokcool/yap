@@ -458,7 +458,7 @@ pub fn message_list(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
             if new_day {
                 super::sections::day_divider(ui, msg.ts, p);
             }
-            let grouped = !new_day && !after_note && prev.is_some_and(|pr| pr.uid == msg.uid && msg.ts - pr.ts < GROUP_MS);
+            let grouped = !new_day && !after_note && prev.is_some_and(|pr| pr.uid == msg.uid && msg.ts.saturating_sub(pr.ts) < GROUP_MS);
             message_row(app, ui, m, msg, grouped, p, acts);
             prev = Some(msg);
         }
@@ -821,8 +821,14 @@ pub fn react_picker(app: &mut App, ctx: &egui::Context, m: &Model, p: &Pal, acts
     }
 }
 
+/// A picture's size as a message says it (layout only): positive, and not
+/// so big that scaling it to fit comes out as 0 × ∞.
+pub fn sane_size(w: f32, h: f32) -> bool {
+    (0.5..=1e5).contains(&w) && (0.5..=1e5).contains(&h)
+}
+
 pub fn gif(app: &mut App, ui: &mut egui::Ui, g: &Gif, p: &Pal) {
-    let (w, h) = if g.width > 0.0 && g.height > 0.0 { (g.width, g.height) } else { (300.0, 200.0) };
+    let (w, h) = if sane_size(g.width, g.height) { (g.width, g.height) } else { (300.0, 200.0) };
     let s = (300.0 / w).min(300.0 / h);
     let size = vec2(w * s, h * s).round();
     ui.add_space(3.0);
@@ -946,7 +952,7 @@ impl Pic<'_> {
             Pic::Plain(i) => (i.width, i.height),
             Pic::Sealed(i, _) => (i.width, i.height),
         };
-        if w > 0.0 && h > 0.0 { (w, h) } else { (PICTURE_MAX, PICTURE_MAX * 0.75) }
+        if sane_size(w, h) { (w, h) } else { (PICTURE_MAX, PICTURE_MAX * 0.75) }
     }
 }
 
@@ -1553,5 +1559,17 @@ mod draft_tests {
         // Fresh history after a reconnect (nothing known first): no pill for what was there.
         assert!(!st.track_new(None, false));
         assert!(!st.track_new(Some(("e", 5, false)), false));
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    /// Only a size that lays out (real pictures are 1–8000 px) is used as given.
+    #[test]
+    fn sane_sizes() {
+        assert!(super::sane_size(1.0, 1.0) && super::sane_size(8000.0, 600.0));
+        for (w, h) in [(0.0, 10.0), (-5.0, 10.0), (f32::INFINITY, 10.0), (f32::NAN, 10.0), (10.0, 1e30)] {
+            assert!(!super::sane_size(w, h), "{w} × {h}");
+        }
     }
 }

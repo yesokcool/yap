@@ -6,6 +6,8 @@
 //! * macOS: `osascript`'s `display notification`.
 //!
 //! Always fire-and-forget on a short-lived thread; failures are only logged.
+//! Names and message text are members' words: wherever the system reads
+//! markup (Windows' toast XML, libnotify's body), they're escaped first.
 
 pub fn show(title: &str, body: &str) {
     let (title, body) = (title.to_string(), body.chars().take(240).collect::<String>());
@@ -38,6 +40,14 @@ pub fn dock_badge(count: u32) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn dock_badge(_count: u32) {}
+
+/// `s` as plain text inside markup: `&`, `<` and `>` escaped. libnotify servers
+/// read the body as a small HTML-like markup (some the summary too), so a
+/// member's `<b>`, `<a href=…>` or `<img src=…>` would otherwise be rendered.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn escape_markup(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
 
 #[cfg(target_os = "windows")]
 mod platform {
@@ -97,7 +107,7 @@ mod platform {
     pub fn show(title: &str, body: &str) -> Result<(), String> {
         std::process::Command::new("notify-send")
             // "--": a name or message starting with "-" is text, not an option (notify-send refused it).
-            .args(["--app-name=Yap", "--icon=user-available", "--", title, body])
+            .args(["--app-name=Yap", "--icon=user-available", "--", &super::escape_markup(title), &super::escape_markup(body)])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -122,5 +132,16 @@ mod platform {
 mod platform {
     pub fn show(_title: &str, _body: &str) -> Result<(), String> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A member's text reaches libnotify as text, never as markup.
+    #[test]
+    fn markup_is_escaped() {
+        assert_eq!(super::escape_markup("<b>hi</b> & <a href=\"x\">y</a>"), "&lt;b&gt;hi&lt;/b&gt; &amp; &lt;a href=\"x\"&gt;y&lt;/a&gt;");
+        assert_eq!(super::escape_markup("&amp; already"), "&amp;amp; already", "escaped once, shown as typed");
+        assert_eq!(super::escape_markup("Ada: hi :)"), "Ada: hi :)");
     }
 }

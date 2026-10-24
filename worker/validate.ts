@@ -15,8 +15,45 @@ export class ClientError extends Error {
 
 export function cleanName(value: unknown, max: number): string {
   if (typeof value !== 'string') return '';
-  // Strip control characters, collapse whitespace, cap length.
-  return value.replace(/[\p{Cc}\p{Cf}]/gu, '').replace(/\s+/g, ' ').trim().slice(0, max);
+  // Strip control characters, collapse whitespace, cap length. NFC, so an "é"
+  // typed as e + accent is the same name as one typed as é.
+  return value.normalize('NFC').replace(/[\p{Cc}\p{Cf}]/gu, '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+/**
+ * Cyrillic and Greek letters that look like Latin ones (the common ones from
+ * Unicode's confusables list), lowercase: "Сlео" with Cyrillic С, е, о is "cleo".
+ */
+const LOOKALIKES: Record<string, string> = {
+  а: 'a', в: 'b', г: 'r', е: 'e', к: 'k', м: 'm', н: 'h', о: 'o', п: 'n', р: 'p', с: 'c', т: 't', у: 'y', х: 'x', ь: 'b',
+  ѕ: 's', і: 'i', ј: 'j', ԁ: 'd', ԛ: 'q', ԝ: 'w', ү: 'y', һ: 'h', ӏ: 'l',
+  α: 'a', β: 'b', γ: 'y', ε: 'e', η: 'n', ι: 'i', κ: 'k', ν: 'v', ο: 'o', ρ: 'p', τ: 't', υ: 'u', χ: 'x', ω: 'w', ϲ: 'c',
+  ı: 'i', ɡ: 'g',
+};
+
+/**
+ * What a name looks like, for "is someone already called that?": no case, no
+ * accents, full-width and other compatibility forms folded (NFKD), and
+ * look-alike letters from other alphabets read as Latin. So nobody can take
+ * "Cleo" with a Cyrillic "е", "CLEO", or "Cléo" next to the real one.
+ */
+export const nameKey = (name: string): string =>
+  [...name.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase()].map((c) => LOOKALIKES[c] ?? c).join('').replace(/\s+/g, ' ').trim();
+
+/** The same name for signing in: exactly that name, in any case. */
+export const sameName = (a: string, b: string): boolean => a.normalize('NFC').toLowerCase() === b.normalize('NFC').toLowerCase();
+
+/**
+ * Relayed WebRTC signals are passed on as they are, except an ICE candidate
+ * whose `sdpMLineIndex` isn't a small whole number: iPhone/Mac apps up to
+ * build 16 crash on one that doesn't fit in 32 bits (security review,
+ * 2026-10-24). Real ones are 0 (one bundled connection) or a few at most.
+ */
+export function signalOk(data: unknown): boolean {
+  const candidate = typeof data === 'object' && data !== null ? (data as { candidate?: unknown }).candidate : undefined;
+  if (typeof candidate !== 'object' || candidate === null) return true;
+  const index = (candidate as { sdpMLineIndex?: unknown }).sdpMLineIndex;
+  return index === undefined || index === null || (Number.isInteger(index) && (index as number) >= 0 && (index as number) < 64);
 }
 
 export const COLOR_RE = /^#[0-9a-fA-F]{6}$/;

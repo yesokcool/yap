@@ -280,6 +280,40 @@ pub fn normalize_server(s: &str) -> String {
     }
 }
 
+/// Is `host` (a URL's host, `[…]` around IPv6 or not) this computer:
+/// `localhost`, 127.0.0.0/8 or ::1?
+pub fn is_loopback(host: &str) -> bool {
+    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The host in `scheme://[user@]host[:port][/…]`.
+fn url_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#', '\\']).next().unwrap_or("");
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.split(':').next().unwrap_or(""),
+    }
+}
+
+/// What Yap says when a server's address is plain `http://`.
+pub const INSECURE_SERVER: &str = "That link starts with http://, which would send your invite key and password unencrypted. Use the server's https:// link (plain http:// only works for a server on this computer).";
+
+/// Why Yap won't talk to `url`, if it won't: plain `http://` (or `ws://`)
+/// would carry the invite key, the device token and your password in the
+/// clear, and let anyone on the way change what comes back (an update's
+/// manifest too), so it's only for a server on this computer. Every address
+/// set by `--server`, a pasted link or the saved settings goes through this,
+/// and so does every request (`http::secure_only`, `net::ws_request`).
+pub fn insecure(url: &str) -> Option<&'static str> {
+    let url = url.trim();
+    let scheme = url.split_once("://").map(|(s, _)| s.to_ascii_lowercase());
+    let plain = matches!(scheme.as_deref(), Some("http" | "ws"));
+    (plain && !is_loopback(url_host(url))).then_some(INSECURE_SERVER)
+}
+
 pub fn invite_link(cfg: &Config) -> String {
     if cfg.key.is_empty() { cfg.server.clone() } else { format!("{}/#key={}", cfg.server, percent_encode(&cfg.key)) }
 }
@@ -440,6 +474,25 @@ mod tests {
         // A pasted link with a stray "%" before a non-ASCII letter keeps it as typed (it panicked).
         assert_eq!(parse_invite("https://yap.example.dev/#key=%aé"), ("https://yap.example.dev".into(), Some("%aé".into())));
         assert_eq!(percent_decode("%C3%A9%x1%-1"), "é%x1%-1", "only two hex digits make a byte");
+    }
+
+    /// Plain http:// (or ws://) only for this computer; https:// anywhere.
+    #[test]
+    fn plain_http_only_for_this_computer() {
+        for ok in ["https://yap.example.dev", "wss://yap.example.dev/ws", "http://localhost:8788", "http://LOCALHOST", "http://127.0.0.1:8787/x", "http://127.9.9.9", "http://[::1]:8787", "ws://localhost:8788/ws", "https://192.168.1.4", ""] {
+            assert_eq!(insecure(ok), None, "{ok}");
+        }
+        for bad in ["http://yap.example.dev", "HTTP://yap.example.dev", "ws://yap.example.dev/ws", "http://192.168.1.4:8787", "http://10.0.0.1", "http://localhost.evil.example", "http://127.0.0.1.evil.example", "http://localhost@evil.example/", "http://evil.example\\@localhost", "http://[::2]", "http://0.0.0.0:8787"] {
+            assert_eq!(insecure(bad), Some(INSECURE_SERVER), "{bad}");
+        }
+        // What --server, a pasted link and the saved settings come out as.
+        assert_eq!(insecure(&parse_invite("localhost:8788").0), None);
+        assert_eq!(insecure(&parse_invite("127.0.0.1:8788/#key=k").0), None);
+        assert_eq!(insecure(&parse_invite("yap.example.dev/#key=k").0), None, "a bare host gets https://");
+        assert!(insecure(&parse_invite("http://yap.example.dev/#key=k").0).is_some());
+        let mut c: Config = serde_json::from_str(r#"{"server": "http://chat.example.com/"}"#).unwrap();
+        c.fill_defaults();
+        assert!(insecure(&c.server).is_some(), "a saved plain-http server is kept, and refused when connecting");
     }
 
     /// The prompts Later put off are a new field: a config from an older

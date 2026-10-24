@@ -1,11 +1,17 @@
 //! Signed click-to-update.
 //!
 //! `<server>/downloads/latest.json` lists one file per platform with its size,
-//! SHA-256 and an Ed25519 signature over the raw bytes. We check at launch and
-//! every 6 h; installing happens only when the person clicks: download next to
-//! the executable, verify size + hash + signature against the key built into
-//! this binary, swap the executable (`self_replace`), relaunch with the same
-//! arguments. Debug builds accept `YAP_UPDATE_URL` / `YAP_UPDATE_PUBKEY` so the
+//! SHA-256 and Ed25519 signatures. We check at launch and every 6 h;
+//! installing happens only when the person clicks: download next to the
+//! executable, verify size + hash + the v2 signature against the key built
+//! into this binary, swap the executable (`self_replace`), relaunch with the
+//! same arguments.
+//!
+//! The v2 signature (`sig2`) signs the platform and version along with the
+//! file's hash (`signed_message`), so whoever controls `latest.json` can't
+//! relabel an older signed build as newer, or hand one platform's build to
+//! another. It's required, and the version must be newer than this one. (`sig`,
+//! over the raw bytes, stays in the manifest for apps from before v2.) Debug builds accept `YAP_UPDATE_URL` / `YAP_UPDATE_PUBKEY` so the
 //! whole path can be tested against a local server; release builds ignore them.
 //!
 //! The key is a build setting: `YAP_UPDATE_PUBKEY=<base64> cargo build`
@@ -39,7 +45,23 @@ pub struct FileEntry {
     pub path: String,
     pub size: u64,
     pub sha256: String,
-    pub sig: String,
+    // (`sig`, over the raw bytes, is for apps from before v2: never read here.)
+    /// Over `signed_message(platform, version, sha256)`: what this app requires.
+    #[serde(default)]
+    pub sig2: Option<String>,
+}
+
+/// The largest build we'd download (a release is about 25 MB): the manifest's
+/// size is only its word until the hash checks out.
+const MAX_SIZE: u64 = 256 * 1024 * 1024;
+
+/// What a v2 update signature signs, as UTF-8: four lines joined by `\n`, no
+/// newline at the end — `yap-update-v2`, the manifest's platform key
+/// (`linux-x86_64`…), the version exactly as `latest.json` has it, and the
+/// file's SHA-256 in lowercase hex. `tools/publish-desktop.mjs` signs the
+/// same (`updateMessage` in `tools/lib.mjs`).
+pub fn signed_message(platform: &str, version: &str, sha256_hex: &str) -> String {
+    format!("yap-update-v2\n{platform}\n{version}\n{sha256_hex}")
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -152,13 +174,9 @@ pub fn newer(a: &str, b: &str) -> bool {
     }
 }
 
+/// (Plain http:// only to this computer, like every request: `http::secure_only`.)
 fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .http_status_as_error(false)
-        .user_agent(concat!("yap-desktop/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into()
+    crate::http::agent_config(timeout).build().into()
 }
 
 /// Resolve the manifest's file path against the manifest URL's origin.
@@ -191,19 +209,37 @@ pub fn check(server: &str) -> Result<Option<Available>, String> {
         return Err(format!("Update check failed (HTTP {}).", res.status()));
     }
     let m: Manifest = res.body_mut().read_json().map_err(|e| format!("Update manifest unreadable: {e}"))?;
-    if !newer(&m.version, current_version()) {
+    offered(m, &url, platform(), current_version())
+}
+
+/// The manifest's update for `platform`, if it's newer than `running` and one
+/// this app could install: published with a v2 signature (an older publish
+/// script's isn't offered at all), at most `MAX_SIZE`.
+fn offered(m: Manifest, manifest_url: &str, platform: &str, running: &str) -> Result<Option<Available>, String> {
+    if !newer(&m.version, running) {
         return Ok(None);
     }
-    let Some(file) = m.files.get(platform()).cloned() else { return Ok(None) };
-    Ok(Some(Available { url: file_url(&url, &file.path), version: m.version, date: m.date, notes: m.notes, file }))
+    let Some(file) = m.files.get(platform).cloned() else { return Ok(None) };
+    if file.sig2.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        log::warn!("update {} for {platform} has no v2 signature (sig2): not offered", m.version);
+        return Ok(None);
+    }
+    if file.size > MAX_SIZE {
+        return Err(format!("Update {} looks wrong ({} bytes).", m.version, file.size));
+    }
+    Ok(Some(Available { url: file_url(manifest_url, &file.path), version: m.version, date: m.date, notes: m.notes, file }))
 }
 
-/// Check bytes against the manifest entry: size, SHA-256, Ed25519 signature.
-pub fn verify(bytes: &[u8], file: &FileEntry) -> Result<(), String> {
-    verify_with(bytes, file, &public_key()?)
+/// Check downloaded bytes against the update: newer than this build, size,
+/// SHA-256, and the v2 signature over this platform, that version and the hash.
+pub fn verify(bytes: &[u8], update: &Available) -> Result<(), String> {
+    verify_with(bytes, &update.file, &update.version, platform(), current_version(), &public_key()?)
 }
 
-fn verify_with(bytes: &[u8], file: &FileEntry, key: &[u8]) -> Result<(), String> {
+fn verify_with(bytes: &[u8], file: &FileEntry, version: &str, platform: &str, running: &str, key: &[u8]) -> Result<(), String> {
+    if !newer(version, running) {
+        return Err(format!("Update rejected: {version} isn't newer than this version ({running})."));
+    }
     if bytes.len() as u64 != file.size {
         return Err(format!("Update rejected: size {} ≠ {}.", bytes.len(), file.size));
     }
@@ -211,10 +247,12 @@ fn verify_with(bytes: &[u8], file: &FileEntry, key: &[u8]) -> Result<(), String>
     if !hash.eq_ignore_ascii_case(file.sha256.trim()) {
         return Err("Update rejected: SHA-256 doesn't match.".into());
     }
-    let sig = base64::engine::general_purpose::STANDARD.decode(file.sig.trim()).map_err(|_| "Update rejected: bad signature encoding.".to_string())?;
+    let sig2 = file.sig2.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or("Update rejected: it has no version signature (sig2).")?;
+    let sig = base64::engine::general_purpose::STANDARD.decode(sig2).map_err(|_| "Update rejected: bad signature encoding.".to_string())?;
+    // (The hash we computed, not the manifest's spelling of it.)
     ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
-        .verify(bytes, &sig)
-        .map_err(|_| "Update rejected: the signature doesn't match this build's update key.".to_string())
+        .verify(signed_message(platform, version, &hash).as_bytes(), &sig)
+        .map_err(|_| "Update rejected: the signature doesn't match this build's update key, this version and this platform.".to_string())
 }
 
 /// Where our executable lives, as it was at startup. Remembered on first use
@@ -248,6 +286,9 @@ pub fn install(update: &Available, progress: impl Fn(u64, u64)) -> Result<PathBu
         }
         let mut reader = res.body_mut().as_reader();
         // (The size is only the manifest's word until the hash checks out: don't reserve more than a real build.)
+        if update.file.size > MAX_SIZE {
+            return Err("Update rejected: too big.".into());
+        }
         let mut bytes = Vec::with_capacity(update.file.size.min(64 * 1024 * 1024) as usize);
         let mut buf = vec![0u8; 64 * 1024];
         loop {
@@ -256,12 +297,12 @@ pub fn install(update: &Available, progress: impl Fn(u64, u64)) -> Result<PathBu
                 break;
             }
             bytes.extend_from_slice(&buf[..n]);
-            if bytes.len() as u64 > update.file.size + 1024 * 1024 {
+            if bytes.len() as u64 > update.file.size.saturating_add(1024 * 1024) {
                 return Err("Update rejected: bigger than announced.".into());
             }
             progress(bytes.len() as u64, update.file.size);
         }
-        verify(&bytes, &update.file)?;
+        verify(&bytes, update)?;
         let mut f = std::fs::File::create(&tmp).map_err(|e| format!("Can't write next to Yap ({}): {e}", dir.display()))?;
         f.write_all(&bytes).map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())?;
@@ -358,6 +399,14 @@ mod tests {
         ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap()
     }
 
+    /// The exact bytes a v2 signature signs; `test/tools.test.mjs` checks
+    /// `updateMessage` in tools/lib.mjs against the same string.
+    #[test]
+    fn signed_message_format() {
+        let hash = "ab".repeat(32);
+        assert_eq!(signed_message("linux-x86_64", "1.2.3", &hash), format!("yap-update-v2\nlinux-x86_64\n1.2.3\n{hash}"));
+    }
+
     #[test]
     fn verifies_signatures() {
         use ring::signature::KeyPair;
@@ -365,23 +414,60 @@ mod tests {
         let data = b"new yap binary";
         let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
         let hash: String = sha2::Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect();
-        let entry = FileEntry { path: "/x".into(), size: data.len() as u64, sha256: hash, sig: b64(kp.sign(data).as_ref()) };
+        let sig2 = |platform: &str, version: &str| Some(b64(kp.sign(signed_message(platform, version, &hash).as_bytes()).as_ref()));
+        let entry = FileEntry { path: "/x".into(), size: data.len() as u64, sha256: hash.to_uppercase(), sig2: sig2("linux-x86_64", "0.9.0") };
         let key = kp.public_key().as_ref().to_vec();
-        // Good against its own key, refused against another one…
-        assert!(verify_with(data, &entry, &key).is_ok());
-        assert!(verify_with(data, &entry, other.public_key().as_ref()).unwrap_err().contains("signature"));
+        let check = |e: &FileEntry, version: &str, platform: &str, key: &[u8]| verify_with(data, e, version, platform, "0.8.0", key);
+        // Good against its own key, for that version and platform…
+        assert!(check(&entry, "0.9.0", "linux-x86_64", &key).is_ok());
+        // …refused against another key…
+        assert!(check(&entry, "0.9.0", "linux-x86_64", other.public_key().as_ref()).unwrap_err().contains("signature"));
+        // …relabelled as another version (an old build passed off as new), or for another platform…
+        assert!(check(&entry, "0.9.1", "linux-x86_64", &key).unwrap_err().contains("signature"));
+        assert!(check(&entry, "0.9.0", "windows-x86_64", &key).unwrap_err().contains("signature"));
+        // …with only the old raw-bytes signature, or none…
+        let v1 = FileEntry { sig2: None, ..entry.clone() };
+        assert!(check(&v1, "0.9.0", "linux-x86_64", &key).unwrap_err().contains("sig2"));
+        let v1_as_v2 = FileEntry { sig2: Some(b64(kp.sign(data).as_ref())), ..entry.clone() };
+        assert!(check(&v1_as_v2, "0.9.0", "linux-x86_64", &key).unwrap_err().contains("signature"));
+        // …or a signed version that isn't newer than the one running (a rollback).
+        let old = FileEntry { sig2: sig2("linux-x86_64", "0.7.0"), ..entry.clone() };
+        assert!(check(&old, "0.7.0", "linux-x86_64", &key).unwrap_err().contains("isn't newer"));
+        let same = FileEntry { sig2: sig2("linux-x86_64", "0.8.0"), ..entry.clone() };
+        assert!(check(&same, "0.8.0", "linux-x86_64", &key).unwrap_err().contains("isn't newer"));
         let mut wrong = entry.clone();
         wrong.sha256 = "00".repeat(32);
-        assert!(verify_with(data, &wrong, &key).unwrap_err().contains("SHA-256"));
+        assert!(check(&wrong, "0.9.0", "linux-x86_64", &key).unwrap_err().contains("SHA-256"));
         let mut short = entry.clone();
         short.size += 1;
-        assert!(verify_with(data, &short, &key).unwrap_err().contains("size"));
+        assert!(check(&short, "0.9.0", "linux-x86_64", &key).unwrap_err().contains("size"));
         // …and never accepted by this build unless it was built with that key.
-        assert!(verify(data, &entry).is_err());
+        let update = Available { version: "99.0.0".into(), date: String::new(), notes: vec![], url: String::new(), file: entry.clone() };
+        assert!(verify(data, &update).is_err());
         // A key built in must be a raw 32-byte Ed25519 key.
         if let Some(k) = BUILD_KEY.filter(|k| !k.trim().is_empty()) {
             assert_eq!(decode_key(k).unwrap().len(), 32);
         }
+    }
+
+    /// Only a newer version with a v2 signature and a believable size is offered.
+    #[test]
+    fn what_the_manifest_offers() {
+        let manifest = |version: &str, sig2: Option<&str>, size: u64| -> Manifest {
+            let file = serde_json::json!({ "path": "/downloads/yap-x", "size": size, "sha256": "00", "sig": "old", "sig2": sig2 });
+            serde_json::from_value(serde_json::json!({ "version": version, "files": { "linux-x86_64": file } })).unwrap()
+        };
+        let url = "https://yap.example/downloads/latest.json";
+        let got = offered(manifest("0.9.0", Some("c2ln"), 1000), url, "linux-x86_64", "0.8.0").unwrap().unwrap();
+        assert_eq!((got.version.as_str(), got.url.as_str()), ("0.9.0", "https://yap.example/downloads/yap-x"));
+        assert!(offered(manifest("0.8.0", Some("c2ln"), 1000), url, "linux-x86_64", "0.8.0").unwrap().is_none());
+        assert!(offered(manifest("0.9.0", Some("c2ln"), 1000), url, "macos-aarch64", "0.8.0").unwrap().is_none());
+        assert!(offered(manifest("0.9.0", None, 1000), url, "linux-x86_64", "0.8.0").unwrap().is_none(), "a manifest from before v2 signatures");
+        assert!(offered(manifest("0.9.0", Some(" "), 1000), url, "linux-x86_64", "0.8.0").unwrap().is_none());
+        assert!(offered(manifest("0.9.0", Some("c2ln"), 50 << 30), url, "linux-x86_64", "0.8.0").is_err());
+        // An old manifest's entry (no sig2 field at all) still parses.
+        let old: FileEntry = serde_json::from_str(r#"{"path":"/x","size":1,"sha256":"00","sig":"s"}"#).unwrap();
+        assert!(old.sig2.is_none());
     }
 
     #[test]

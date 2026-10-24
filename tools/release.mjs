@@ -7,8 +7,9 @@
 //
 // Changelog text: lines in commit bodies starting with "Changelog: " are the
 // friendly, user-facing bullets. Commits without any fall back to their
-// subject line (minus the "feat:" prefix). chore/docs/test and merge commits
-// are skipped.
+// subject line, minus the "fix(desktop):" prefix and labelled by its scope
+// ("Desktop app: …"); chore/docs/test/perf/refactor and merge commits without
+// one are skipped. New features come first, each line once, as a sentence.
 // Trailers for the release commit (e.g. Co-Authored-By): each --trailer, and
 // the lines of RELEASE_TRAILERS. None by default.
 import fs from 'node:fs';
@@ -47,18 +48,26 @@ if (!commits.length) {
   process.exit(0);
 }
 
-const items = [];
+// What a subject line is about when it's one app or place (a Changelog line says so itself).
+const LABELS = { desktop: 'Desktop app: ', apple: 'iPhone and Mac: ', space: 'Space: ', draw: 'Draw: ', watch: 'Watch together: ' };
+// Internal unless a Changelog line says what you'd notice.
+const QUIET = ['chore', 'docs', 'test', 'ci', 'build', 'style', 'refactor', 'perf'];
+const features = [];
+const fixes = [];
 let minor = false;
 for (const c of commits.reverse()) {
-  const type = c.subject.match(/^(\w+)(?:\([^)]*\))?!?:/)?.[1] ?? '';
+  const [, type = '', scope = ''] = c.subject.match(/^(\w+)(?:\(([^)]*)\))?!?:/) ?? [];
   if (type === 'feat') minor = true;
+  const into = type === 'feat' ? features : fixes;
   const friendly = changelogLines(c.body);
-  if (friendly.length) items.push(...friendly);
-  else if (!/^Merge /.test(c.subject) && !['chore', 'docs', 'test', 'ci', 'build', 'style', 'refactor'].includes(type)) {
+  if (friendly.length) into.push(...friendly);
+  else if (!/^Merge /.test(c.subject) && !QUIET.includes(type)) {
     const text = c.subject.replace(/^\w+(?:\([^)]*\))?!?:\s*/, '');
-    items.push(text.charAt(0).toUpperCase() + text.slice(1));
+    into.push(LABELS[scope] ? LABELS[scope] + text : text.charAt(0).toUpperCase() + text.slice(1));
   }
 }
+// The features first (they're what the title is about), each line once, each with its full stop.
+const items = [...new Set([...features, ...fixes].map((item) => (/[.!?…]["”')]*$/.test(item) ? item : `${item}.`)))];
 
 if (!items.length) {
   console.log(`Nothing user-facing since ${lastTag || 'the beginning'} (only chore/docs/test commits) — no release.`);
@@ -68,7 +77,10 @@ if (!items.length) {
 const log = JSON.parse(fs.readFileSync(path.join(ROOT, 'web/changelog.json'), 'utf8'));
 const [maj, min, pat] = log.current.split('.').map(Number);
 const version = minor ? `${maj}.${min + 1}.0` : `${maj}.${min}.${pat + 1}`;
-const entry = { version, date: new Date().toISOString().slice(0, 10), title: title || (minor ? 'New stuff' : 'Fixes'), items };
+// Today here, not in UTC (toISOString's date made an evening release tomorrow's).
+const now = new Date();
+const date = [now.getFullYear(), now.getMonth() + 1, now.getDate()].map((n) => String(n).padStart(2, '0')).join('-');
+const entry = { version, date, title: title || (minor ? 'New stuff' : 'Fixes'), items };
 console.log(JSON.stringify(entry, null, 2));
 if (dryRun) process.exit(0);
 

@@ -200,7 +200,7 @@
       <label class="field">
         <span class="field-row"><span>New password</span><button class="link-btn" type="button" data-action="reveal" aria-pressed="false">Show</button></span>
         <input name="pin" type="password" maxlength="128" required autocomplete="new-password" autocapitalize="off" spellcheck="false">
-        <small class="muted field-note">8 characters or more.</small>
+        <small class="muted field-note">8 characters or more. Your other devices are signed out (sign them in again with the new one).</small>
       </label>
       <p class="form-error" id="pin-error" hidden></p>
       <div class="actions">
@@ -554,10 +554,10 @@
             <label class="toggle"><input type="checkbox" name="music"><span>Music mode <small class="muted">— stereo, all processing off. Use with headphones.</small></span></label>
             <label class="toggle"><input type="checkbox" name="relayOnly"><span>Hide my IP address in calls <small class="muted" id="relay-note">— sends your voice through the server's voice relay instead of straight to friends</small></span></label>
             <div class="field obs-field">
-              <span>Stream to OBS <small class="muted">— a private link for an OBS Browser Source that plays a voice channel. Leave it in OBS: it keeps working until you turn it off.</small></span>
+              <span>Stream to OBS <small class="muted">— a private link for an OBS Browser Source that plays a voice channel. Leave it in OBS: it keeps working until you turn it off. It plays your voice too, from whichever device you're in the call on: talk from your phone and record the game on your PC.</small></span>
               <div class="inline-form obs-options">
                 <span class="combo"><select id="obs-channel" aria-label="Voice channel for OBS"></select></span>
-                <span class="combo"><select id="obs-only" aria-label="Whose voice"><option value="">Everyone in the call</option></select></span>
+                <span class="combo"><select id="obs-only" aria-label="Whose voice"><option value="">Everyone in the call, you too</option></select></span>
               </div>
               <label class="toggle"><input type="checkbox" id="obs-sound-only"><span>Sound only <small class="muted">— no names or pictures on screen</small></span></label>
               <div class="inline-form"><button class="btn" type="button" data-action="create-obs">Make OBS link</button></div>

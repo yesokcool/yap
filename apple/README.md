@@ -85,7 +85,9 @@ xcodebuild build -project Yap.xcodeproj -scheme Yap -destination 'platform=macOS
 
 First run: paste an invite link, like `https://chat.example.com/#key=…`
 (the `https://` is optional). There's no default server, so a bare key isn't
-enough. Then "I'm new" (name + password of 8 characters or more + color,
+enough. Plain `http://` is refused except for this computer (`localhost`,
+127.x, ::1: a test server), in a pasted link and in a server saved by an
+older version. Then "I'm new" (name + password of 8 characters or more + color,
 then the waiting room until the owner or a mod lets you in) or "I have an
 account". The device token and the invite key live in the
 Keychain; name, color and read marks in UserDefaults.
@@ -389,6 +391,19 @@ share's sound dipping to half while the web speaks, back when switched off.
 The app's `TalkCuesAppTests`: the spec's words, the row's "60%" / muted
 glyph and Ctrl/⌘ + scroll's 5 % steps, and the call bar's "You're muted" /
 "Live — tap to stop".
+
+The security review (2026-10-24) added `HostileInputTests` (what another
+member or a hostile server can send never traps: an ICE candidate's
+`sdpMLineIndex` past Int32, times and counts clamped where they're decoded,
+a roll's sum, a vault's stretching, a clip's sample rate, the mod log's
+`member.rename`, `account.signedOut`, an upload refused as `quota` /
+`too_big` in the server's words, pictures kept within 8192 px / 40 MP),
+`ServerAddressTests` (plain http only to this computer; the web view's
+rule: the server's own pages in it, other links and every new window to
+the system), `SessionTests`' 4001 close and the app being told of every
+ending, and `HideMyIPTests` (on = relay only, with or without a relay; the
+call says nobody can be reached). The app's `SecurityAppTests`: the web
+view's sign-in owner, the password and Hide my IP words.
 
 **App target:** `xcodebuild test -project Yap.xcodeproj -scheme Yap -destination 'platform=iOS Simulator,id=<UDID>'`
 (identity, no pixel font shipping, a stored Apple/Arch skin loading as Windows 98 with light/dark kept, the status bar, edit drafts, skin tone,
@@ -1399,7 +1414,10 @@ estimator sends probe padding through an audio-only call. Video keeps it.
   works outside calls only. No music mode yet (so no "music + voice
   activity = always on").
 - Live cursors on the board, Draw and Space are web-only: those open in an
-  in-app web view (which keeps its own sign-in).
+  in-app web view (which keeps its own sign-in, and shows only this server:
+  other links open in the browser). Signing out wipes it, but the web
+  view's own device stays in Settings › Devices on the server until it's
+  signed out there (or a new password signs out every other device).
 - The app shows local notifications for @mentions, pings and hangs only
   while it's running (during a call in the background); ntfy covers the rest
   (Settings › Notifications sets the mode and shows the topic).

@@ -84,7 +84,7 @@ export function onSend(hub: HubHost, ws: WebSocket, me: Attachment, msg: Extract
   }
   if (!body.trim() && !gif && !image && !(personal && replyTo)) throw new ClientError('empty', 'Message is empty.');
   if (body.length > bodyLimit(channel, body)) throw tooLong(channel, body);
-  hub.limit(me.sid, 'send', 10, 1); // only real messages count toward the spam limit
+  hub.limit(me.uid, 'send', 10, 1); // only real messages count toward the spam limit (per account: more connections don't help)
   const message: Message = { id: crypto.randomUUID(), channelId: channel.id, uid: me.uid, body, ts: hub.nextTs() };
   if (gif) message.gif = gif;
   if (image) message.image = image;

@@ -77,10 +77,10 @@ struct NoPresenceRepliesTests {
             Issue.record("ready"); return
         }
         #expect(ready.weakPin && ready.weakReason == "guessable" && ready.secretKind == "password")
-        guard case let .account(_, kind) = try ServerMessage.decode(#"{"t":"account","hasPin":true,"kind":"password"}"#) else {
+        guard case let .account(_, kind, signedOut) = try ServerMessage.decode(#"{"t":"account","hasPin":true,"kind":"password"}"#) else {
             Issue.record("account"); return
         }
-        #expect(kind == "password")
+        #expect(kind == "password" && signedOut == nil, "older servers don't say how many devices went")
     }
 
     @Test func searchQueries() {

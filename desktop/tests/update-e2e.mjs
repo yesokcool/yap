@@ -2,6 +2,8 @@
 // static server and a throwaway Ed25519 key:
 //   - a tampered file, a wrong-key signature and a size lie are refused and the
 //     executable is left alone;
+//   - so are an old signed build relabelled as newer, another platform's
+//     signature, and a manifest with only the old raw-bytes signature (sig);
 //   - a good update is downloaded, verified, swapped in and relaunched with the
 //     same arguments (the "new version" is a tiny script that records its args);
 //   - leftovers (yap.old, temp files) are cleaned on the next start;
@@ -18,6 +20,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { updateMessage } from '../../tools/lib.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const TARGET = process.env.CARGO_TARGET_DIR ?? path.join(here, '../target');
@@ -59,11 +62,13 @@ const server = http.createServer((req, res) => {
 let served = newBin;
 await new Promise((r) => server.listen(PORT, r));
 
-function entry(bytes, { key = good, size = bytes.length } = {}) {
-  return { path: '/files/yap-new', size, sha256: sha256(bytes), sig: sign(bytes, key) };
+// `signedFor`: the platform and version the v2 signature names (by default this release's).
+function entry(bytes, { key = good, size = bytes.length, signedFor = [platform, '99.0.0'] } = {}) {
+  const sha = sha256(bytes);
+  return { path: '/files/yap-new', size, sha256: sha, sig: sign(bytes, key), sig2: sign(Buffer.from(updateMessage(...signedFor, sha)), key) };
 }
-function setRelease(e) {
-  manifest = { version: '99.0.0', date: '2026-10-05', notes: ['Test release'], files: { [platform]: e } };
+function setRelease(e, version = '99.0.0') {
+  manifest = { version, date: '2026-10-05', notes: ['Test release'], files: { [platform]: e } };
 }
 function freshApp(name) {
   const dir = path.join(OUT, name);
@@ -118,6 +123,32 @@ await test('signature from another key is refused, exe untouched', async () => {
   setRelease(entry(newBin, { key: other }));
   const out = await run(exe, args);
   assert.match(out, /signature doesn't match/);
+  assert.equal(sha256(fs.readFileSync(exe)), original);
+});
+
+await test('an old signed build relabelled as newer is refused, exe untouched', async () => {
+  const exe = freshApp('relabelled');
+  setRelease(entry(newBin, { signedFor: [platform, '0.0.1'] }));
+  const out = await run(exe, args);
+  assert.match(out, /signature doesn't match/);
+  assert.equal(sha256(fs.readFileSync(exe)), original);
+});
+
+await test("another platform's signed build is refused", async () => {
+  const exe = freshApp('platform');
+  setRelease(entry(newBin, { signedFor: [platform.startsWith('linux') ? 'windows-x86_64' : 'linux-x86_64', '99.0.0'] }));
+  const out = await run(exe, args);
+  assert.match(out, /signature doesn't match/);
+  assert.equal(sha256(fs.readFileSync(exe)), original);
+});
+
+await test('a manifest with only the old raw-bytes signature is not offered', async () => {
+  const exe = freshApp('v1only');
+  const { sig2, ...v1 } = entry(newBin);
+  assert.ok(sig2);
+  setRelease(v1);
+  const out = await run(exe, args);
+  assert.match(out, /UPDATE none/);
   assert.equal(sha256(fs.readFileSync(exe)), original);
 });
 

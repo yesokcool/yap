@@ -199,6 +199,8 @@ pub fn welcome(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
                 let (server, key) = crate::config::parse_invite(&app.welcome.link);
                 if server.is_empty() {
                     app.welcome.error = Some("That doesn't look like an invite link.".into());
+                } else if let Some(why) = crate::config::insecure(&server) {
+                    app.welcome.error = Some(why.into());
                 } else {
                     let slot: CheckSlot = Arc::new(Mutex::new(None));
                     let (s2, k2, slot2, ctx) = (server.clone(), key.clone().unwrap_or_default(), slot.clone(), ui.ctx().clone());

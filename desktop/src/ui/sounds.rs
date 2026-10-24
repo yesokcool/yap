@@ -13,8 +13,8 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 
 /// Longest soundboard clip / join chime (seconds).
-const BOARD_MAX: f32 = 5.0;
-const CHIME_MAX: f32 = 2.0;
+const BOARD_MAX: f32 = crate::protocol::SOUND_MS as f32 / 1000.0;
+const CHIME_MAX: f32 = crate::protocol::CHIME_MS as f32 / 1000.0;
 /// Shortest clip worth sending.
 const MIN_LEN: f32 = 0.2;
 /// Waveform columns.

@@ -7,13 +7,21 @@ import YapVoice
 enum VoiceOptions {
     static let relayTitle = "Hide my IP address in calls"
 
-    /// nil = not asked yet.
-    static func relayNote(available: Bool?) -> String {
+    /// nil = not asked yet. On without a relay: no voice at all (it never
+    /// goes straight to friends instead), so it says so, and it can still be
+    /// turned off.
+    static func relayNote(available: Bool?, on: Bool = false) -> String {
         switch available {
+        case false? where on: "This server has no voice relay, so while this is on you can't connect to anyone in a call."
         case false?: "Needs the voice relay, which isn't switched on for this server yet."
         default: "Sends your voice through the server's voice relay instead of straight to friends (a little more delay)."
         }
     }
+
+    /// In the call (and next to each person) while it's on with no relay to go through.
+    static let relayMissing = "Hide my IP address is on, but this server has no voice relay, so you can't connect to anyone. Turn it off in Settings › Voice."
+    /// The call bar's short version.
+    static let relayMissingShort = "Hide my IP is on: no voice relay"
 
     static let headphonesTitle = "High-quality headphone audio (uses the phone's mic)"
     static let headphonesNote = "Bluetooth headphones keep their full stereo sound instead of switching to call quality; your voice comes from the phone's own mic."

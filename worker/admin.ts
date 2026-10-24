@@ -5,7 +5,8 @@ import { checkWav } from './extras';
 import { sameSecret } from './encoding';
 import { hub, media } from './objects';
 import { forgetMainKey } from './access';
-import { MAX_PICTURE, contentId, fail, sniffImage, uploadEmoji } from './uploads';
+import { MAX_PICTURE, contentId, fail, uploadEmoji } from './uploads';
+import { sniffImage } from './pictures';
 
 /** Admin endpoints take `Authorization: Bearer <ADMIN_KEY>`; disabled if unset. */
 export function adminOk(env: Env, request: Request): boolean {

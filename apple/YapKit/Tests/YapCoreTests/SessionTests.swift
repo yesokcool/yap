@@ -66,6 +66,44 @@ struct SessionTests {
         #expect(client.authError?.code == "bad_token" && client.authError?.mode == .login)
     }
 
+    /// Closed with 4001 (signed out from another device, or by a new
+    /// password — mine or a mod's reset): the same clean slate at once,
+    /// without a reconnect to hear `bad_token`; the app wipes its web view.
+    @Test func signedOutByTheServer() {
+        let store = MemoryCredentialStore(endpoint: ServerEndpoint(baseURL: URL(string: "https://chat.example.com")!, key: "k"), token: "t")
+        let voice = FakeVoice()
+        let client = signedIn(store, voice: voice)
+        var wiped = 0
+        client.onSignedOut = { wiped += 1 }
+        client.connectionClosed(.signedOut)
+        expectClean(client, store, voice)
+        #expect(client.phase == .signedOut && wiped == 1)
+        #expect(client.authError?.code == "bad_token" && client.authError?.mode == .login)
+    }
+
+    /// Every way a sign-in ends tells the app (it signs out its web view too).
+    @Test func everyEndingTellsTheApp() {
+        let server = ServerEndpoint(baseURL: URL(string: "https://chat.example.com")!, key: "k")
+        var wiped = 0
+        let here = signedIn(MemoryCredentialStore(endpoint: server, token: "t"), voice: FakeVoice())
+        here.onSignedOut = { wiped += 1 }
+        here.signOut()
+        #expect(wiped == 1)
+        let elsewhere = signedIn(MemoryCredentialStore(endpoint: server, token: "t"), voice: FakeVoice())
+        elsewhere.onSignedOut = { wiped += 1 }
+        elsewhere.receiveForTesting(.error(code: "bad_token", message: "", re: "hello"))
+        #expect(wiped == 2)
+        let forgetting = signedIn(MemoryCredentialStore(endpoint: server, token: "t"), voice: FakeVoice())
+        forgetting.onSignedOut = { wiped += 1 }
+        forgetting.forgetServer()
+        #expect(wiped == 3 && forgetting.phase == .needsInvite)
+        // Another server (a new key for the same one keeps the sign-in: `newKeySameServerKeepsTheDevice`).
+        let moving = YapClient(credentials: MemoryCredentialStore(endpoint: server, token: "t"), client: "test")
+        moving.onSignedOut = { wiped += 1 }
+        moving.useInvite(ServerEndpoint(baseURL: URL(string: "https://other.example.com")!, key: "k"))
+        #expect(wiped == 4)
+    }
+
     /// A wrong password on the sign-in screen isn't a session ending.
     @Test func badLoginKeepsNothingToClear() {
         let store = MemoryCredentialStore(endpoint: ServerEndpoint(baseURL: URL(string: "https://chat.example.com")!, key: "k"))

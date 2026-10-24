@@ -179,10 +179,17 @@ enum PasswordText {
     static func change(onPin: Bool) -> String { onPin ? "Set a password" : "Change password" }
     static func current(onPin: Bool) -> String { onPin ? "Current password or PIN" : "Current password" }
     static let new = "New password"
-    static func saved(onPin: Bool) -> String {
-        onPin ? "Password set. Sign in anywhere with your name and this password."
-              : "Password changed. Sign in anywhere with your name and this password."
+    static func saved(onPin: Bool, signedOut: Int? = nil) -> String {
+        let saved = onPin ? "Password set. Sign in anywhere with your name and this password."
+                          : "Password changed. Sign in anywhere with your name and this password."
+        switch signedOut ?? 0 {
+        case ...0: return saved
+        case 1: return saved + " Your other device was signed out."
+        case let n: return saved + " Your \(n) other devices were signed out."
+        }
     }
+    /// Under the new password: a new one signs out every other device (OBS links too).
+    static let othersSignedOut = "Your other devices will be signed out."
 
     /// The once-per-device prompt (`ready.weakPin`).
     static let promptTitle = "Choose a password"

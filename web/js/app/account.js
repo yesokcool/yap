@@ -26,7 +26,9 @@ const chars = (s) => [...s].length;
 
 export function onHelloError(msg) {
   if (msg.code === 'bad_token' && state.spareHandoff) {
-    save({ token: state.spareHandoff });
+    // (A pass from a link in a plain tab: ask whose account it is once in, as readInviteFromUrl does.)
+    if (state.spareHandoff.ask) state.linkSignIn = { was: settings.uid };
+    save({ token: state.spareHandoff.pass });
     state.spareHandoff = null;
     return sendHello();
   }
@@ -254,9 +256,12 @@ export function renderAccountBars() {
 // Chrome/Edge/Android: their own install prompt. iPhone/iPad (and Mac
 // Safari): no prompt exists, so we show the two taps — and since a
 // home-screen app has its own storage, the page's URL first gets a one-time
-// sign-in pass (15 min) so the new icon opens already signed in.
+// sign-in pass (5 min) so the new icon opens already signed in.
 
 let installPrompt = null;
+/** How long a sign-in pass is good for (worker/hub-accounts.ts › HANDOFF_MS). */
+const HANDOFF_MS = 5 * 60_000;
+let homeUrlTimer = null;
 addEventListener('beforeinstallprompt', (e) => {
   e.preventDefault();
   installPrompt = e;
@@ -267,7 +272,7 @@ addEventListener('appinstalled', () => {
   renderHomeBar();
 });
 
-const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+export const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const isIos = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isMacSafari = () => /Macintosh/.test(navigator.userAgent) && /Safari\//.test(navigator.userAgent) && !/Chrome|Chromium|Edg\//.test(navigator.userAgent) && navigator.maxTouchPoints <= 1;
 export const canAddToHome = () => !isStandalone() && (Boolean(installPrompt) || isIos() || isMacSafari());
@@ -308,8 +313,14 @@ export async function addToHomeScreen() {
   } catch {}
   const { pass, url } = await link;
   // The address keeps the pass while you add the icon (people tap OK first,
-  // then Share); the next load reads it and clears it.
+  // then Share); the next load reads it and clears it. And once the pass has
+  // expired anyway, so a live one never sits in the address bar to be shared
+  // or copied by mistake.
   history.replaceState(null, '', url);
+  clearTimeout(homeUrlTimer);
+  homeUrlTimer = setTimeout(() => {
+    if (location.hash.includes('handoff=')) history.replaceState(null, '', location.pathname + location.search);
+  }, HANDOFF_MS);
   const share = '<svg class="home-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>';
   const plus = '<svg class="home-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M12 8v8M8 12h8"/></svg>';
   const ipad = /iPad/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -319,7 +330,7 @@ export async function addToHomeScreen() {
        <li>Scroll down and tap <b>Add to Home Screen</b> ${plus}</li>
        <li>Tap <b>Add</b>. Yap's icon appears on your Home Screen.</li>`;
   $('home-note').textContent = pass
-    ? 'The new icon opens Yap already signed in (within 15 minutes). We also copied a sign-in link: if the icon asks you to sign in, tap “Paste the sign-in link”.'
+    ? 'The new icon opens Yap already signed in (within 5 minutes). We also copied a sign-in link: if the icon asks you to sign in, tap “Paste the sign-in link”.'
     : 'The new icon will ask for your name and password once (home-screen apps keep their own sign-in).';
   $('home-dialog').showModal();
 }

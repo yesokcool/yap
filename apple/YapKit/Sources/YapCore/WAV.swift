@@ -27,8 +27,11 @@ public enum WAV {
         public var seconds: Double { Double(samples.count) / Double(max(1, sampleRate)) }
     }
 
+    /// The rates a clip may have (the server takes 8–48 kHz).
+    public static let sampleRates = 8_000...192_000
+
     /// A PCM16 WAV (mono, or the first channel of several) → float samples.
-    /// Nil for anything else.
+    /// Nil for anything else, a rate outside `sampleRates` included.
     public static func decode(_ data: Data) -> Decoded? {
         let bytes = [UInt8](data)
         guard bytes.count >= 12, String(decoding: bytes[0..<4], as: UTF8.self) == "RIFF",
@@ -63,7 +66,8 @@ public enum WAV {
             }
             i = body + size + (size & 1)
         }
-        guard let samples, rate > 0 else { return nil }
+        // AVAudioFormat throws an exception (an abort) at a few MHz.
+        guard let samples, Self.sampleRates.contains(rate) else { return nil }
         return Decoded(samples: samples, sampleRate: rate)
     }
 

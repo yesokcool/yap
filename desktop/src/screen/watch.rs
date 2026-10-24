@@ -10,7 +10,7 @@ use rtc::media::io::sample_builder::SampleBuilder;
 use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use rtc::rtp::codec::h264::H264Packet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 
@@ -30,12 +30,21 @@ pub struct Watch {
     /// Pictures decoded since we started watching, and their size.
     frames: AtomicU64,
     size: Mutex<(u32, u32)>,
+    /// The biggest picture the UI can show (its GPU's biggest texture side):
+    /// a bigger screen (H.264 goes up to 8688 px, some GPUs to 8192) is
+    /// shrunk here, on the decoding thread.
+    max_side: AtomicU32,
     repaint: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Watch {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { sid: Mutex::new(None), picture: Mutex::new(None), last_at: Mutex::new(None), frames: AtomicU64::new(0), size: Mutex::new((0, 0)), repaint: Mutex::new(None) })
+        Arc::new(Self { sid: Mutex::new(None), picture: Mutex::new(None), last_at: Mutex::new(None), frames: AtomicU64::new(0), size: Mutex::new((0, 0)), max_side: AtomicU32::new(2048), repaint: Mutex::new(None) })
+    }
+
+    /// The UI's biggest texture side (egui's `max_texture_side`).
+    pub fn set_max_side(&self, px: usize) {
+        self.max_side.store(px.clamp(1, u32::MAX as usize) as u32, Ordering::Relaxed);
     }
 
     pub fn set_repaint(&self, f: Arc<dyn Fn() + Send + Sync>) {
@@ -80,7 +89,7 @@ impl Watch {
     }
 
     fn show(&self, sid: &str, p: Picture) {
-        if !self.is_watching(sid) {
+        if !self.is_watching(sid) || p.width == 0 || p.height == 0 {
             return;
         }
         let first = self.frames.fetch_add(1, Ordering::Relaxed) == 0;
@@ -94,6 +103,34 @@ impl Watch {
             r();
         }
     }
+}
+
+/// Does this RTP payload hold together? A STAP-A (NAL type 24) is a list of
+/// 2-byte sizes, each followed by that many bytes, to the very end; anything
+/// else is left to the depacketizer.
+fn stap_a_fits(payload: &[u8]) -> bool {
+    if payload.first().is_none_or(|b| b & 0x1f != 24) {
+        return true;
+    }
+    let mut at = 1;
+    while at < payload.len() {
+        let Some(size) = payload.get(at..at + 2).map(|s| u16::from_be_bytes([s[0], s[1]]) as usize) else { return false };
+        at += 2 + size;
+    }
+    at == payload.len()
+}
+
+/// `p`, shrunk (same shape, nearest pixel: it's every frame) so neither side
+/// is over `max`.
+fn fit(p: Picture, max: u32) -> Picture {
+    if p.width <= max && p.height <= max {
+        return p;
+    }
+    let Some(img) = image::RgbaImage::from_raw(p.width, p.height, p.rgba) else { return Picture { width: 0, height: 0, rgba: Vec::new() } };
+    let scale = max as f64 / p.width.max(p.height) as f64;
+    let side = |v: u32| ((v as f64 * scale) as u32).clamp(1, max.max(1));
+    let small = image::imageops::resize(&img, side(p.width), side(p.height), image::imageops::FilterType::Nearest);
+    Picture { width: small.width(), height: small.height(), rgba: small.into_raw() }
 }
 
 /// Feed one remote video track into `watch` while we watch its sender
@@ -111,7 +148,7 @@ pub async fn receive(track: Arc<dyn TrackRemote>, media_ssrc: u32, sid_of: impl 
             };
             while let Ok((sid, au)) = rx.recv() {
                 match dec.decode(&au) {
-                    Ok(Some(p)) => watch.show(&sid, Picture { width: p.width, height: p.height, rgba: p.rgba }),
+                    Ok(Some(p)) => watch.show(&sid, fit(Picture { width: p.width, height: p.height, rgba: p.rgba }, watch.max_side.load(Ordering::Relaxed))),
                     Ok(None) => {}
                     Err(e) => {
                         log::debug!("screen: decode: {e}");
@@ -155,6 +192,10 @@ pub async fn receive(track: Arc<dyn TrackRemote>, media_ssrc: u32, sid_of: impl 
             waiting_key = true;
             continue;
         }
+        // rtc-rtp's depacketizer indexes past the end of a STAP-A whose sizes don't add up (a panic).
+        if !stap_a_fits(&packet.payload) {
+            continue;
+        }
         let now = Instant::now();
         builder.push(now, packet);
         while let Some(sample) = builder.pop(now) {
@@ -174,4 +215,41 @@ pub async fn receive(track: Arc<dyn TrackRemote>, media_ssrc: u32, sid_of: impl 
         }
     }
     log::info!("screen: video track ended");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A STAP-A whose sizes run past its end (or leave a byte over) never
+    /// reaches the depacketizer, which would index past it; the rest pass.
+    #[test]
+    fn broken_stap_a_is_dropped() {
+        assert!(!stap_a_fits(&[0x18, 0x00, 0x00, 0x00]), "one byte left over: the depacketizer read past the end");
+        assert!(!stap_a_fits(&[0x18, 0x00, 0x05, 0x65, 0x01]));
+        assert!(!stap_a_fits(&[0x18, 0x00]));
+        assert!(stap_a_fits(&[0x18, 0x00, 0x02, 0x67, 0x42, 0x00, 0x01, 0x68]));
+        assert!(stap_a_fits(&[0x18]));
+        assert!(stap_a_fits(&[0x65, 0x88, 0x84]), "a single NAL unit");
+        assert!(stap_a_fits(&[0x7c, 0x85, 0x01]), "an FU-A");
+        assert!(stap_a_fits(&[]));
+    }
+
+    /// A screen bigger than the GPU takes (H.264 goes up to 8688 px) is shrunk
+    /// to fit, same shape; one that fits is left alone.
+    #[test]
+    fn pictures_fit_the_gpu() {
+        let p = |w: u32, h: u32| Picture { width: w, height: h, rgba: vec![7; (w * h * 4) as usize] };
+        let small = fit(p(8688, 100), 8192);
+        assert_eq!((small.width, small.height, small.rgba.len()), (8192, 94, 8192 * 94 * 4));
+        let same = fit(p(1920, 1080), 8192);
+        assert_eq!((same.width, same.height), (1920, 1080));
+        // Bytes that don't add up to the size: nothing to show, nothing shown.
+        let broken = fit(Picture { width: 9000, height: 2, rgba: vec![0; 8] }, 8192);
+        assert_eq!((broken.width, broken.height), (0, 0));
+        let w = Watch::new();
+        w.set(Some("s1".into()));
+        w.show("s1", broken);
+        assert!(w.take_picture().is_none());
+    }
 }

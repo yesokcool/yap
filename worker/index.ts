@@ -137,7 +137,9 @@ export default {
       }
 
       case '/api/ice': {
-        if (!(await keyAccess(env, key))) return new Response('Invalid invite key.', { status: 401 });
+        // An OBS link brings its own listen token instead of the invite key (its link has no key).
+        const device = request.headers.get('X-Yap-Token');
+        if (!(await keyAccess(env, key)) && !(device && (await hub(env).isDevice(device)))) return new Response('Invalid invite key.', { status: 401 });
         return Response.json({ iceServers: await iceServers(env) }, { headers: { 'Cache-Control': 'no-store' } });
       }
     }

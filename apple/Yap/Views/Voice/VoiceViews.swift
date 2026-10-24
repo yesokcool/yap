@@ -52,7 +52,7 @@ struct VoiceBar: View {
     /// "You're muted", "Your connection is dropping some of your audio": in the warning color.
     private var statusIsWarning: Bool {
         let voice = model.voice
-        return !voice.isResuming && !voice.micSendsSilence && (voice.mutedNudgeShown || voice.ownConnectionWeak)
+        return !voice.isResuming && !voice.micSendsSilence && (voice.mutedNudgeShown || voice.ownConnectionWeak || voice.relayMissing)
     }
 
     private var statusLine: String {
@@ -60,6 +60,7 @@ struct VoiceBar: View {
         if voice.isResuming { return VoiceHintText.resuming }
         if voice.micSendsSilence { return VoiceHintText.silence }
         if let cue = CallCue.line(voice) { return cue }
+        if voice.relayMissing { return VoiceOptions.relayMissingShort }
         if voice.ownConnectionWeak { return TalkWords.ownConnection }
         if let quality = voice.sharing { return ScreenText.sharing(quality) }
         if !voice.isConnected { return voice.micDenied ? "Listening only — no mic" : "Connecting…" }
@@ -254,6 +255,10 @@ struct VoicePanel: View {
 
                     if voice.ownConnectionWeak {
                         WarningLine98(text: TalkWords.ownConnection, detail: TalkWords.ownConnectionDetail(lost: voice.engine.ownLinkLost))
+                    }
+
+                    if voice.relayMissing {
+                        ErrorLine(text: VoiceOptions.relayMissing)
                     }
 
                     if voice.micDenied {

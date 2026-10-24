@@ -7,7 +7,8 @@ import fs from 'node:fs';
 import { TEMP_RE, deviceLabel, hashPin, isPassword, isSecret, needsRehash, passwordRule, tempPassword, verifyPin, weakPassword } from '../worker/auth.ts';
 import COMMON_PASSWORDS from '../worker/common-passwords.ts';
 import { WORDS } from '../worker/words.ts';
-import { clamp, cleanAnchor, cleanGif, cleanImage, cleanStroke, cleanVaultWrap } from '../worker/validate.ts';
+import { clamp, cleanAnchor, cleanGif, cleanImage, cleanName, cleanStroke, cleanVaultWrap, nameKey, sameName, signalOk } from '../worker/validate.ts';
+import { pictureProblem, pictureSize, sniffImage } from '../worker/pictures.ts';
 
 // Workers have crypto.subtle.timingSafeEqual (a Cloudflare extra); Node doesn't.
 crypto.subtle.timingSafeEqual ??= (a, b) => nodeCrypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -184,6 +185,76 @@ await test('the encrypted Personal space key: only the expected shape is stored'
   for (const bad of [null, { ...wrap, v: 2 }, { ...wrap, iter: 1000 }, { ...wrap, iter: 1e8 }, { ...wrap, salt: 'short' }, { ...wrap, iv: b64(16) }, { ...wrap, ct: `${b64(48)}=` }]) {
     assert.equal(cleanVaultWrap(bad), null, JSON.stringify(bad));
   }
+});
+
+// ── Names, signals, pictures (security review, 2026-10-24) ─────────────
+await test('names that look alike are the same name: case, accents, full-width, Cyrillic and Greek look-alikes', () => {
+  const cleo = nameKey('Cleo');
+  for (const same of ['cleo', 'CLEO', 'Cléo', 'Clеo' /* Cyrillic е */, 'Сlео' /* Cyrillic С, е, о */, 'Ｃｌｅｏ', 'Cleо', ' Cleo ']) assert.equal(nameKey(same), cleo, same);
+  for (const other of ['Clea', 'Cleo2', 'Cl eo']) assert.notEqual(nameKey(other), cleo, other);
+  assert.equal(nameKey('Ada Lovelace'), 'ada lovelace');
+  assert.equal(cleanName('Cléo', 32), 'Cléo', 'stored as NFC');
+  assert.equal(cleanName('Cl​eo‮', 32), 'Cleo', 'invisible and bidi characters go');
+  assert.ok(sameName('cleo', 'Cleo') && sameName('Cléo', 'Cléo'), 'sign-in: same name in any case or form');
+  assert.ok(!sameName('Clеo', 'Cleo'), 'sign-in never treats a look-alike as you');
+});
+
+await test('relayed signals: a candidate line index must be a small whole number (old Apple apps crash otherwise)', () => {
+  const c = (sdpMLineIndex) => ({ candidate: { candidate: 'candidate:1 1 udp 1 1.2.3.4 5 typ host', sdpMid: '0', sdpMLineIndex } });
+  for (const ok of [c(0), c(3), c(63), c(null), c(undefined), { sdp: { type: 'offer', sdp: 'v=0' } }, { screen: { on: true } }, null, 'x']) assert.equal(signalOk(ok), true, JSON.stringify(ok));
+  for (const bad of [c(3_000_000_000), c(-1), c(64), c(1.5), c('0'), c(2 ** 53)]) assert.equal(signalOk(bad), false, JSON.stringify(bad));
+});
+
+/** A GIF: a w×h canvas and `frames` 1×1 frames at (x, y), each a minimal image. */
+const gif = (w, h, frames = 1, { x = 0, y = 0, fw = 1, fh = 1 } = {}) => {
+  const head = [0x47, 0x49, 0x46, 0x38, 0x39, 0x61, w & 255, w >> 8, h & 255, h >> 8, 0x80, 0, 0, 0, 0, 0, 255, 255, 255];
+  const frame = [0x21, 0xf9, 4, 0, 10, 0, 0, 0, 0x2c, x & 255, x >> 8, y & 255, y >> 8, fw & 255, fw >> 8, fh & 255, fh >> 8, 0, 2, 2, 0x4c, 0x01, 0];
+  return new Uint8Array([...head, ...Array.from({ length: frames }, () => frame).flat(), 0x3b]);
+};
+/** A PNG header with this size (enough for its IHDR; `apng` adds an acTL saying how many frames). */
+const png = (w, h, apng = 0) => {
+  const b = Buffer.alloc(33 + (apng ? 20 : 0) + 12);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+  b.writeUInt32BE(13, 8); b.write('IHDR', 12); b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20); b[24] = 8; b[25] = 6;
+  let at = 33;
+  if (apng) { b.writeUInt32BE(8, at); b.write('acTL', at + 4); b.writeUInt32BE(apng, at + 8); at += 20; }
+  b.writeUInt32BE(0, at); b.write('IDAT', at + 4);
+  return new Uint8Array(b);
+};
+/** A baseline JPEG's first bytes: SOI, an APP0, then SOF0 with this size. */
+const jpeg = (w, h) => new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff, 0xc0, 0, 11, 8, h >> 8, h & 255, w >> 8, w & 255, 1, 1, 0x11, 0, 0xff, 0xd9]);
+/** A WebP: VP8X with this canvas, and `frames` ANMF chunks. */
+const webp = (w, h, frames = 0) => {
+  const b = Buffer.alloc(12 + 18 + frames * 8);
+  b.write('RIFF', 0); b.writeUInt32LE(b.length - 8, 4); b.write('WEBP', 8); b.write('VP8X', 12); b.writeUInt32LE(10, 16);
+  b.writeUIntLE(w - 1, 24, 3); b.writeUIntLE(h - 1, 27, 3);
+  for (let i = 0; i < frames; i++) { b.write('ANMF', 30 + i * 8); b.writeUInt32LE(0, 34 + i * 8); }
+  return new Uint8Array(b);
+};
+
+await test('picture sizes come from the file itself: PNG (and APNG frames), GIF (its biggest frame), JPEG, WebP', () => {
+  assert.equal(sniffImage(gif(10, 10)), 'image/gif');
+  assert.deepEqual(pictureSize(png(640, 480), 'image/png'), { width: 640, height: 480, frames: 1 });
+  assert.deepEqual(pictureSize(png(640, 480, 12), 'image/png'), { width: 640, height: 480, frames: 12 });
+  assert.deepEqual(pictureSize(gif(320, 200, 3), 'image/gif'), { width: 320, height: 200, frames: 3 });
+  assert.deepEqual(pictureSize(gif(0, 0, 1, { x: 100, fw: 5000, fh: 20 }), 'image/gif'), { width: 5100, height: 20, frames: 1 }, 'a frame bigger than its canvas');
+  assert.deepEqual(pictureSize(jpeg(4032, 3024), 'image/jpeg'), { width: 4032, height: 3024, frames: 1 });
+  assert.deepEqual(pictureSize(webp(1920, 1080), 'image/webp'), { width: 1920, height: 1080, frames: 1 });
+  assert.deepEqual(pictureSize(webp(500, 500, 40), 'image/webp'), { width: 500, height: 500, frames: 40 });
+  assert.equal(pictureSize(new Uint8Array([0xff, 0xd8, 0xff, 0xda, 0, 2]), 'image/jpeg'), null, 'no size before the image data');
+});
+
+await test('pictures past the limits are refused: huge stills, wide or long animations (a 66-byte GIF can say 20000 px)', () => {
+  for (const ok of [png(4032, 3024), jpeg(8000, 6000), gif(480, 270, 150), webp(1920, 1080, 70), png(256, 256, 2)]) assert.equal(pictureProblem(ok, sniffImage(ok)), null);
+  const tiny = gif(20000, 16, 2);
+  assert.ok(tiny.length < 100, `${tiny.length} bytes`);
+  assert.match(pictureProblem(tiny, 'image/gif'), /Animated pictures/);
+  assert.match(pictureProblem(gif(4096, 4096, 150), 'image/gif'), /Animated pictures/, '150 frames of 4096 × 4096');
+  assert.match(pictureProblem(png(30000, 30000), 'image/png'), /8192 pixels a side/);
+  assert.match(pictureProblem(jpeg(8000, 7000), 'image/jpeg'), /50 megapixels/);
+  assert.match(pictureProblem(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), 'image/png'), /broken/);
+  assert.match(pictureProblem(png(4096, 4096), 'image/png', 2048), /up to 2048 pixels a side/, 'emojis and avatars: 2048');
+  assert.equal(pictureProblem(png(512, 512), 'image/png', 2048), null);
 });
 
 for (const [mark, name, err] of results) {

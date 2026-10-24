@@ -22,10 +22,10 @@ struct WebPageView: View {
                         .help("Open in the browser")
                         .accessibilityLabel("Open in the browser")
                 } content: {
-                    WebView(url: url, place: page.place).well()
+                    WebView(url: url, place: page.place, endpoint: endpoint).well()
                 }
                 #else
-                WebView(url: url, place: page.place)
+                WebView(url: url, place: page.place, endpoint: endpoint)
                     .modifier(InCallBar98())
                     .toolbar {
                         ToolbarItem(placement: .primaryAction) {
@@ -55,7 +55,12 @@ struct WebPageView: View {
 }
 
 /// SwiftUI's WebKit view (iOS 26 / macOS 26). With a web-app `place` it
-/// asks for a one-time sign-in pass first, so the page opens signed in.
+/// asks for a one-time sign-in pass right before loading (it's good for a
+/// few minutes), so the page opens signed in, never as someone else
+/// (`WebSignIn`).
+///
+/// It only ever shows this server: a link elsewhere, or one for a new
+/// window, opens in the browser (`ServerEndpoint.webNavigation`).
 ///
 /// Two fixes over the bare view:
 /// - WebKit's view reaches up under the navigation bar (like a scroll view),
@@ -65,13 +70,24 @@ struct WebPageView: View {
 /// - The web app keeps its own light/dark in its storage; the app's goes in
 ///   first (`yap.settings.theme`, as `web/js/theme.js` reads it before first
 ///   paint), so a dark app shows a dark Draw. The web's "Add to Home Screen"
-///   bar stays dismissed: it means nothing inside the app.
+///   bar stays dismissed: it means nothing inside the app. Only on Yap's own
+///   pages.
 struct WebView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openURL) private var openURL
     @AppStorage(Appearance.storageKey) private var appearance: Appearance = .charcoal
     var url: URL
     var place: String? = nil
+    var endpoint: ServerEndpoint
     @State private var page: WebKit.WebPage?
+    /// The sign-in (`AppModel.webSession`) the page was made for.
+    @State private var pageSession = 0
+
+    /// A new address, or a wiped sign-in: load again.
+    private struct Load: Hashable {
+        var url: URL
+        var session: Int
+    }
 
     var body: some View {
         Group {
@@ -82,27 +98,40 @@ struct WebView: View {
             }
         }
         .padding(.top, 1)
-        .task(id: url) {
-            let page = page ?? Self.makePage(appearance: appearance)
+        .task(id: Load(url: url, session: model.webSession)) {
+            // A sign-out's wipe first (a pass asked for before it would go with it).
+            await model.readyWebSignIn()
+            guard !Task.isCancelled else { return }
+            let page: WebKit.WebPage
+            if let current = self.page, pageSession == model.webSession {
+                page = current
+            } else {
+                page = Self.makePage(appearance: appearance, endpoint: endpoint, openURL: openURL)
+                model.register(page)
+                pageSession = model.webSession
+            }
             self.page = page
             var load = url
             if let place, let signedIn = await model.client.signedInWebURL(place: place) { load = signedIn }
+            guard !Task.isCancelled else { return }
             // The web app shows just the place: no sidebar or header of its own (web/js/theme.js).
             if place != nil, let embedded = URL(string: load.absoluteString + "&embed=1") { load = embedded }
             page.load(URLRequest(url: load))
         }
     }
 
-    /// A page whose web app starts in the app's light/dark.
-    static func makePage(appearance: Appearance) -> WebKit.WebPage {
+    /// A page whose web app starts in the app's light/dark, and that stays on this server.
+    static func makePage(appearance: Appearance, endpoint: ServerEndpoint, openURL: OpenURLAction) -> WebKit.WebPage {
         let configuration = WebKit.WebPage.Configuration()
         let theme = switch appearance {
         case .charcoal: "dark"
         case .standard: "light"
         case .system: "system"
         }
+        // The origin as a JS string literal (JSON-escaped).
+        let origin = (try? JSONEncoder().encode(endpoint.webOrigin)).map { String(decoding: $0, as: UTF8.self) } ?? "''"
         let source = """
-        try {
+        if (location.origin === \(origin)) try {
           const s = JSON.parse(localStorage.getItem('yap.settings') || '{}');
           if (s.theme !== '\(theme)') {
             s.theme = '\(theme)';
@@ -114,6 +143,28 @@ struct WebView: View {
         """
         configuration.userContentController.addUserScript(
             WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        return WebKit.WebPage(configuration: configuration)
+        return WebKit.WebPage(configuration: configuration, navigationDecider: YapOnly(endpoint: endpoint, openURL: openURL))
+    }
+}
+
+/// The web view's navigation rule (`ServerEndpoint.webNavigation`): this
+/// server's pages in the view, everything else to the system.
+struct YapOnly: WebKit.WebPage.NavigationDeciding {
+    let endpoint: ServerEndpoint
+    let openURL: OpenURLAction
+
+    func decidePolicy(for action: WebKit.WebPage.NavigationAction,
+                      preferences: inout WebKit.WebPage.NavigationPreferences) async -> WKNavigationActionPolicy {
+        guard let url = action.request.url else { return .cancel }
+        // No target frame: a new window (`target=_blank`, `window.open`).
+        switch endpoint.webNavigation(to: url, mainFrame: action.target?.isMainFrame ?? true, newWindow: action.target == nil) {
+        case .allow:
+            return .allow
+        case .openOutside:
+            openURL(url)
+            return .cancel
+        case .refuse:
+            return .cancel
+        }
     }
 }

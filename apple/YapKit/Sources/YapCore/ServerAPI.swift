@@ -10,16 +10,39 @@ public struct ServerEndpoint: Codable, Sendable, Hashable {
         self.key = key
     }
 
+    /// Why an invite link doesn't open anything.
+    public enum InviteProblem: Error, Equatable, Sendable {
+        /// Not a link with a server and a key.
+        case notALink
+        /// `http://` to another computer: the key, your password and every
+        /// message would cross the network readable.
+        case plainHTTP
+
+        public var message: String {
+            switch self {
+            case .notALink: "That doesn't look like a Yap invite link."
+            case .plainHTTP: "That link starts with http://, so your password and messages would cross the network unencrypted. Ask for the https:// link."
+            }
+        }
+    }
+
     /// Parses an invite link: `https://host/#key=K` (the key may also be a
     /// `?key=` query). Without a scheme, https is assumed
     /// (`chat.example.com/#key=K`). There's no default server, so a bare key
     /// isn't enough: the link says which server it opens.
     public static func parse(invite input: String) -> ServerEndpoint? {
+        try? read(invite: input)
+    }
+
+    /// `parse(invite:)`, saying why not. Plain `http://` only for this
+    /// computer (a test server; `isLoopback`).
+    public static func read(invite input: String) throws(InviteProblem) -> ServerEndpoint {
         var value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, !value.contains(" ") else { return nil }
+        guard !value.isEmpty, !value.contains(" ") else { throw .notALink }
         if !value.contains("://") { value = "https://" + value }
         guard let url = URL(string: value), let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
-              let host = url.host(), !host.isEmpty else { return nil }
+              let host = url.host(), !host.isEmpty else { throw .notALink }
+        if scheme == "http", !isLoopback(host) { throw .plainHTTP }
         var key: String?
         if let fragment = url.fragment(percentEncoded: false) {
             let items = URLComponents(string: "?" + fragment)?.queryItems ?? []
@@ -28,13 +51,35 @@ public struct ServerEndpoint: Codable, Sendable, Hashable {
         if key == nil {
             key = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "key" })?.value
         }
-        guard let key, !key.isEmpty else { return nil }
+        guard let key, !key.isEmpty else { throw .notALink }
         var base = URLComponents()
         base.scheme = scheme
-        base.host = host
+        base.host = host.contains(":") ? "[\(host)]" : host // an IPv6 address keeps its brackets
         base.port = url.port
-        guard let baseURL = base.url else { return nil }
+        guard let baseURL = base.url else { throw .notALink }
         return ServerEndpoint(baseURL: baseURL, key: key)
+    }
+
+    /// This computer: `localhost`, 127.0.0.0/8 or ::1.
+    public static func isLoopback(_ host: String) -> Bool {
+        var host = host.lowercased()
+        if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
+        if host == "localhost" || host == "::1" || host == "0:0:0:0:0:0:0:1" { return true }
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4, octets.first == "127" else { return false }
+        return octets.allSatisfy { octet in
+            octet.count <= 3 && octet.allSatisfy { $0.isASCII && $0.isNumber } && (Int(octet) ?? 256) <= 255
+        }
+    }
+
+    /// https, or plain http to this computer: the only servers the app talks
+    /// to (an invite link, a saved server from an older version).
+    public var isSafeToUse: Bool {
+        switch baseURL.scheme?.lowercased() {
+        case "https": baseURL.host()?.isEmpty == false
+        case "http": baseURL.host().map(Self.isLoopback) ?? false
+        default: false
+        }
     }
 
     /// Unreserved URL characters (personal invite keys are `yi_` + base64url).
@@ -83,6 +128,56 @@ public struct ServerEndpoint: Codable, Sendable, Hashable {
     /// `/media/<id>`: avatars and saved drawings.
     public func mediaURL(_ id: String) -> URL { baseURL.appending(path: "media/\(id)") }
     public var boardURL: URL { baseURL.appending(path: "board") }
+
+    // MARK: The in-app web view
+
+    /// Where a navigation in the in-app web view goes. The view only ever
+    /// shows this server (Draw, Space, the board); it has no address bar, so
+    /// another site in it would look like Yap.
+    public enum WebNavigation: Equatable, Sendable {
+        /// This server's own page.
+        case allow
+        /// A link elsewhere, or one that wants a new window: the system opens it (a browser, Mail).
+        case openOutside
+        case refuse
+    }
+
+    /// The server's origin as the web sees it (`location.origin`): no port when it's the scheme's own.
+    public var webOrigin: String {
+        let scheme = baseURL.scheme?.lowercased() ?? "https"
+        var host = baseURL.host()?.lowercased() ?? ""
+        if host.contains(":") { host = "[\(host)]" }
+        let port = baseURL.port.flatMap { $0 == Self.defaultPort(scheme) ? nil : $0 }
+        return "\(scheme)://\(host)" + (port.map { ":\($0)" } ?? "")
+    }
+
+    /// Same scheme, host and port as this server.
+    public func isOwnOrigin(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
+              scheme == baseURL.scheme?.lowercased(),
+              let host = url.host()?.lowercased(), host == baseURL.host()?.lowercased() else { return false }
+        return (url.port ?? Self.defaultPort(scheme)) == (baseURL.port ?? Self.defaultPort(scheme))
+    }
+
+    /// The web view's rule: in the view, this server's pages only; other
+    /// http(s) and mailto links, and every new window (`target=_blank`,
+    /// `window.open`), go to the system. Frames inside the page (a YouTube
+    /// player) are the page's own business.
+    public func webNavigation(to url: URL, mainFrame: Bool, newWindow: Bool) -> WebNavigation {
+        let scheme = url.scheme?.lowercased() ?? ""
+        let outside = ["https", "http", "mailto"].contains(scheme) ? WebNavigation.openOutside : .refuse
+        if newWindow { return outside }
+        guard mainFrame else { return .allow }
+        if isOwnOrigin(url) { return .allow }
+        switch scheme {
+        case "about": return url.absoluteString.lowercased() == "about:blank" ? .allow : .refuse
+        // `blob:https://host/…`: something the page made itself.
+        case "blob": return URL(string: String(url.absoluteString.dropFirst("blob:".count))).map(isOwnOrigin) == true ? .allow : .refuse
+        default: return outside
+        }
+    }
+
+    static func defaultPort(_ scheme: String) -> Int { scheme == "http" ? 80 : 443 }
 }
 
 // MARK: - HTTP payloads
@@ -285,9 +380,12 @@ public struct ServerAPI: Sendable {
         request.setValue(mime, forHTTPHeaderField: "Content-Type")
         let (data, response) = try await session.upload(for: request, from: bytes)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200..<300).contains(status) else {
-            let message = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["message"] as? String
-            throw UploadError(status: status, message: message ?? "Upload failed (HTTP \(status)).")
+        // Refused (`{ ok: false, code, message }`): the day's upload allowance
+        // used up (`quota`, 429), a picture too big (`too_big`)… in the server's words.
+        let reply = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard (200..<300).contains(status), reply?["ok"] as? Bool != false else {
+            let message = (reply?["message"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            throw UploadError(status: status, message: message ?? "Upload failed (HTTP \(status)).", code: reply?["code"] as? String)
         }
         return data
     }
@@ -295,7 +393,15 @@ public struct ServerAPI: Sendable {
     public struct UploadError: Error, LocalizedError, Sendable {
         public var status: Int
         public var message: String
+        /// The server's reason (`quota`, `too_big`…), when it gave one.
+        public var code: String?
         public var errorDescription: String? { message }
+
+        public init(status: Int, message: String, code: String? = nil) {
+            self.status = status
+            self.message = message
+            self.code = code
+        }
 
         /// Not connected: what an upload (or anything else that needs the server right now) throws.
         public static let notConnected = UploadError(status: 0, message: "Not connected right now.")

@@ -223,6 +223,8 @@ impl PasswordForm {
             theme::checkbox(ui, &mut self.show, "Show", p);
         });
         note(ui, PASSWORD_RULE, p);
+        // (The server signs out every other device of yours, OBS links too, when the password changes.)
+        note(ui, "Your other devices will be signed out.", p);
         if let Some(e) = &self.error {
             ui.label(theme::text(e, p.danger));
         }

@@ -101,8 +101,8 @@ public final class VoiceEngine {
     /// Voice-activity threshold, dBFS RMS (the web's and desktop's scale).
     public var vadThreshold: Double = -50
     /// Only through the TURN relay (hides your IP from the people you talk
-    /// to). Set before joining; the controller only sets it when the server
-    /// has a relay.
+    /// to). Set before joining. Without a relay nobody can be reached: it
+    /// never falls back to a direct connection.
     public var relayOnly = false
     /// The server's `/api/ice` has a TURN relay ("can't connect" vs "needs the voice relay").
     public private(set) var hasRelay = false

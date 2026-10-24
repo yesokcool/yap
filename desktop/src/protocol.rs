@@ -140,6 +140,17 @@ pub struct Sound {
     pub created_at: i64,
 }
 
+/// The longest soundboard clip and join chime the server takes (`LIMITS.soundMs` / `chimeMs`).
+pub const SOUND_MS: u32 = 5000;
+pub const CHIME_MS: u32 = 2000;
+
+impl Sound {
+    /// How long a clip of this kind can be.
+    pub fn max_ms(&self) -> u32 {
+        if self.kind == "chime" { CHIME_MS } else { SOUND_MS }
+    }
+}
+
 fn one() -> f32 {
     1.0
 }
@@ -616,6 +627,9 @@ pub enum ServerMsg {
         /// "pin" or "password".
         #[serde(default)]
         kind: Option<String>,
+        /// How many of your other devices (OBS links too) the change signed out.
+        #[serde(rename = "signedOut", default)]
+        signed_out: Option<i64>,
     },
     /// Owner/mod reset someone's password: hand this temporary one over (`pin` is the wire's name).
     #[serde(rename = "pin.reset")]
@@ -1452,6 +1466,16 @@ mod tests {
         }
         let older = r#"{"t":"ready","v":1,"sid":"s","channels":[],"users":[],"sessions":[],"emojis":[],"weakPin":true,"secretKind":"pin"}"#;
         assert!(matches!(serde_json::from_str::<ServerMsg>(older).unwrap(), ServerMsg::Ready { weak_reason: None, .. }));
+    }
+
+    /// A password change signs out your other devices and says how many
+    /// (`account.signedOut`); an older server doesn't say.
+    #[test]
+    fn parses_signed_out_devices() {
+        let reply = r#"{"t":"account","hasPin":true,"kind":"password","signedOut":2}"#;
+        assert!(matches!(serde_json::from_str::<ServerMsg>(reply).unwrap(), ServerMsg::Account { has_pin: true, signed_out: Some(2), .. }));
+        let older = r#"{"t":"account","hasPin":true,"kind":"password"}"#;
+        assert!(matches!(serde_json::from_str::<ServerMsg>(older).unwrap(), ServerMsg::Account { signed_out: None, .. }));
     }
 
     /// PROTOCOL.md › Identity › Waiting room: who was let in

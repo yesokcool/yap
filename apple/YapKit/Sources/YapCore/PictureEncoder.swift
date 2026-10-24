@@ -13,6 +13,9 @@ import UniformTypeIdentifiers
 ///   upright; otherwise the sharpest JPEG that fits (full size at 0.92, then
 ///   3072 / 2048 / 1600 px). HEIC always becomes JPEG (browsers can't show it).
 /// - A GIF that fits stays as it is (animated) either way.
+/// - Never more pixels than the server stores (`maxStoredSide`, `maxPixels`,
+///   `maxAnimatedSide`): a bigger original is redrawn smaller (a GIF too big
+///   to stay animated goes as a still).
 public enum PictureEncoder {
     public struct Prepared: Sendable, Equatable {
         public var data: Data
@@ -35,6 +38,11 @@ public enum PictureEncoder {
 
     /// The compressed picture's long side.
     public static let maxSide = 1600
+    /// The most the server stores: 8192 px a side, 40 megapixels, and an
+    /// animation 2048 px a side (it refuses more as `too_big`).
+    public static let maxStoredSide = 8192
+    public static let maxPixels = 40_000_000
+    public static let maxAnimatedSide = 2048
     static let compressedSteps: [(side: Int?, quality: Double)] = [(1600, 0.78), (1280, 0.72), (1024, 0.66)]
     /// nil = the picture's own size.
     static let fullSteps: [(side: Int?, quality: Double)] = [(nil, 0.92), (3072, 0.9), (2048, 0.88), (1600, 0.82)]
@@ -55,16 +63,19 @@ public enum PictureEncoder {
         let orientation = props[kCGImagePropertyOrientation] as? Int ?? 1
         guard width > 0, height > 0 else { throw Failure.unreadable }
         let longSide = max(width, height)
+        let animated = CGImageSourceGetCount(source) > 1
 
         // The bytes as they are, when the server and every client can show them.
         var original: Prepared?
-        if let mime = passthrough[type], data.count <= maxBytes, orientation == 1 || mime == "image/gif" {
+        if let mime = passthrough[type], data.count <= maxBytes, orientation == 1 || mime == "image/gif",
+           fitsServer(width: width, height: height, animated: animated && mime == "image/gif") {
             original = Prepared(data: data, mime: mime, width: width, height: height)
         }
         if let original, original.mime == "image/gif" || full { return original }
 
+        let largest = largestSide(width: width, height: height)
         for step in full ? fullSteps : compressedSteps {
-            let side = min(step.side ?? longSide, longSide)
+            let side = min(step.side ?? longSide, longSide, largest)
             guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceCreateThumbnailWithTransform: true,
@@ -77,6 +88,23 @@ public enum PictureEncoder {
             return Prepared(data: jpeg, mime: "image/jpeg", width: image.width, height: image.height)
         }
         throw Failure.tooBig
+    }
+
+    /// Within what the server stores (an animation: `maxAnimatedSide`).
+    public static func fitsServer(width: Int, height: Int, animated: Bool) -> Bool {
+        let side = max(width, height)
+        if animated && side > maxAnimatedSide { return false }
+        let (pixels, overflow) = width.multipliedReportingOverflow(by: height)
+        return side <= maxStoredSide && !overflow && pixels <= maxPixels
+    }
+
+    /// The longest side a still redrawn from `width` × `height` may have:
+    /// ≤ `maxStoredSide`, and ≤ `maxPixels` in all.
+    static func largestSide(width: Int, height: Int) -> Int {
+        let long = Double(max(width, height)), area = Double(width) * Double(height)
+        // (a hair under the area: the short side may round up)
+        let scale = min(1, Double(maxStoredSide) / long, (Double(maxPixels) * 0.995 / area).squareRoot())
+        return max(1, Int((long * scale).rounded(.down)))
     }
 
     /// "47 KB", "1.2 MB" (like the web's tray).

@@ -115,12 +115,13 @@ extension YapClient {
             emojis[emoji.id] = emoji
         case .emojiDeleted(let id):
             emojis.removeValue(forKey: id)
-        case let .account(token, kind):
-            // A new password: nothing more to ask.
+        case let .account(token, kind, signedOut):
+            // A new password: nothing more to ask. It signed out my other devices.
             if let token { credentials.token = token }
             weakPin = false
             weakReason = nil
             if let kind { secretKind = kind }
+            passwordSignedOut = signedOut.map { max(0, $0) }
             pinChange = .saved
         case .devices(let list):
             devices = list

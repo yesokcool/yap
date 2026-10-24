@@ -23,6 +23,7 @@ enum VoiceHintText {
         case .reconnecting: "reconnecting…"
         case .needsRelay: "needs the voice relay"
         case .cantConnect: "can't connect"
+        case .hiddenNoRelay: "can't connect (Hide my IP)"
         case .weak: "weak connection"
         }
     }
@@ -30,7 +31,7 @@ enum VoiceHintText {
     static func kind(_ hint: ConnectionHint) -> Kind {
         switch hint {
         case .reconnecting: .away
-        case .needsRelay, .cantConnect: .blocked
+        case .needsRelay, .cantConnect, .hiddenNoRelay: .blocked
         case .weak: .weak
         }
     }
@@ -42,6 +43,8 @@ enum VoiceHintText {
             "\(name) lost their connection to Yap. Their voice is still coming through; it usually sorts itself out in a few seconds."
         case .cantConnect:
             "Your network and \(name)'s can't reach each other right now. Yap keeps trying."
+        case .hiddenNoRelay:
+            VoiceOptions.relayMissing
         case .needsRelay:
             "Your network and \(name)'s can't reach each other directly (strict firewalls or mobile networks do this). The server's owner can switch on the voice relay, then it just works — see SELF_HOSTING.md."
         case let .weak(concealed, rttMs):

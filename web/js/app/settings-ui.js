@@ -60,6 +60,10 @@ const LOG_WORDS = {
     return `made ${who} ${ROLE_WORDS[e.detail] ?? e.detail ?? 'a member'}`;
   },
   'member.resetPin': (e) => `reset ${nameIn(e.target)}'s password`,
+  'member.rename': (e) => {
+    const [, from, to] = /^"(.*)" → "(.*)"$/.exec(e.detail ?? '') ?? [];
+    return from ? `changed their name from “${from}” to “${to}”` : 'changed their name';
+  },
   'member.merge': (e) => `merged a duplicate account into ${nameIn(e.target)}'s`,
   'member.unmerge': () => 'split a merged account back out',
   'owner.claim': () => 'became the owner',
@@ -96,12 +100,19 @@ export function renderModLog() {
     : '<li class="muted">Nothing yet.</li>';
 }
 
-/** Settings › Voice › Advanced › Stream to OBS: the link for the channel, person and overlay picked. */
+/** The "Whose voice" choice that means everyone but the link's own account (`&others=1`). */
+const OBS_OTHERS = ' others';
+
+/**
+ * Settings › Voice › Advanced › Stream to OBS: the link for the channel, person and overlay picked.
+ * No invite key in it (since 2026-10-24): the listen token is all the OBS page needs.
+ */
 export function renderObsLink() {
   $('obs-made').hidden = !state.obsToken;
   if (!state.obsToken) return;
-  const params = new URLSearchParams({ key: settings.key, listen: state.obsToken, channel: $('obs-channel').value });
-  if ($('obs-only').value) params.set('only', $('obs-only').value);
+  const params = new URLSearchParams({ listen: state.obsToken, channel: $('obs-channel').value });
+  if ($('obs-only').value === OBS_OTHERS) params.set('others', '1');
+  else if ($('obs-only').value) params.set('only', $('obs-only').value);
   if ($('obs-sound-only').checked) params.set('overlay', '0');
   $('obs-link').value = `${location.origin}/obs#${params}`;
 }
@@ -139,10 +150,13 @@ export function openSettings(tab) {
   // Relay-only needs a TURN relay on the server; say so instead of pretending.
   fetchIce().then((ice) => {
     const ok = hasRelay(ice);
-    form.relayOnly.disabled = !ok;
+    // (Still on with no relay: it can be turned off, since calls can't connect like that.)
+    form.relayOnly.disabled = !ok && !settings.relayOnly;
     $('relay-note').textContent = ok
       ? "— sends your voice through the server's voice relay instead of straight to friends (a little more delay)"
-      : "— needs the voice relay, which isn't switched on for this server yet";
+      : settings.relayOnly
+        ? "— on, but this server's voice relay isn't available, so calls can't connect: turn it off to talk directly"
+        : "— needs the voice relay, which isn't switched on for this server yet";
   });
   form.desktopNotify.value = settings.desktopNotify;
   form.soundboardVolume.value = Math.round(settings.soundboardVolume * 100);
@@ -163,7 +177,9 @@ export function openSettings(tab) {
   state.obsToken = null; // a link is shown once, like an invite
   $('obs-channel').innerHTML = [...state.channels.values()].filter((c) => c.kind === 'voice').sort((a, b) => a.position - b.position)
     .map((c) => `<option value="${esc(c.id)}" ${c.id === state.voiceWanted ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
-  $('obs-only').innerHTML = `<option value="">Everyone in the call</option>${[...state.users.values()].sort((a, b) => a.name.localeCompare(b.name))
+  // Everyone (you too: talk on your phone, record on the PC), everyone but you (your own mic already
+  // goes into OBS), or one person (a source each).
+  $('obs-only').innerHTML = `<option value="">Everyone in the call, you too</option><option value="${OBS_OTHERS}">Everyone but you</option>${[...state.users.values()].sort((a, b) => a.name.localeCompare(b.name))
     .map((u) => `<option value="${esc(u.name)}">Only ${esc(u.name)}</option>`).join('')}`;
   $('obs-sound-only').checked = false;
   renderObsLink();

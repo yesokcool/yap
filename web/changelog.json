@@ -1,20 +1,75 @@
 {
-  "current": "0.49.0",
+  "current": "0.50.0",
   "releases": [
+    {
+      "version": "0.50.0",
+      "date": "2026-10-24",
+      "title": "Safer sign-ins and sturdier apps",
+      "items": [
+        "Desktop app: changing your password says it signs out your other devices, and how many it did.",
+        "iPhone and Mac: changing your password says your other devices will be signed out, and how many were.",
+        "iPhone and Mac: Settings › Owner & mods shows when someone changed their name, from what to what.",
+        "Desktop app: a broken or booby-trapped soundboard clip or join chime can no longer crash the app.",
+        "Desktop app: oversized or booby-trapped pictures, GIFs and shared screens can no longer crash the app or eat all its memory.",
+        "Desktop app: updates are now signed for their exact version and platform, so an older or wrong build can never be installed as an update.",
+        "Desktop app: plain http:// server addresses are refused (except for a server on your own computer), so your invite key and password never travel unencrypted.",
+        "Desktop app: on Linux, notifications show a member's text as text, never as formatting or links.",
+        "Desktop app: with Hide my IP on, a call never connects directly any more: without the server's voice relay it says so instead, and the setting can always be turned off.",
+        "Changing your password now signs out your other devices and OBS links, and a password reset by the owner or a mod signs out all of that person's devices.",
+        "Nobody can take a name that looks just like someone else's (other capitals, accents or look-alike letters from another alphabet), and name changes show in the mod log.",
+        "Pictures can be up to 8192 pixels a side (animations 4096), and each person can upload up to 300 MB a day.",
+        "Soundboard clips and join chimes are stored exactly as they were measured, so they sound the same in every app.",
+        "A sign-in link opened in a browser now asks \"Signed in as … Is that you?\" first, and Add to Home Screen's sign-in link lasts 5 minutes.",
+        "OBS links no longer contain the invite link, and can play everyone but you; the default plays everyone, you too (talk on your phone, record the game on your PC).",
+        "Hide my IP never falls back to a direct connection: with no voice relay, it says so instead.",
+        "Desktop app: a malformed voice or screen-share packet from someone in a call can no longer crash or freeze the app.",
+        "Desktop app: a message or plan with an impossible date can no longer crash the app.",
+        "Desktop app: a malformed drawing on the Draw board can no longer freeze the app.",
+        "Desktop app: a broken Personal space key from the server can no longer keep the app busy for hours.",
+        "iPhone and Mac: a malformed voice message from someone in a call can no longer crash the app, and neither can odd numbers, sound clips or oversized avatars and emoji from the server.",
+        "iPhone and Mac: an invite link starting with http:// is refused (unless it's a test server on the same computer), so your password never crosses the network unencrypted.",
+        "iPhone and Mac: signing out also signs Draw, Space and the board out, so the next person on a shared iPad or Mac doesn't open them as you.",
+        "iPhone and Mac: a link to another site in Draw, Space or the board opens in your browser instead of inside Yap.",
+        "iPhone and Mac: signed out from another device (or by a new password), the app goes straight to the sign-in screen instead of trying to reconnect first.",
+        "iPhone and Mac: with Hide my IP address on and no voice relay on the server, calls never connect directly: the call says you can't reach anyone, and the setting can always be turned off.",
+        "iPhone and Mac: Full res pictures stay within 8192 pixels a side and 40 megapixels (bigger ones go a little smaller).",
+        "Desktop app: a message claiming an impossible picture size can no longer break the chat's layout.",
+        "Custom emojis and avatars can be up to 2048 pixels a side."
+      ]
+    },
     {
       "version": "0.49.0",
       "date": "2026-10-21",
       "title": "Drafts, Rejoin, Mic volume and a steadier Yap",
       "items": [
+        "Watch together: removing a video from the queue always takes out the one you clicked, even if the queue moved up a moment before.",
+        "Settings › Voice › Mic volume makes you louder or quieter for everyone (0–200 %), live while you drag; past 100 % a soft limiter rounds off your loudest moments so they don't clip.",
+        "After a reload or a crash in a call, a bar says \"You were in Lounge.\" with a Rejoin button that puts you straight back in.",
+        "Tapping a push about a message (an @mention, a reply) opens Yap at that message.",
+        "Each channel keeps what you'd typed in it: switch away and back and your draft is still there (and Enter never sends it to the wrong channel).",
+        "Scrolled up reading? A \"↓ New messages\" pill says when something new arrives below, and takes you there.",
+        "Installed as an app, Yap's icon shows how many @mentions are waiting for you.",
+        "Desktop app: Settings › Voice › Mic volume (0–200 %) turns how loud you come across up or down.",
+        "Desktop app: if Yap restarts while you're in a call (an update, a crash), it offers \"You were in Lounge. Rejoin\" for 10 minutes.",
+        "Desktop app: a \"↓ New messages\" button shows when someone writes while you're scrolled up.",
+        "Desktop app: a picture waiting to be sent stays with the channel you picked it in.",
+        "Desktop app: an @mention while Yap is in the background flashes its taskbar button (Windows) or bounces its Dock icon (Mac), and the Dock shows how many are unread.",
+        "iPhone and Mac: what you typed in a channel waits there while you look at another one.",
+        "iPhone and Mac: scrolled up when someone writes? A \"New messages\" button takes you down.",
+        "iPhone and Mac: your unread @mentions show on the app icon (and the Mac's Dock).",
+        "iPhone and Mac: tapping an @mention's notification opens that message.",
+        "iPhone and Mac: after Yap restarts mid-call, \"You were in Lounge.\" offers to rejoin.",
+        "iPhone and Mac: Settings › Voice › Mic volume sets your mic's own level (0–100 %), where the mic lets Yap set it. On a Mac that's the same level as System Settings › Sound › Input, so it changes it for every app.",
         "Desktop app: when the network swallows the connection, it says \"The server didn't answer in time\" after 15 s and keeps trying, instead of \"Connecting…\" for ever.",
-        "Pasting an invite link with a stray \"%\" can't crash the app",
+        "Desktop app: a message it doesn't understand (from a newer server, say) with an emoji or accented letter in it no longer crashes the app every time it connects.",
+        "Desktop app: pasting an invite link with a stray \"%\" can no longer crash the app.",
         "Desktop app: pictures and emojis that didn't load (say, right after waking from sleep) load by themselves a moment later, and a screenful of emojis loads faster.",
         "Desktop app: @mentions of someone who just changed their name show up as mentions.",
         "Desktop app (Linux): notifications for messages that start with a dash show up.",
-        "iPhone and Mac: When the network drops while Yap is connecting, it tries again within seconds instead of a minute.",
+        "iPhone and Mac: when the network drops while Yap is connecting, it tries again within seconds instead of a minute.",
         "Scrolling far back in a long channel and the daily backup do much less work on the server.",
         "The one-ping-a-minute limit now always holds.",
-        "Watch together doesn't wait on a slow YouTube to start a video.",
+        "Watch together: a slow YouTube holds up starting a video for 4 seconds at most (it then plays without its title).",
         "After your phone wakes up or the network changes, Yap notices a dead connection within 10 seconds, and a connection attempt that hangs is retried after 15 seconds instead of a minute or more.",
         "Jumping to a message no longer gets stuck if the connection drops while it loads.",
         "Draw: a second finger on a phone or tablet no longer hijacks your stroke.",
@@ -31,9 +86,8 @@
         "The board: your pointer no longer lingers at the edge for others after you move off it.",
         "Watch together: on a slow connection the video plays (a little behind) instead of jumping back and forth.",
         "Watch together: a video YouTube won't play here no longer asks you to \"Click to join the show\".",
-        "iPhone: After a call, Yap's sounds no longer stop your music or ignore the silent switch.",
+        "iPhone: after a call, Yap's sounds no longer stop your music or ignore the silent switch.",
         "Desktop app: dropping a few files at once sends the picture among them, and dropping a huge file by mistake no longer freezes the window.",
-        "No move messages while you walk into a wall",
         "Doodle reactions: a second finger on the pad no longer scribbles into your line.",
         "Space: after a reconnect or an update you show up on everyone's map straight away, not only once you move.",
         "Changing a voice setting twice in a row (like Noise suppression) no longer leaves your first choice on.",
@@ -42,32 +96,13 @@
         "When Yap takes you out of a voice channel (say it was archived), your screen share and soundboard clips stop too.",
         "OBS overlay: the speaking glow now eases in and out instead of snapping.",
         "iPhone and Mac: Yap stays light in long sessions with lots of pictures.",
-        "iPhone and Mac: A call whose channel is archived while you're reconnecting now ends cleanly, screen share included.",
-        "The typing line ticks only while someone's typing",
-        "A message sent just as the connection dropped no longer shows up twice.",
-        "Removing a video from the Watch together queue always takes out the one you clicked, even if the queue moved up a moment before.",
-        "Settings › Voice › Mic volume makes you louder or quieter for everyone (0–200 %), live while you drag; past 100 % it never distorts into clipping.",
-        "After a reload or a crash in a call, a bar says \"You were in Lounge.\" with a Rejoin button that puts you straight back in.",
-        "Tapping a push about a message (an @mention, a reply) opens Yap at that message.",
-        "Each channel keeps what you'd typed in it: switch away and back and your draft is still there (and Enter never sends it to the wrong channel).",
-        "Scrolled up reading? A \"↓ New messages\" pill says when something new arrives below, and takes you there.",
-        "Installed as an app, Yap's icon shows how many @mentions are waiting for you.",
-        "Desktop app: Settings › Voice › Mic volume (0–200 %) turns how loud you come across up or down.",
-        "Desktop app: if Yap restarts while you're in a call (an update, a crash), it offers \"You were in Lounge. Rejoin\" for 10 minutes.",
-        "Desktop app: a \"↓ New messages\" button shows when someone writes while you're scrolled up.",
-        "Desktop app: a picture waiting to be sent stays with the channel you picked it in.",
-        "Desktop app: an @mention while Yap is in the background flashes its taskbar button (Windows) or bounces its Dock icon (Mac), and the Dock shows how many are unread.",
-        "iPhone and Mac: What you typed in a channel waits there while you look at another one.",
-        "iPhone and Mac: Scrolled up when someone writes? A \"New messages\" button takes you down.",
-        "iPhone and Mac: Your unread @mentions show on the app icon (and the Mac's Dock).",
-        "iPhone and Mac: Tapping an @mention's notification opens that message.",
-        "iPhone and Mac: After Yap restarts mid-call, \"You were in Lounge.\" offers to rejoin.",
-        "iPhone and Mac: Settings › Voice › Mic volume, where your mic lets Yap set its level."
+        "iPhone and Mac: a call whose channel is archived while you're reconnecting now ends cleanly, screen share included.",
+        "A message sent just as the connection dropped no longer shows up twice."
       ]
     },
     {
       "version": "0.48.0",
-      "date": "2026-10-19",
+      "date": "2026-10-18",
       "title": "A new icon",
       "items": [
         "iPhone: Dictation, Siri or Control Center no longer drop you from a call; if the sound stops, Yap starts it again by itself.",
@@ -530,7 +565,7 @@
     },
     {
       "version": "0.37.0",
-      "date": "2026-10-06",
+      "date": "2026-10-05",
       "title": "Desktop catches up",
       "items": [
         "Clip bus for sounds (limiter, two soundboard clips at once, idle output)",
@@ -573,7 +608,7 @@
     },
     {
       "version": "0.36.0",
-      "date": "2026-10-06",
+      "date": "2026-10-05",
       "title": "Thirteen extras",
       "items": [
         "Draw and Space open signed in, straight to the place",
@@ -862,7 +897,7 @@
     },
     {
       "version": "0.9.1",
-      "date": "2026-10-05",
+      "date": "2026-10-04",
       "title": "Code review fixes",
       "items": [
         "Opening the board no longer breaks images.",
@@ -873,7 +908,7 @@
     },
     {
       "version": "0.9.0",
-      "date": "2026-10-05",
+      "date": "2026-10-04",
       "title": "Yap OS",
       "items": [
         "A small native desktop app for Windows and Linux (and Mac) with push-to-talk that works even while you're in a game.",
@@ -974,6 +1009,27 @@
     }
   ],
   "highlights": [
+    {
+      "date": "2026-10-24",
+      "emoji": "🔒",
+      "title": "Safer sign-ins",
+      "text": "Choosing a new password signs out your other devices (an owner or mod's reset signs out all of yours), a sign-in link opened in a browser asks whose account it signed you in to, and nobody can take a name that looks just like yours.",
+      "where": "Everywhere"
+    },
+    {
+      "date": "2026-10-24",
+      "emoji": "🛡️",
+      "title": "Nothing a friend sends can crash your app",
+      "text": "Odd pictures, GIFs, sound clips and call data can't crash or freeze the desktop, iPhone or Mac app any more, and Hide my IP never falls back to a direct connection.",
+      "where": "Everywhere"
+    },
+    {
+      "date": "2026-10-24",
+      "emoji": "🎥",
+      "title": "OBS: everyone, or everyone but you",
+      "text": "A Stream to OBS link plays everyone in the call, your own voice too, from whichever device you're on: talk on your phone and record the game on your PC. Or pick Everyone but you. New links don't contain the invite link.",
+      "where": "Settings › Voice › Advanced"
+    },
     {
       "date": "2026-10-21",
       "emoji": "✍️",

@@ -143,8 +143,9 @@ impl Core {
                 let msg = if message.is_empty() { "Waiting for the owner or a mod to let you in.".to_string() } else { message };
                 self.set_status(Status::Pending, &msg);
             }
-            ServerMsg::Account { has_pin, token, kind } => {
+            ServerMsg::Account { has_pin, token, kind, signed_out } => {
                 self.got_token(token);
+                let signed_out = signed_out.unwrap_or(0).max(0);
                 {
                     let mut m = self.shared.model.lock();
                     m.needs_pin = !has_pin;
@@ -153,10 +154,14 @@ impl Core {
                         m.weak_reason = None;
                         // Always "password" from a server that has passwords only.
                         m.secret_kind = kind.unwrap_or_else(|| "password".into());
-                        m.toast("Password saved. Sign in anywhere with your name and password.");
+                        m.toast(password_saved(signed_out));
                     }
                     m.password_error = None;
                     m.password_seq += 1;
+                }
+                // A new password signs out your other devices: Settings › Account's list is out of date.
+                if signed_out > 0 && self.shared.model.lock().devices.is_some() {
+                    self.send(out::account_devices());
                 }
                 self.emit(CoreEvent::Extra("PASSWORD", "saved".into()));
                 self.repaint();
@@ -859,12 +864,7 @@ impl Core {
                 self.repaint();
             }
             ServerMsg::DrawSeg { sid, sk, c, w, e, p, l } => {
-                {
-                    let mut m = self.shared.model.lock();
-                    let entry = m.draw.live.entry(format!("{sid}:{sk}")).or_insert_with(|| LiveStroke { sid: sid.clone(), c, w, e, l, p: vec![], at: Instant::now() });
-                    entry.p.extend(p);
-                    entry.at = Instant::now();
-                }
+                self.shared.model.lock().draw.add_live(sid, &sk, c, w, e, l, p);
                 self.repaint();
             }
             ServerMsg::DrawStroke { stroke } => {
@@ -1256,6 +1256,16 @@ impl Core {
 /// What the sign-in screen says after a refused sign-in: the server's words,
 /// plus who can help after a wrong password (the web's words: someone still on
 /// an old PIN only sees a Password field, so say the PIN works there too).
+/// What a saved password says, with how many of your other devices it signed out.
+fn password_saved(signed_out: i64) -> String {
+    let base = "Password saved. Sign in anywhere with your name and password.";
+    match signed_out {
+        ..=0 => base.into(),
+        1 => format!("{base} Signed out your other device."),
+        n => format!("{base} Signed out your {n} other devices."),
+    }
+}
+
 fn sign_in_error(code: &str, message: &str) -> String {
     match code {
         // (The server's own words may already say so.)
@@ -1338,5 +1348,17 @@ mod account_tests {
         // Turned away: only whoever saw them waiting hears of it.
         assert!(who_joined(Some(waiting), false, None, None, false).is_some());
         assert_eq!(who_joined(None, false, Some(resolved), Some(known), false), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The toast after a password change says how many other devices it signed out.
+    #[test]
+    fn password_saved_words() {
+        assert_eq!(super::password_saved(0), "Password saved. Sign in anywhere with your name and password.");
+        assert_eq!(super::password_saved(-3), super::password_saved(0));
+        assert!(super::password_saved(1).ends_with("Signed out your other device."));
+        assert!(super::password_saved(2).ends_with("Signed out your 2 other devices."));
     }
 }

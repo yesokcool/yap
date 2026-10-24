@@ -27,6 +27,14 @@ const SCALE: f32 = PIX_W as f32 / BOARD_W;
 /// A pixel is on when its centre is within the shape plus this much (the
 /// web's 110/255 alpha snap keeps pixels about 43 % covered).
 const SNAP: f32 = 0.07;
+/// What the server takes in a stroke (`cleanStroke` in worker/validate.ts):
+/// widths, where its points may be, how many numbers and how much text. A
+/// stroke from a server that doesn't check is drawn within them too.
+pub const MAX_WIDTH: f32 = 400.0;
+const MIN_COORD: f32 = -500.0;
+const MAX_COORD: f32 = 10500.0;
+pub const MAX_NUMBERS: usize = 8000;
+const MAX_TEXT: usize = 200;
 
 /// Straight RGBA, alpha 0 or 255.
 #[derive(Clone)]
@@ -108,8 +116,9 @@ impl Pixels {
             for i in 0..xs.len() {
                 wind += xs[i].1;
                 if wind != 0 && i + 1 < xs.len() {
-                    let (from, to) = (xs[i].0, xs[i + 1].0);
-                    let mut x = (from - 0.5).ceil() as i32;
+                    // (Only across the sheet: an edge far off it is no reason to count to it.)
+                    let (from, to) = (xs[i].0, xs[i + 1].0.min(self.w as f32));
+                    let mut x = (from - 0.5).ceil().max(0.0) as i32;
                     while (x as f32 + 0.5) < to {
                         self.set(x, y, c);
                         x += 1;
@@ -327,27 +336,32 @@ pub fn layer(s: &Stroke) -> usize {
 /// straight lines). An eraser clears pixels (they turn transparent).
 pub fn draw_stroke(px: &mut Pixels, s: &Stroke, frame: Option<u8>) {
     let colour = if s.e { None } else { Some(hex(&s.c)) };
+    // Within what the server takes (MAX_WIDTH…): the same for every real stroke.
+    let w = if s.w.is_finite() { s.w.clamp(1.0, MAX_WIDTH) } else { 1.0 };
+    let coord = |v: f32| if v.is_finite() { v.clamp(MIN_COORD, MAX_COORD) } else { 0.0 };
     if s.k.as_deref() == Some("text") {
         if s.p.len() < 2 {
             return;
         }
-        let (x, y) = (s.p[0], s.p[1]);
+        let (x, y) = (coord(s.p[0]), coord(s.p[1]));
         let (dx, dy, angle) = match frame {
             Some(f) => (field(x, y, f, 0), field(x, y, f, 1), field(x + 500.0, y, f, 2) / 900.0),
             None => (0.0, 0.0, 0.0),
         };
-        let contours = text_contours(s.text.as_deref().unwrap_or(""), ((x + dx) * SCALE, (y + dy) * SCALE), text_size(s.w) * SCALE, angle);
+        let text: String = s.text.as_deref().unwrap_or("").chars().take(MAX_TEXT).collect();
+        let contours = text_contours(&text, ((x + dx) * SCALE, (y + dy) * SCALE), text_size(w) * SCALE, angle);
         px.fill(&contours, colour);
         return;
     }
+    let p: Vec<f32> = s.p.iter().take(MAX_NUMBERS).map(|v| coord(*v)).collect();
     let p = match frame {
-        Some(f) if s.p.len() > 2 => wobble(&s.p, f),
-        _ => s.p.clone(),
+        Some(f) if p.len() > 2 => wobble(&p, f),
+        _ => p,
     };
     if p.len() < 2 {
         return;
     }
-    let width = (s.w * SCALE).max(1.0);
+    let width = (w * SCALE).max(1.0);
     let at = |i: usize| (p[i] * SCALE, p[i + 1] * SCALE);
     if p.len() < 4 {
         px.capsule(at(0), at(0), width, colour);
@@ -497,6 +511,26 @@ pub fn encode_gif(frames: &[Vec<u8>], w: usize, h: usize, delay_ms: u32) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stroke from a server that doesn't check (huge width, a point a
+    /// billion units off, a mile of text) draws like one it would take, quickly.
+    #[test]
+    fn strokes_out_of_bounds_stay_cheap() {
+        let start = std::time::Instant::now();
+        let mut px = Pixels::new();
+        let text = Stroke { k: Some("text".into()), text: Some("I".repeat(10_000)), p: vec![1e11, 3000.0], w: 1e7, c: "#000000".into(), ..Default::default() };
+        draw_stroke(&mut px, &text, None);
+        draw_stroke(&mut px, &Stroke { p: vec![-1e11, 3000.0], ..text.clone() }, Some(1));
+        let wide = Stroke { p: (0..20_000).map(|i| (i % 100) as f32 * 100.0).collect(), w: 1e9, c: "#000000".into(), ..Default::default() };
+        draw_stroke(&mut px, &wide, None);
+        assert!(start.elapsed() < std::time::Duration::from_secs(20), "{:?}", start.elapsed());
+        // Within the limits nothing changes.
+        let ok = Stroke { p: vec![100.0, 100.0, 5000.0, 3000.0], w: 14.0, c: "#ff0000".into(), ..Default::default() };
+        let (mut a, mut b) = (Pixels::new(), Pixels::new());
+        draw_stroke(&mut a, &ok, None);
+        draw_stroke(&mut b, &Stroke { w: 14.0, ..ok.clone() }, None);
+        assert!(a.rgba == b.rgba && a.rgba.iter().any(|v| *v != 0));
+    }
 
     fn line(c: &str, w: f32, p: Vec<f32>) -> Stroke {
         Stroke { id: crate::config::random_hex(6), c: c.into(), w, p, k: Some("poly".into()), ..Default::default() }

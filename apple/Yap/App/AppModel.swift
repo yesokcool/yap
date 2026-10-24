@@ -3,6 +3,7 @@ import Foundation
 import Observation
 import os
 import SwiftUI
+import WebKit
 import YapCore
 import YapVoice
 
@@ -206,6 +207,13 @@ final class AppModel {
     #endif
     @ObservationIgnored private var minecraftTask: Task<Void, Never>?
     @ObservationIgnored private var configTask: Task<Void, Never>?
+    /// The in-app web view's sign-in (`WebSignIn.swift`): bumped when it's
+    /// wiped, so an open web view starts over with a new page…
+    var webSession = 0
+    /// …the pages open now, so a wipe can close them first…
+    @ObservationIgnored var webPages: [WeakWebPage] = []
+    /// …and the wipe under way (a page waits for it before asking for a pass).
+    @ObservationIgnored var webWipe: Task<Void, Never>?
 
     init() {
         let launch = DebugLaunch.current
@@ -234,6 +242,7 @@ final class AppModel {
         client.onSound = { [weak self] sound, _, uid in self?.soundPlayed(sound, by: uid) }
         client.onHangNow = { [weak self] hang in self?.hangStarted(hang) }
         client.onAdmitted = { [weak self] in self?.admitted() }
+        client.onSignedOut = { [weak self] in self?.forgetWebSignIn() }
         client.savedToPersonalBefore = {
             defer { UserDefaults.standard.set(true, forKey: "yap.savedToPersonal") }
             return UserDefaults.standard.bool(forKey: "yap.savedToPersonal")
@@ -284,6 +293,8 @@ final class AppModel {
         launch.apply(to: self)
         settleRejoinOffer()
         watchMentionBadge()
+        // Signed out by an older version (which left the web view signed in), or quit mid-wipe.
+        if !client.hasToken, WebSignIn.held() != "" { forgetWebSignIn() }
     }
 
     func start() {

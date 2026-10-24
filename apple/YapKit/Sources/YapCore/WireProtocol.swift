@@ -62,6 +62,19 @@ public struct IceCandidatePayload: Codable, Sendable, Equatable {
         self.sdpMLineIndex = sdpMLineIndex
         self.usernameFragment = usernameFragment
     }
+
+    /// The most m-lines a Yap call's description has room for (it uses two or
+    /// three); the server drops candidates past it too.
+    public static let maxMLineIndex = 63
+
+    /// `sdpMLineIndex` as WebRTC takes it (absent = the first m-line), or nil
+    /// for one no description has: the other side sent it, and `Int32(_:)`
+    /// on 3000000000 traps (it crashed every Apple app in the call).
+    public var mLineIndex: Int32? {
+        guard let index = sdpMLineIndex else { return 0 }
+        guard (0...Self.maxMLineIndex).contains(index) else { return nil }
+        return Int32(exactly: index)
+    }
 }
 
 // MARK: - Client → server
@@ -463,9 +476,11 @@ public enum ServerMessage: Sendable {
     case ready(ReadyPayload)
     /// Waiting room; `uid` = our new account's id.
     case pending(message: String, uid: String?, token: String?)
-    case account(token: String?, kind: String?)
+    /// `signedOut`: how many of my other devices a new password signed out
+    /// (absent from older servers).
+    case account(token: String?, kind: String?, signedOut: Int? = nil)
     case devices([Device])
-    /// One-time sign-in pass (15 min) for the web app.
+    /// One-time sign-in pass (5 min; 15 on older servers) for the web app: ask right before using it.
     case deviceHandoff(token: String)
     /// My account just signed in on another device.
     case signinAlert(Device)
@@ -560,7 +575,8 @@ public enum ServerMessage: Sendable {
             case "pending":
                 message = .pending(message: try optStr("message") ?? "Waiting for the owner or a mod to let you in.", uid: try optStr("uid"), token: try optStr("token"))
             case "account":
-                message = .account(token: try optStr("token"), kind: try? optStr("kind"))
+                message = .account(token: try optStr("token"), kind: try? optStr("kind"),
+                                   signedOut: try? c.decodeIfPresent(Int.self, forKey: "signedOut"))
             case "devices":
                 message = .devices((try? c.decodeIfPresent([Device].self, forKey: "devices")) ?? [])
             case "device.handoff":
@@ -586,13 +602,13 @@ public enum ServerMessage: Sendable {
                 message = .deleted(id: try str("id"), channelId: try str("channelId"))
             case "edited":
                 message = .edited(id: try str("id"), channelId: try str("channelId"), body: try optStr("body") ?? "",
-                                  editedAt: (try? c.decodeIfPresent(Int.self, forKey: "editedAt")) ?? 0, sealed: try bool("sealed"))
+                                  editedAt: WireNumber.millis((try? c.decodeIfPresent(Int.self, forKey: "editedAt")) ?? 0), sealed: try bool("sealed"))
             case "search.results":
                 message = .searchResults(q: try optStr("q") ?? "", channelId: try optStr("channelId"),
                                          messages: (try? c.decodeIfPresent([Message].self, forKey: "messages")) ?? [])
             case "pinned":
                 message = .pinned(id: try str("id"), channelId: try str("channelId"),
-                                  pinnedAt: try? c.decodeIfPresent(Int.self, forKey: "pinnedAt"), by: try optStr("by") ?? "")
+                                  pinnedAt: (try? c.decodeIfPresent(Int.self, forKey: "pinnedAt")).flatMap { $0 }.map(WireNumber.millis), by: try optStr("by") ?? "")
             case "pins":
                 message = .pins(channelId: try str("channelId"), messages: (try? c.decodeIfPresent([Message].self, forKey: "messages")) ?? [])
             case "personal.plain":
@@ -652,7 +668,7 @@ public enum ServerMessage: Sendable {
                 message = .soundDeleted(id: try str("id"))
             case "away":
                 message = .away(AwayNote(uid: try str("uid"), text: try optStr("text") ?? "",
-                                         until: try? c.decodeIfPresent(Int.self, forKey: "until")))
+                                         until: (try? c.decodeIfPresent(Int.self, forKey: "until")).flatMap { $0 }.map(WireNumber.millis)))
             case "shelf":
                 message = .shelf(channelId: try str("channelId"),
                                  items: ((try? c.decodeIfPresent([Lenient<Message>].self, forKey: "items")) ?? []).compactMap(\.value),
@@ -716,6 +732,18 @@ public struct SealedNote: Codable, Sendable, Equatable {
     public static func frameBytes(id: String, body: String) -> Int {
         id.utf8.count + body.utf8.count + 24
     }
+}
+
+/// Numbers from the server, kept where every client can use them: decoded
+/// through these, no sum, difference or conversion further on can overflow
+/// (Swift traps on that, and a crash takes the call down with it).
+public enum WireNumber {
+    /// A count (unread messages, mentions): 0…1,000,000,000.
+    public static func count(_ n: Int) -> Int { min(max(0, n), 1_000_000_000) }
+    /// ms since the epoch, within JavaScript's own dates (±100 million days):
+    /// any two subtract safely.
+    public static func millis(_ ms: Int) -> Int { min(max(ms, -maxMillis), maxMillis) }
+    public static let maxMillis = 8_640_000_000_000_000
 }
 
 /// Decodes a list item without failing the whole list (a newer server's

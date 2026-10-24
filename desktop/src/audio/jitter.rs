@@ -35,6 +35,8 @@ use std::collections::{BTreeMap, VecDeque};
 pub const RATE: usize = 48_000;
 const MS: f64 = RATE as f64 / 1000.0;
 const MAX_FRAME: usize = 5760; // 120 ms at 48 kHz
+/// Most steps one `pull` takes to fill its buffer (the rest is silence).
+const PULL_STEPS: usize = 1024;
 const DEFAULT_FRAME: usize = 960;
 pub const MIN_TARGET_MS: f64 = 40.0;
 pub const MAX_TARGET_MS: f64 = 200.0;
@@ -123,7 +125,8 @@ pub fn opus_samples(p: &[u8]) -> Option<usize> {
         1 | 2 => 2,
         _ => (*p.get(1)? & 0x3f) as usize,
     };
-    (frames > 0).then_some(frame * frames)
+    // A packet is at most 120 ms (RFC 6716 § 3.2.5); one that says more is broken.
+    (frames > 0 && frame * frames <= MAX_FRAME).then_some(frame * frames)
 }
 
 /// Arrival lateness: transit time (arrival − timestamp) over the fastest
@@ -382,7 +385,12 @@ impl JitterBuffer {
     }
 
     pub fn pull(&mut self, out: &mut [f32]) {
-        while self.pcm.len() < out.len() {
+        // Every step decodes, conceals, waits with silence or drops packets; the
+        // cap only stops a packet stream nobody foresaw from holding the audio thread.
+        for _ in 0..PULL_STEPS {
+            if self.pcm.len() >= out.len() {
+                break;
+            }
             self.decode_one();
         }
         for s in out.iter_mut() {
@@ -473,7 +481,7 @@ impl JitterBuffer {
         };
         // A burst after a stall: skip ahead to the target in one go.
         let ahead = self.ahead_ms();
-        if ahead > self.target + JUMP_OVER_MS {
+        if ahead > self.target + JUMP_OVER_MS && self.packets.len() > 1 {
             while self.ahead_ms() > self.target + ADJUST_MS && self.packets.len() > 1 {
                 if let Some((ts, p)) = self.packets.pop_first() {
                     self.next = Some(ts + p.samples as u64);
@@ -678,6 +686,24 @@ mod tests {
         assert_eq!(opus_samples(&[0x18]), Some(2880)); // SILK NB 60 ms
         assert_eq!(opus_samples(&[0xf9]), Some(1920)); // CELT 20 ms × 2
         assert_eq!(opus_samples(&[]), None);
+        // More than 120 ms in one packet isn't Opus (63 × 60 ms froze the audio thread).
+        assert_eq!(opus_samples(&[0x1b, 0x3f]), None);
+        assert_eq!(opus_samples(&[0x1b, 0x03]), None);
+        assert_eq!(opus_samples(&[0xe3, 0x30]), Some(5760)); // CELT 2.5 ms × 48: the most there is
+        assert_eq!(opus_samples(&[0xe3, 0x31]), None);
+    }
+
+    /// A packet claiming more than 120 ms is dropped, and pulling never spins:
+    /// one like it once kept `pull` looping forever on the audio thread.
+    #[test]
+    fn a_packet_too_long_to_be_opus_never_hangs() {
+        let mut jb = JitterBuffer::new();
+        let mut out = vec![0f32; 960];
+        for k in 0..20u32 {
+            jb.push(k as u16, k * 181_440, &[0x1b, 0x3f, 0, 0, 0], k as f64 * 20.0);
+            jb.pull(&mut out);
+        }
+        assert!(out.iter().all(|s| *s == 0.0));
     }
 
     // ── The audit's network simulation (audit/voice/rs), as tests ──

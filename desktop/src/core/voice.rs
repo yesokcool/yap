@@ -12,6 +12,36 @@ pub(super) enum Chime {
     Ping,
 }
 
+/// Why a call with Hide my IP on can't start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NoRelay {
+    /// The server has no voice relay.
+    None,
+    /// `/api/ice` couldn't be asked.
+    Unreachable,
+}
+
+impl NoRelay {
+    pub(super) fn words(self) -> &'static str {
+        match self {
+            NoRelay::None => "Hide my IP is on, but this server has no voice relay, so you can't connect to anyone. Turn it off in Settings › Voice.",
+            NoRelay::Unreachable => "Hide my IP is on, but Yap couldn't reach this server's voice relay, so it didn't join. Try again in a moment, or turn it off in Settings › Voice.",
+        }
+    }
+}
+
+/// The ICE servers a call starts with: what `/api/ice` said (a public STUN
+/// server when it couldn't be asked). With Hide my IP on (`relay_only`) it
+/// fails closed: no relay, or no answer, and there's no call at all.
+pub(super) fn relay_ice(fetched: Result<Vec<crate::http::IceServer>, String>, relay_only: bool) -> (Vec<crate::http::IceServer>, Option<NoRelay>) {
+    match fetched {
+        Ok(list) if relay_only && !crate::http::has_relay(&list) => (Vec::new(), Some(NoRelay::None)),
+        Ok(list) => (list, None),
+        Err(_) if relay_only => (Vec::new(), Some(NoRelay::Unreachable)),
+        Err(_) => (crate::http::ice_fallback(), None),
+    }
+}
+
 impl Core {
     pub(super) fn chime(&self, kind: Chime) {
         let (sounds, device) = {
@@ -38,14 +68,15 @@ impl Core {
     }
 
     /// A clip's samples (mono 48 kHz): cached, or fetched in the background
-    /// and then handed to `then`.
+    /// and then handed to `then`. Only what the server takes, and at most as
+    /// long as its kind may be: one that isn't just doesn't play.
     pub(super) fn with_pcm(&self, sound: &Sound, then: impl FnOnce(Arc<Vec<f32>>) + Send + 'static) {
         if let Some(pcm) = self.pcm.lock().get(&sound.id).cloned() {
             return then(pcm);
         }
-        let (server, cache, id, media) = (self.shared.model.lock().config.server.clone(), self.pcm.clone(), sound.id.clone(), sound.media.clone());
+        let (server, cache, id, media, max_ms) = (self.shared.model.lock().config.server.clone(), self.pcm.clone(), sound.id.clone(), sound.media.clone(), sound.max_ms());
         tokio::task::spawn_blocking(move || {
-            let fetched = crate::http::get_bytes(&format!("{server}/media/{media}")).and_then(|(bytes, _)| crate::audio::wav::decode_mono(&bytes));
+            let fetched = crate::http::get_bytes(&format!("{server}/media/{media}")).and_then(|(bytes, _)| crate::audio::wav::decode_clip(&bytes, max_ms));
             match fetched {
                 Ok(w) => {
                     let pcm = Arc::new(crate::audio::wav::resample_mono(&w.samples, w.rate, crate::audio::RATE));
@@ -400,13 +431,27 @@ impl Core {
             (m.config.server.clone(), m.config.key.clone())
         };
         let (s2, k2) = (server.clone(), key.clone());
-        let ice = tokio::task::spawn_blocking(move || crate::http::ice(&s2, &k2)).await.unwrap_or_default();
-        let relay = crate::http::has_relay(&ice);
-        let relay_only = {
+        let fetched = tokio::task::spawn_blocking(move || crate::http::fetch_ice(&s2, &k2)).await.unwrap_or_else(|e| Err(e.to_string()));
+        let relay_only = self.shared.model.lock().config.relay_only;
+        let (ice, refused) = relay_ice(fetched, relay_only);
+        {
             let mut m = self.shared.model.lock();
-            m.relay = Some(relay);
-            m.config.relay_only && relay
-        };
+            match refused {
+                None => m.relay = Some(crate::http::has_relay(&ice)),
+                Some(NoRelay::None) => m.relay = Some(false),
+                Some(NoRelay::Unreachable) => {}
+            }
+            if let Some(why) = refused {
+                // Hide my IP never falls back to connecting directly: that's the very address it hides.
+                if m.voice_wanted.as_deref() == Some(channel_id.as_str()) {
+                    m.voice_wanted = None;
+                }
+                m.toast(why.words());
+                drop(m);
+                log::warn!("voice: not joining: {}", why.words());
+                return self.repaint();
+            }
+        }
         self.voice.set_ice(ice, relay_only);
         // ICE restarts fetch it again (relay credentials can expire).
         self.voice.set_ice_fetch(Arc::new(move || crate::http::ice(&server, &key)));
@@ -499,4 +544,34 @@ pub(super) struct VoiceMsg {
     pub resume: bool,
     pub prev: Option<String>,
     pub lost: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(url: &str) -> crate::http::IceServer {
+        crate::http::IceServer { urls: crate::http::Urls::One(url.into()), username: Some("u".into()), credential: Some("c".into()) }
+    }
+
+    /// Hide my IP fails closed: relay only, and no call at all without a relay
+    /// (or when the server can't say), never a direct connection.
+    #[test]
+    fn hide_my_ip_never_connects_directly() {
+        let with_relay = || Ok(vec![server("stun:stun.example:3478"), server("turn:turn.example:3478")]);
+        let stun_only = || Ok(vec![server("stun:stun.example:3478")]);
+        let failed = || Err("HTTP 503".to_string());
+        assert_eq!(relay_ice(with_relay(), true).1, None);
+        assert_eq!(relay_ice(with_relay(), true).0.len(), 2);
+        let (none, refused) = relay_ice(stun_only(), true);
+        assert!(none.is_empty() && refused == Some(NoRelay::None));
+        assert_eq!(relay_ice(Ok(vec![]), true).1, Some(NoRelay::None));
+        let (none, refused) = relay_ice(failed(), true);
+        assert!(none.is_empty() && refused == Some(NoRelay::Unreachable));
+        // Off: whatever there is, or the public STUN server.
+        assert_eq!(relay_ice(stun_only(), false).1, None);
+        let (fallback, refused) = relay_ice(failed(), false);
+        assert!(refused.is_none() && !fallback.is_empty() && !crate::http::has_relay(&fallback));
+        assert!(NoRelay::None.words().contains("Settings › Voice") && NoRelay::Unreachable.words().contains("Settings › Voice"));
+    }
 }

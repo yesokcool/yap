@@ -63,6 +63,10 @@ pub fn ws_request(server: &str, key: &str) -> Result<tokio_tungstenite::tungsten
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let in_header = key_is_token(key);
     let url = ws_url(server, if in_header { "" } else { key });
+    // ws:// only to this computer: the key, the token and the password would go in the clear.
+    if let Some(why) = crate::config::insecure(&url) {
+        return Err(why.to_string());
+    }
     let mut req = url.into_client_request().map_err(|e| e.to_string())?;
     // The server names this device from it in your devices list ("Desktop app (Mac)").
     let os = if cfg!(target_os = "macos") { "Mac" } else if cfg!(windows) { "Windows" } else { "Linux" };
