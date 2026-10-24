@@ -20,6 +20,9 @@ pub struct Place {
     pub watch: bool,
     /// A place in the web app (`watch`, `when`): opens there signed in.
     pub web: Option<&'static str>,
+    /// Its name in a link to it (`#place=space`): Draw, Space, Watch, When's
+    /// good and the board; None for the server's other links.
+    pub link: Option<&'static str>,
 }
 
 /// Clicking a place: a shared view opens in the main pane; the web app's
@@ -29,6 +32,42 @@ pub fn open_place(place: &Place, acts: &mut Vec<Act>) {
         (Some(v), _) => acts.push(Act::Cmd(Cmd::SetView(Some(v)))),
         (None, Some(w)) => acts.push(Act::Cmd(Cmd::OpenWeb { place: Some(w.into()), video: None })),
         (None, None) => acts.push(Act::OpenUrl(place.url.clone())),
+    }
+}
+
+/// A place this server doesn't have, or a channel that's gone (the web's words).
+pub const NO_SUCH_PLACE: &str = "That link is to a place this server doesn't have.";
+pub const NO_SUCH_CHANNEL: &str = "That channel is gone (or isn't yours to see).";
+
+/// A link in a message, clicked. One to a place or a channel on this server
+/// (PROTOCOL.md › Links to places and channels) opens here, the way the
+/// sidebar opens it (a message in it: scrolled to and flashed); one to a
+/// place this server doesn't have, or a channel that's gone, says so.
+/// Anything else, another server's link or an invite or sign-in link
+/// among them, opens in the browser.
+pub fn open_link(app: &mut App, m: &Model, url: String, acts: &mut Vec<Act>) {
+    match core::links::parse(&m.config.server, &url) {
+        None => acts.push(Act::OpenUrl(url)),
+        Some(core::links::Target::Place(name)) => match places(m).into_iter().find(|p| p.link == Some(name.as_str())) {
+            Some(place) => {
+                if place.view.is_some() {
+                    screen::leaving(app, m, acts);
+                }
+                open_place(&place, acts);
+            }
+            None => acts.push(Act::Toast(NO_SUCH_PLACE.into())),
+        },
+        Some(core::links::Target::Channel { id, message }) => {
+            if !m.channel(&id).is_some_and(|c| c.is_chat()) {
+                return acts.push(Act::Toast(NO_SUCH_CHANNEL.into()));
+            }
+            screen::leaving(app, m, acts);
+            match message {
+                Some(msg) => content::jump_in(app, m, &id, &msg, acts),
+                None => acts.push(Act::Cmd(Cmd::OpenChannel(id))),
+            }
+            app.focus_composer = true;
+        }
     }
 }
 
@@ -58,17 +97,49 @@ pub fn places(m: &Model) -> Vec<Place> {
                 None => l.url.clone(),
             };
             let tip = l.description.clone().filter(|d| !d.is_empty()).unwrap_or_else(|| l.url.clone());
-            let icon = if l.view.as_deref() == Some("board") { "board" } else { "external" };
-            Place { name: l.name, icon, url, tip, id: (!l.id.is_empty()).then_some(l.id), view: None, watch: false, web: None }
+            let board = l.view.as_deref() == Some("board");
+            let icon = if board { "board" } else { "external" };
+            Place { name: l.name, icon, url, tip, id: (!l.id.is_empty()).then_some(l.id), view: None, watch: false, web: None, link: board.then_some("board") }
         })
         .collect();
-    items.push(Place { name: "Draw".into(), icon: "brush", url: String::new(), tip: "The shared drawing board (voice keeps going)".into(), id: None, view: Some(core::View::Draw), watch: false, web: None });
-    items.push(Place { name: "Space".into(), icon: "map", url: String::new(), tip: "Walk around together (voice keeps going)".into(), id: None, view: Some(core::View::Space), watch: false, web: None });
+    items.push(Place { name: "Draw".into(), icon: "brush", url: String::new(), tip: "The shared drawing board (voice keeps going)".into(), id: None, view: Some(core::View::Draw), watch: false, web: None, link: Some("draw") });
+    items.push(Place { name: "Space".into(), icon: "map", url: String::new(), tip: "Walk around together (voice keeps going)".into(), id: None, view: Some(core::View::Space), watch: false, web: None, link: Some("space") });
     // Watch together (a shared YouTube player) and When's good (a week
     // planner) live on the web: straight to them in the browser, signed in.
-    items.push(Place { name: "Watch".into(), icon: "tv", url: String::new(), tip: "Watch YouTube together (opens Yap in your browser, signed in)".into(), id: None, view: None, watch: true, web: Some("watch") });
-    items.push(Place { name: "When's good".into(), icon: "calendar", url: String::new(), tip: "Find a time that works for everyone (opens Yap in your browser, signed in)".into(), id: None, view: None, watch: false, web: Some("when") });
+    items.push(Place { name: "Watch".into(), icon: "tv", url: String::new(), tip: "Watch YouTube together (opens Yap in your browser, signed in)".into(), id: None, view: None, watch: true, web: Some("watch"), link: Some("watch") });
+    items.push(Place { name: "When's good".into(), icon: "calendar", url: String::new(), tip: "Find a time that works for everyone (opens Yap in your browser, signed in)".into(), id: None, view: None, watch: false, web: Some("when"), link: Some("when") });
     items
+}
+
+/// Copy link's toast (the web's words).
+pub const LINK_COPIED: &str = "Link copied. Anyone here who opens it lands right here.";
+
+/// The link to a place (PROTOCOL.md › Links to places and channels): never
+/// the invite key, so it's only for people who already use Yap here.
+pub fn place_link(m: &Model, place: &Place) -> Option<String> {
+    place.link.map(|l| core::links::place_link(&m.config.server, l))
+}
+
+/// The link to a text channel (not voice, not your Personal space).
+pub fn channel_link(m: &Model, c: &crate::protocol::Channel) -> Option<String> {
+    c.is_text().then(|| core::links::channel_link(&m.config.server, &c.id))
+}
+
+/// What's open, as (its name, its link), if it has one: Draw or Space, or a
+/// text channel.
+pub fn here_link(m: &Model) -> Option<(String, String)> {
+    match m.view {
+        Some(v) => Some((view_title(v).0.into(), core::links::place_link(&m.config.server, v.name()))),
+        None => m.channel(&m.config.channel).and_then(|c| Some((c.name.clone(), channel_link(m, c)?))),
+    }
+}
+
+/// Copy link, in a row's right-click menu.
+pub fn copy_link_item(ui: &mut egui::Ui, link: &str, p: &Pal, acts: &mut Vec<Act>) {
+    if theme::menu_item(ui, "Copy link", false, p).clicked() {
+        acts.push(Act::Copy(link.to_string(), LINK_COPIED));
+        ui.close();
+    }
 }
 
 /// Who's at a place: on a shared view, or in the Watch audience (people, A–Z; each once).

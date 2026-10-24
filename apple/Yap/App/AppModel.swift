@@ -470,6 +470,7 @@ final class AppModel {
     @ObservationIgnored private var demoWatched = false
     @ObservationIgnored private var demoCallEnded = false
     @ObservationIgnored private var demoShared = false
+    @ObservationIgnored private var demoLinkOpened = false
 
     func phaseChanged(_ phase: YapClient.Phase) {
         callWatch?.connection(online: phase == .online)
@@ -554,6 +555,10 @@ final class AppModel {
                     try? await Task.sleep(for: .seconds(1))
                     callWatch?.demoEnd(reason)
                 }
+            }
+            if let link = DebugLaunch.current.openLink, !demoLinkOpened {
+                demoLinkOpened = true
+                _ = openLink(link, outside: Self.systemOpener)
             }
             if let passcode = DebugLaunch.current.vaultPasscode, client.vaultLocked {
                 Task { try? await client.unlockVault(passcode: passcode) }

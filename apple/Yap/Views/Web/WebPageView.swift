@@ -6,6 +6,7 @@ import YapCore
 /// places (Draw, Space) in an in-app browser; voice keeps going. Live
 /// cursors are web-only. The web app keeps its own sign-in (its storage),
 /// so Draw/Space load with a one-time sign-in pass and open on that place.
+/// Copy link: the title bar's link button (Mac), the "…" menu (iPhone).
 struct WebPageView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openURL) private var openURL
@@ -17,10 +18,17 @@ struct WebPageView: View {
                 let url = page.url(for: endpoint)
                 #if os(macOS)
                 Window98(title: model.title(of: page), systemImage: "globe") {
-                    Button { model.openInBrowser(page, with: openURL) } label: { Image(systemName: "safari") }
-                        .buttonStyle(TitleBarButtonStyle())
-                        .help("Open in the browser")
-                        .accessibilityLabel("Open in the browser")
+                    HStack(spacing: 2) {
+                        // Like the web's header: a link to this place for anyone here.
+                        Button { model.copyLink(page.link) } label: { Image(systemName: "link") }
+                            .buttonStyle(TitleBarButtonStyle())
+                            .help(LinkWords.help)
+                            .accessibilityLabel("Copy link")
+                        Button { model.openInBrowser(page, with: openURL) } label: { Image(systemName: "safari") }
+                            .buttonStyle(TitleBarButtonStyle())
+                            .help("Open in the browser")
+                            .accessibilityLabel("Open in the browser")
+                    }
                 } content: {
                     WebView(url: url, place: page.place, endpoint: endpoint).well()
                 }
@@ -31,6 +39,7 @@ struct WebPageView: View {
                         ToolbarItem(placement: .primaryAction) {
                             ToolbarMenuButton {
                                 Button("Open in Safari", systemImage: "safari") { model.openInBrowser(page, with: openURL) }
+                                LinkMenuItems(link: page.link)
                             }
                         }
                         .win98Item()
@@ -60,7 +69,9 @@ struct WebPageView: View {
 /// (`WebSignIn`).
 ///
 /// It only ever shows this server: a link elsewhere, or one for a new
-/// window, opens in the browser (`ServerEndpoint.webNavigation`).
+/// window, opens in the browser (`ServerEndpoint.webNavigation`), and a link
+/// to a place or channel here opens in the app (both through `openURL`,
+/// which is `OpensYapLinks`'s).
 ///
 /// Two fixes over the bare view:
 /// - WebKit's view reaches up under the navigation bar (like a scroll view),
@@ -156,6 +167,14 @@ struct YapOnly: WebKit.WebPage.NavigationDeciding {
     func decidePolicy(for action: WebKit.WebPage.NavigationAction,
                       preferences: inout WebKit.WebPage.NavigationPreferences) async -> WKNavigationActionPolicy {
         guard let url = action.request.url else { return .cancel }
+        // A link to a place or channel here, clicked in the page (the board's,
+        // say): the app goes there, as from a message (`OpensYapLinks`), not
+        // the whole web app inside this view. Loads the page makes itself
+        // (its sign-in link, a reload) aren't clicks.
+        if action.navigationType == .linkActivated, action.target?.isMainFrame == true, YapLink(url, on: endpoint) != nil {
+            openURL(url)
+            return .cancel
+        }
         // No target frame: a new window (`target=_blank`, `window.open`).
         switch endpoint.webNavigation(to: url, mainFrame: action.target?.isMainFrame ?? true, newWindow: action.target == nil) {
         case .allow:

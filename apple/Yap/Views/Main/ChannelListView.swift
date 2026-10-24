@@ -4,7 +4,8 @@ import YapVoice
 
 /// The channel list: your Personal space, text channels, voice channels
 /// (with who's in them), places and the Minecraft server. Lists end in
-/// "New …" rows; the one menu holds the rest. iPhone: a plain white list
+/// "New …" rows; the one menu holds the rest. Text channels and places copy
+/// their link from their context menu (long-press / right-click). iPhone: a plain white list
 /// under a navy bar, with your profile card (→ Settings), big Mute / Deafen
 /// buttons and the call at the top and the status bar at the bottom. Mac: a
 /// Win98 pane (the profile card sits above it).
@@ -151,6 +152,8 @@ struct ChannelListView: View {
                 TextChannelRow(channel: channel, selected: selected)
             }
             .contextMenu {
+                LinkMenuItems(link: .channel(channel.id))
+                Divider()
                 Button("Archive channel…", systemImage: "archivebox", role: .destructive) { archiving = channel }
             }
         }
@@ -175,6 +178,11 @@ struct ChannelListView: View {
         ForEach(model.places) { place in
             placeRow(place)
                 .contextMenu {
+                    // The board has a link of its own; a link to another site is just that link.
+                    if place.view == "board" {
+                        LinkMenuItems(link: WebPage.board.link)
+                        Divider()
+                    }
                     Button("Remove place…", systemImage: "trash", role: .destructive) { removingPlace = place }
                 }
         }
@@ -183,6 +191,7 @@ struct ChannelListView: View {
                 PlaceRow(title: page.title, systemImage: page.systemImage,
                          viewers: client.sessions.values.filter { $0.view == page.place }, selected: selected)
             }
+            .contextMenu { LinkMenuItems(link: page.link) }
         }
         if client.endpoint?.watchURL != nil {
             Button { client.openWeb("watch", with: openURL) } label: {
@@ -196,6 +205,7 @@ struct ChannelListView: View {
             .buttonStyle(.plain)
             .help(ScreenText.watchHelp)
             .accessibilityHint("Opens in the browser")
+            .contextMenu { LinkMenuItems(link: .place("watch")) }
             .modifier(PlainRow())
             if let title = client.watchTitle {
                 Text("▶ \(title)")
@@ -220,6 +230,7 @@ struct ChannelListView: View {
             .buttonStyle(.plain)
             .help("A weekly planner: paint when you're free (opens in the browser)")
             .accessibilityHint("Opens in the browser")
+            .contextMenu { LinkMenuItems(link: .place("when")) }
             .modifier(PlainRow())
         }
         ForEach(client.upcomingHangs()) { hang in

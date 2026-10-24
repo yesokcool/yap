@@ -360,7 +360,8 @@ pub fn obs_listening_tip(name: &str) -> String {
 /// Places: the server's links (its board, if it has one; anyone can add an
 /// https link with + or remove one with a right-click), Draw and Space (in
 /// the app), the web-only views (in the browser, signed in), and who's on
-/// each. (The Minecraft server is in the status bar.)
+/// each; a right-click copies a link to any but the plain links. (The
+/// Minecraft server is in the status bar.)
 pub fn places(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec<Act>) {
     if m.links.is_none() && m.server_config.is_none() {
         return;
@@ -372,9 +373,16 @@ pub fn places(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut V
     for place in super::places(m) {
         let here = place.view.is_some() && place.view == m.view;
         let (_, resp) = list_row(ui, p, "place", &place.name, place.icon, &place.name, Look { active: here, ..Default::default() });
-        if let Some(id) = &place.id {
+        // Right-click: Copy link (Draw, Space, Watch, When's good, the board) and Remove (the server's links).
+        let link = super::place_link(m, &place);
+        if link.is_some() || place.id.is_some() {
             theme::context_menu(&resp, p, |ui| {
-                if theme::menu_item(ui, &format!("Remove {}", place.name), false, p).clicked() {
+                if let Some(link) = &link {
+                    super::copy_link_item(ui, link, p, acts);
+                }
+                if let Some(id) = &place.id
+                    && theme::menu_item(ui, &format!("Remove {}", place.name), false, p).clicked()
+                {
                     acts.push(Act::Cmd(Cmd::RemoveLink(id.clone())));
                     ui.close();
                 }

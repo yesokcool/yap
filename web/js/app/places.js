@@ -35,6 +35,23 @@ export const watchParty = new WatchParty($('watch-view'), {
 /** The board's name: its Places link, if this server has a board (SELF_HOSTING.md › A board). */
 const boardName = () => (state.links ?? []).find((l) => l.view === 'board')?.name ?? 'Board';
 
+/** Places a link can open (`/#place=space`): all but a screen share, which only exists while someone shares. */
+export const LINKABLE = ['board', 'draw', 'space', 'when', 'watch'];
+/** Does this server have a board (its Places link)? */
+export const hasBoard = () => (state.links ?? []).some((l) => l.view === 'board');
+
+/**
+ * What's open, as a link anyone here can open: `place=space`, `channel=<id>`
+ * for a text channel, or '' (your Personal space is yours alone; a screen
+ * share comes and goes). The address bar shows it (renderHeader), and the
+ * header's link button copies it.
+ */
+export function hereLink() {
+  if (state.view !== 'chat') return LINKABLE.includes(state.view) && (state.view !== 'board' || hasBoard()) ? `place=${state.view}` : '';
+  const channel = state.channels.get(settings.channel);
+  return channel?.kind === 'text' ? `channel=${encodeURIComponent(channel.id)}` : '';
+}
+
 export const VIEWS = {
   board: { get title() { return boardName(); }, icon: 'board', el: 'board-view' },
   draw: { title: 'Draw', icon: 'brush', el: 'draw-view' },

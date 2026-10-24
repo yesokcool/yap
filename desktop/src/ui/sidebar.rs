@@ -74,6 +74,10 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut 
                     let active = c.id == m.config.channel && m.view.is_none() && !super::screen::in_pane(app, m);
                     let unread = m.is_unread(c) && !active;
                     let (r, resp) = list_row(ui, p, "text", &c.id, "chat", &c.name, Look { active, bold: unread, ..Default::default() });
+                    // Right-click: a link to it, for friends who already use Yap here.
+                    if let Some(link) = super::channel_link(m, c) {
+                        theme::context_menu(&resp, p, |ui| super::copy_link_item(ui, &link, p, acts));
+                    }
                     if let Some(n) = m.mentions.get(&c.id).filter(|n| **n > 0) {
                         sections::badge(ui.painter(), r.right_center() - vec2(5.0, 0.0), *n as usize);
                     } else if resp.hovered() && !active {

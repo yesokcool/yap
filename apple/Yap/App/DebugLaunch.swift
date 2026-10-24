@@ -67,6 +67,8 @@ import UIKit
 ///                                                  shown by iOS as an alert 8 s later (the island opens, or a
 ///                                                  banner): screenshots of it without touching the simulator
 ///   YAP_DEMO_REJOIN=lounge                         offer "You were in Lounge." [Rejoin] as after a relaunch mid-call
+///   YAP_OPEN_LINK=http://127.0.0.1:8789/#place=space  once online, open this link as if it was tapped in a message
+///                                                  (links to places and channels: #channel=<id>&message=<id> too)
 ///   YAP_DEMO_BURST=N                               once online, send N numbered messages to the open channel at once
 ///   YAP_DEMO_SHARE=1                               once in the call, share a moving test card (the sharing UI
 ///                                                  on iPhone without the broadcast extension; nothing is captured)
@@ -123,6 +125,7 @@ struct DebugLaunch {
     var demoShare = false
     var demoLiveCall: String?
     var demoRejoin: String?
+    var openLink: URL?
 
     var usesMemoryStore: Bool { invite != nil }
     var isScripted: Bool { invite != nil }
@@ -153,6 +156,7 @@ struct DebugLaunch {
         launch.search = env["YAP_SEARCH"]
         launch.showPins = env["YAP_SHOW_PINS"] == "1"
         launch.demoRejoin = env["YAP_DEMO_REJOIN"]
+        launch.openLink = env["YAP_OPEN_LINK"].flatMap { URL(string: $0) }
         launch.jump = env["YAP_JUMP"]
         launch.switcherText = env["YAP_SWITCHER"]
         launch.settingsPage = env["YAP_SETTINGS_PAGE"]

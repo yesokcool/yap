@@ -145,6 +145,15 @@ pub fn not_connected(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts:
     });
 }
 
+/// The title bar's link button: copies a link to what's open (a text
+/// channel, Draw or Space; PROTOCOL.md › Links to places and channels).
+fn copy_link_button(ui: &mut egui::Ui, rect: Rect, m: &Model, p: &Pal, acts: &mut Vec<Act>) {
+    let Some((name, link)) = super::here_link(m) else { return };
+    if theme::caption_button(ui, rect, "link", &format!("Copy a link to {name}: anyone here who opens it lands right here"), false, p).clicked() {
+        acts.push(Act::Copy(link, super::LINK_COPIED));
+    }
+}
+
 /// The quieter note after a title-bar title ("end-to-end encrypted"), from
 /// `x`, cut short at `right` (left out when there's no room).
 fn title_note(ui: &egui::Ui, x: f32, y: f32, text: &str, right: f32, p: &Pal) {
@@ -270,8 +279,9 @@ pub fn chat(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec
             let rect = ui.max_rect();
             let b = Rect::from_min_size(egui::pos2(rect.right() - 24.0, rect.top() + 2.0), vec2(22.0, 18.0));
             let pb = b.translate(vec2(-24.0, 0.0));
+            let lb = pb.translate(vec2(-24.0, 0.0));
             // The title and its note get what the buttons leave.
-            let text_right = pb.left() - 6.0;
+            let text_right = lb.left() - 6.0;
             let end = theme::paint_title_upto(ui.painter(), rect, p, Some(icon), &format!("{title} - Yap"), text_right);
             title_note(ui, end, rect.center().y, "voice keeps going", text_right, p);
             if theme::caption_button(ui, b, "x", "Back to the chat", false, p).clicked() {
@@ -280,13 +290,15 @@ pub fn chat(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec
             if theme::caption_button(ui, pb, "users", "People", false, p).clicked() {
                 app.modal = Some(Modal::People { open: None, ask: None });
             }
+            copy_link_button(ui, lb, m, p, acts);
         });
         egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(egui::Margin { left: 2, right: 2, top: 4, bottom: 2 })).show(ui, |ui| super::view_pane(app, ui, m, p, acts, v));
         return;
     }
 
     // Title bar: "<channel> - Yap" and the caption buttons (people, ping,
-    // pinned, pictures, search, lock), laid out first so the title and its
+    // pinned, pictures, search, then the Personal space's lock or a text
+    // channel's link), laid out first so the title and its
     // note shorten with "…" instead of running under them.
     egui::Panel::top("chat-title").exact_size(theme::TITLE_H).resizable(false).show_separator_line(false).frame(egui::Frame::new()).show(ui, |ui| {
         let rect = ui.max_rect();
@@ -302,7 +314,8 @@ pub fn chat(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec
         let shb = pinb.translate(vec2(-24.0, 0.0));
         let sb = shb.translate(vec2(-24.0, 0.0));
         let lock = (personal && m.vault_key.is_some()).then(|| sb.translate(vec2(-26.0, 0.0)));
-        let text_right = if buttons { lock.unwrap_or(sb).left() - 6.0 } else { rect.right() - 4.0 };
+        let link = super::here_link(m).is_some().then(|| sb.translate(vec2(-26.0, 0.0)));
+        let text_right = if buttons { lock.or(link).unwrap_or(sb).left() - 6.0 } else { rect.right() - 4.0 };
         let end = theme::paint_title_upto(ui.painter(), rect, p, Some(if personal { "lock" } else { "chat" }), &title, text_right);
         if personal {
             // A quieter note after the title, like the web's header note.
@@ -349,6 +362,9 @@ pub fn chat(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec
             && theme::caption_button(ui, lb, "lock", "Lock it on this device", false, p).clicked()
         {
             acts.push(Act::Cmd(Cmd::Vault(crate::core::VaultOp::Lock)));
+        }
+        if let Some(lb) = link {
+            copy_link_button(ui, lb, m, p, acts);
         }
     });
 
@@ -571,7 +587,7 @@ fn message_row(app: &mut App, ui: &mut egui::Ui, m: &Model, msg: &Message, group
             let suffix = msg.edited_at.filter(|t| *t > 0).map(|_| ("(edited)", p.gray));
             let r = markup::show(ui, &blocks, p, &app.images, &m.config.server, prefix, suffix, app.spoilers.contains(&msg.id));
             if let Some(url) = r.clicked_link {
-                acts.push(Act::OpenUrl(url));
+                super::open_link(app, m, url, acts);
             }
             if r.clicked_spoiler {
                 app.spoilers.insert(msg.id.clone());

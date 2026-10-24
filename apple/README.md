@@ -16,10 +16,10 @@ app and a native macOS app from the same code. The wire protocol is
 | `Yap/` | The app. Synced folder: new files join the target automatically. |
 | `YapBroadcast/` | The ReplayKit broadcast upload extension (`SampleHandler`): iPhone and iPad screen sharing. Links only `YapScreenLink`. |
 | `YapLive/` | The widget extension (`YapLiveBundle`): the voice call's Live Activity (Lock Screen + Dynamic Island). `CallActivityAttributes`, `CallButtonIntent` and `CallActivityViews` are in the app target too (a membership exception); the extension borrows `Yap/App/Theme.swift` the same way. |
-| `Yap/App/` | What the screens share: `AppModel`, `Theme`, `AppIdentity`, `Look` (one look; the status bar); `CallWatch` (a call ending off screen on iPhone: "You left Lounge"), `LiveCall` (the call's Live Activity), `Notifier`, `BroadcastPicker` (iOS's screen-broadcast sheet); `ChannelController` (an open channel's behaviour: opening, jumps, edit/reply/staged picture, Send/Esc/↑, the channel menu's sheets), `SuggestionEngine`, `MessageMenu` and `ChannelMenuItems`, `InlineText` (message text), `GifSearch` / `EmojiBrowser` (the pickers' logic), `Prompts` (Ping everyone, Sign out others, copy), wording (`VoiceOptions`, `Stamps` for dates, `ColorNames`), `MediaViews` (looping GIF video, animated images), `SystemControls` (Paste, date pickers, `FlowLayout`); round 12: `ChannelDrafts` (what's typed in each channel), `MentionBadge` (unread mentions on the icon), `Rejoin` ("You were in Lounge." after a relaunch), `MicVolume` (Settings › Voice › Mic volume). |
+| `Yap/App/` | What the screens share: `AppModel`, `Theme`, `AppIdentity`, `Look` (one look; the status bar); `CallWatch` (a call ending off screen on iPhone: "You left Lounge"), `LiveCall` (the call's Live Activity), `Notifier`, `BroadcastPicker` (iOS's screen-broadcast sheet); `ChannelController` (an open channel's behaviour: opening, jumps, edit/reply/staged picture, Send/Esc/↑, the channel menu's sheets), `SuggestionEngine`, `MessageMenu` and `ChannelMenuItems`, `InlineText` (message text), `GifSearch` / `EmojiBrowser` (the pickers' logic), `Prompts` (Ping everyone, Sign out others, copy), wording (`VoiceOptions`, `Stamps` for dates, `ColorNames`), `MediaViews` (looping GIF video, animated images), `SystemControls` (Paste, date pickers, `FlowLayout`); round 12: `ChannelDrafts` (what's typed in each channel), `MentionBadge` (unread mentions on the icon), `Rejoin` ("You were in Lounge." after a relaunch), `MicVolume` (Settings › Voice › Mic volume); `PlaceLinks` (Copy link on text channels and places; such a link tapped anywhere opens here, `OpensYapLinks`). |
 | `Yap/Views/`, `Yap/Components/` | The screens and their **Windows 98** building blocks (`Views/Voice/TalkCues98`: the tooltip, the warning line and the volume badge round 10 added). |
 | `YapKit/` | Local Swift package, everything that isn't a view. |
-| `YapKit/Sources/YapCore` | Protocol models and frames, `YapConnection` (WebSocket + heartbeat + backoff + network changes), `SendLine` (sends the server turns away), `YapClient` (identity and all the state screens read; `YapClient+Account/Events/Messages/People/Search/Vault/Extras.swift` by topic), `Mentions` (the server's mention rule), emoji codec and catalog, message formatter, KLIPY client, Keychain. No WebRTC. |
+| `YapKit/Sources/YapCore` | Protocol models and frames, `YapConnection` (WebSocket + heartbeat + backoff + network changes), `SendLine` (sends the server turns away), `YapClient` (identity and all the state screens read; `YapClient+Account/Events/Messages/People/Search/Vault/Extras.swift` by topic), `Mentions` (the server's mention rule), emoji codec and catalog, message formatter, KLIPY client, Keychain, `YapLink` (links to places and channels). No WebRTC. |
 | `YapKit/Sources/YapVoice` | WebRTC mesh: `VoiceEngine` + `Peer` (perfect negotiation, Opus tuning, transmit gate, speaking levels, ICE restarts, link quality), `VoiceGate` (the transmit gate table), `VoiceHealth` (`PathWatch` ICE restart timing, `LinkQuality` "weak connection", `OwnLinkQuality` "Your connection is dropping some of your audio", `BoostLimiter`), `TalkCues` (`MutedNudge`, `PushToTalkLatch`, `ClipWatch`, `MediaDip`), `CallKeeper` (keeping calls across reconnects), `LevelMonitor` (the mic level while you're alone), `VoiceController` (join → own echo → offer, hints, the audio session, watching and sharing a screen), `MicCheck` (Hear yourself), `SyntheticAudioDevice` (fake mic for tests), `PeerStats` (one connection's `getStats()`, boiled down; never an address); the call report: `CallReport` (the notes and their text), `CallNotes` (takes them during a call) and `CallReportStore` (the last three), `CallSurroundings` (device, audio route, network kind, `MicModes`); screen sharing: `ScreenShare` (`ScreenQuality` presets, the `ScreenWatch` viewer states, `ScreenAudience` "Watching: …", H.264-first `ScreenCodecs`), `ScreenRenderer` (decoded frames → `AVSampleBufferDisplayLayer`), `ScreenFeeder` (+ `FrameRelay`, `SyntheticScreenFeeder`), `MacScreenFeeder` (ScreenCaptureKit + the system picker), `BroadcastScreenFeeder` (iPhone/iPad: the extension's pictures); `BackgroundCall` (the rules for a call off screen on iPhone). |
 | `YapKit/Sources/YapScreenLink` | The extension ↔ app link: a Unix domain socket in the App Group's container, the framing (`ScreenLinkWire`), both ends, and `FrameScaler` (VideoToolbox). No WebRTC. |
 | `Tools/` | `web-voice-peer.mjs` + `run-voice-interop.sh` (voice interop test), `seed-demo.mjs` (screenshot data), `make-icons.swift` (every raster icon, app + web: the pixel speech bubble on teal). |
@@ -405,12 +405,22 @@ ending, and `HideMyIPTests` (on = relay only, with or without a relay; the
 call says nobody can be reached). The app's `SecurityAppTests`: the web
 view's sign-in owner, the password and Hide my IP words.
 
+Links to places and channels (`PlaceLinkTests`): Copy link's address (the
+origin as the web shows it, never the key), ids percent-encoded both ways
+(`+` read as a space, like `URLSearchParams`), this server's links read as
+ones to open here (spelled differently, in any order, a place before a
+channel), an unknown place still one, and these left to the browser:
+another server, http for https, another port or page, an empty place or
+channel, and any invite or sign-in link (`key=` / `handoff=`, in the
+fragment or the query).
+
 **App target:** `xcodebuild test -project Yap.xcodeproj -scheme Yap -destination 'platform=iOS Simulator,id=<UDID>'`
 (identity, no pixel font shipping, a stored Apple/Arch skin loading as Windows 98 with light/dark kept, the status bar, edit drafts, skin tone,
 color names, away-message ends, composer suggestions, the web's words for the sign-on hint,
 the wrong-password help, the join bars and who sees them (owner and mods), the password words and
 "Choose a password"'s once-per-device memory, the questions, screen sharing's words, and who gets the voice
-roster's popover and which owner/mod actions it offers). It imports YapCore `@testable`
+roster's popover and which owner/mod actions it offers, and where a link to a place or channel goes:
+`PlaceLinkAppTests`, with a real WebKit page handing one to the app). It imports YapCore `@testable`
 for `loadDemo` / `receiveForTesting`. Round 12 (`Round12Tests`): each channel's draft
 kept and given back (an edit gives back the draft behind it; never into another channel;
 signing out forgets them), the "↓ New messages" pill (someone else's message while scrolled
@@ -479,6 +489,8 @@ Advanced (its page on iPhone, unfolded on the Mac); `YAP_SETTINGS_SCROLL=bottom`
 scrolls an iPhone Settings page to its end (Voice's Call report); `YAP_SNAPSHOT_HEIGHT=900`
 makes the Mac's Settings window that tall before the snapshot;
 `YAP_DEMO_REJOIN=lounge` offers "You were in Lounge." as after a relaunch mid-call;
+`YAP_OPEN_LINK=http://127.0.0.1:8789/#place=space` (or `#channel=general&message=<id>`) opens a link to a
+place or channel once online, as if it was tapped in a message;
 `YAP_UNREAD_LAST=N` pretends the open channel's last N messages are
 new (the "New since" line, and the Jump to first unread pill when it's off
 screen); `YAP_DRAFT=text` starts the open channel's composer with that text
@@ -1189,6 +1201,38 @@ The web's features from the same round, in the app's words:
   default input's volume (`kAudioDevicePropertyVolumeScalar`), the same as
   System Settings › Sound › Input; audio interfaces with a hardware gain
   knob have none, and the row doesn't show.
+
+## Links to places and channels (PROTOCOL.md › Links to places and channels)
+
+- **Copy link** for every text channel and place: Draw, Space, Watch,
+  When's good, and the board when the server has one. Not voice channels,
+  the Personal space (yours alone) or a Places link to another site.
+  Long-press (iPhone, iPad) or right-click (Mac) the row in the channel
+  list; also the open channel's "…" menu, and an in-app page's "…" menu
+  (iPhone) or its title bar's link button (Mac). iPhone and iPad add
+  **Share link…** next to it. The link is the server's origin as the web
+  shows it, never the invite key: `https://<server>/#place=space`,
+  `https://<server>/#channel=<id>` (`ServerEndpoint.link(to:)`, ids
+  percent-encoded). The notice says the web's words: "Link copied. Anyone
+  here who opens it lands right here."
+- **Tapping one opens it here**, not in Safari, when it's this server's:
+  the same origin as the app's server, the path `/`, `place` or `channel`
+  in the fragment, and no `key=` or `handoff=` (an invite or sign-in link
+  keeps its old way; `YapLink(_:on:)` in YapCore). Every link the app opens
+  goes through one `OpenURLAction` (`OpensYapLinks` on the root view), so
+  message text, a Places row and the in-app web view's links that leave
+  the page (a new window) all get it; a link clicked inside the web view
+  that points at a place or channel here also goes to the app instead of
+  loading the whole web app in the view. A place opens the way its row
+  does: Draw, Space and the board in the in-app web view, Watch and When's
+  good in the browser, signed in. A text channel opens, scrolled to
+  `message` and flashed when the link names one (as a tapped notification
+  does). A place this server doesn't have (or the board on a server
+  without one) says "That link is to a place this server doesn't have.";
+  a channel that's gone, "That channel is gone (or isn't yours to see)."
+  Anything else opens in the browser as before. Right after launch it waits
+  for the channels (up to 30 s). `YAP_OPEN_LINK=<link>` (DEBUG) opens one
+  once online, as if it was tapped.
 
 ## How voice works here
 

@@ -355,8 +355,8 @@ final class ChannelController {
 }
 
 /// A channel's "…" menu: pins, pictures, a poll,
-/// then Ping / Invite / Archive (or, in your Personal space, its passcode
-/// and Lock), and Search.
+/// then Ping / Invite / Copy link / Archive (or, in your Personal space, its
+/// passcode and Lock: it has no link), and Search.
 struct ChannelMenuItems: View {
     @Environment(AppModel.self) private var model
     var chat: ChannelController
@@ -377,6 +377,9 @@ struct ChannelMenuItems: View {
         } else {
             Button("Ping everyone…", systemImage: "megaphone") { chat.pinging = true }
             Button("Invite someone…", systemImage: "person.badge.plus") { model.showSettings(.invite) }
+            if chat.channel?.kind == .text {
+                LinkMenuItems(link: .channel(chat.channelId))
+            }
             Divider()
             Button("Archive channel…", systemImage: "archivebox", role: .destructive) { chat.archiving = true }
         }

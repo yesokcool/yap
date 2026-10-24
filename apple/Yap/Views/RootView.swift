@@ -44,6 +44,8 @@ struct RootView: View {
         }
         .overlay(alignment: .top) { NoticeBanner() }
         .environment(\.appColorScheme, colorScheme)
+        // A link to a place or channel here opens in the app, wherever it's tapped.
+        .modifier(OpensYapLinks())
     }
 }
 

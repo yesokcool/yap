@@ -274,7 +274,8 @@ pub fn jump_to_reply(app: &mut App, m: &Model, r: &ReplyRef, acts: &mut Vec<Act>
     jump_in(app, m, r.channel_id.as_deref().unwrap_or(&m.config.channel), &r.id, acts)
 }
 
-fn jump_in(app: &mut App, m: &Model, channel: &str, id: &str, acts: &mut Vec<Act>) {
+/// Scroll to a message in `channel` (opening it first if need be) and flash it.
+pub fn jump_in(app: &mut App, m: &Model, channel: &str, id: &str, acts: &mut Vec<Act>) {
     let loaded = channel == m.config.channel && m.history.get(channel).is_some_and(|h| h.messages.iter().any(|x| x.id == id));
     if loaded && m.view.is_none() {
         app.jump = Some(id.to_string());

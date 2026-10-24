@@ -4,12 +4,14 @@
 //!
 //! Here: the shared state, starting the core, its loop and connection.
 //! The model is in `model`, commands and events in `cmd`, plain text
-//! helpers in `text`; server messages are handled in `msg`, commands in
-//! `cmds`, and `vault`, `search` and `voice` hold those parts of the core.
+//! helpers in `text`, links to places and channels in `links`; server
+//! messages are handled in `msg`, commands in `cmds`, and `vault`, `search`
+//! and `voice` hold those parts of the core.
 
 mod cmd;
 mod cmds;
 mod health;
+pub mod links;
 mod model;
 mod msg;
 mod outbox;

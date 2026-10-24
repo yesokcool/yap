@@ -484,7 +484,7 @@ await test('iPhone: Add to Home Screen shows the steps; the shortcut opens signe
   const home = await app.newPage();
   await home.goto(shortcut);
   await home.waitForFunction(() => yap.state.status === 'online' && yap.settings.token, null, { timeout: 10000 });
-  assert.equal(await home.evaluate(() => location.hash), '', 'the pass leaves the address bar');
+  assert.doesNotMatch(await home.evaluate(() => location.hash), /handoff=|key=/, 'the pass (and the key) leave the address bar');
   assert.equal(await home.evaluate(() => document.querySelector('#welcome-dialog')?.open ?? false), false, 'no sign-in needed');
   await app.close();
 });
@@ -1261,7 +1261,7 @@ await test('a tapped browser push opens its message: from a closed Yap (#channel
   const page = await b.context().newPage();
   await page.goto(`${BASE}/#channel=general&message=${target.id}`);
   await page.waitForSelector(`.msg.flash:has([data-id="${target.id}"])`, { timeout: 10000 });
-  assert.equal(new URL(page.url()).hash, '', 'the address is tidied up');
+  assert.equal(new URL(page.url()).hash, '#channel=general', 'the address is tidied up: just where you are now');
   await page.close();
   // Open: the service worker posts { t: 'yap.open' } to the tab.
   const mine = await b.evaluate(() => `p_${yap.settings.uid}`);
@@ -3140,6 +3140,43 @@ await test('board opens inside Yap during a call; cursors show for others', asyn
   await a.click('[data-action="open-channel"][data-id="general"]');
   assert.equal(await a.isVisible('#messages'), true);
   await cursor.waitFor({ state: 'detached', timeout: 5000 });
+});
+
+await test('links to places and channels: the address says what is open, the header copies it, a link in chat opens here, a fresh tab lands there', async () => {
+  await catchCopies(a);
+  for (const place of ['space', 'board', 'when']) {
+    await a.click(`[data-action="open-view"][data-view="${place}"]`);
+    assert.equal(await a.evaluate(() => location.hash), `#place=${place}`, place);
+  }
+  await a.click('#copy-link');
+  await a.waitForFunction(() => globalThis.__copied);
+  assert.equal(await a.evaluate(() => globalThis.__copied), `${BASE}/#place=when`);
+  await a.click('[data-action="open-channel"][data-id="general"]');
+  assert.equal(await a.evaluate(() => location.hash), '#channel=general');
+  // Your Personal space has no link (it's yours alone): nothing in the address, no button.
+  const personal = await a.evaluate(() => [...yap.state.channels.values()].find((c) => c.kind === 'personal').id);
+  await a.click(`[data-action="open-channel"][data-id="${personal}"]`);
+  assert.deepEqual([await a.evaluate(() => location.hash), await a.isHidden('#copy-link')], ['', true]);
+  await a.click('[data-action="open-channel"][data-id="general"]');
+  await a.screenshot({ path: path.join(OUT, 'desktop-copy-link.png') });
+  // Ben shares a link in chat; Ada clicks it: When's good opens in this tab, not a new one.
+  const tabs = a.context().pages().length;
+  await b.click('[data-action="open-channel"][data-id="general"]');
+  await b.fill('#input', `pick a time ${BASE}/#place=when ${RUN}`);
+  await b.press('#input', 'Enter');
+  await a.click(`.msg a[href="${BASE}/#place=when"] >> nth=-1`);
+  await a.waitForFunction(() => yap.state.view === 'when' && location.hash === '#place=when');
+  assert.equal(a.context().pages().length, tabs, 'no new tab');
+  // A fresh tab opened on a link lands there; one pasted into its address bar goes there too.
+  const tab = await a.context().newPage();
+  await tab.goto(`${BASE}/#place=draw`);
+  await tab.waitForFunction(() => yap.state.status === 'online' && yap.state.view === 'draw', null, { timeout: 10000 });
+  await tab.evaluate(() => { location.hash = 'channel=general'; });
+  await tab.waitForFunction(() => yap.state.view === 'chat' && yap.settings.channel === 'general');
+  await tab.evaluate(() => { location.hash = 'place=nowhere'; });
+  await tab.waitForSelector('#toast:not([hidden]):has-text("doesn’t have")', { timeout: 3000 });
+  await tab.close();
+  await a.click('[data-action="open-channel"][data-id="general"]');
 });
 
 await test('draw together: strokes show up live for the other person', async () => {

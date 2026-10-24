@@ -6,7 +6,7 @@ import { icon } from '../icons.js';
 import { esc } from '../format.js';
 import { $, conn, isMod, state } from './state.js';
 import { avatar, hangWhen, holdFocus } from './ui.js';
-import { VIEWS, watchParty } from './places.js';
+import { VIEWS, hereLink, watchParty } from './places.js';
 import { obsListening, voice, voiceMember } from './voice-ui.js';
 import { isUnread, updateTitle } from './chat.js';
 import { inviteWarning } from './people.js';
@@ -183,12 +183,25 @@ export function renderHeader() {
     ? `${icon(view.icon)}<span>${view.title}</span>${state.voiceWanted ? '<small class="muted header-note view-note">voice keeps going</small>' : ''}`
     : channel?.kind === 'personal' ? `${icon('lock')}<span>${narrow ? 'Personal' : 'Personal space'}</span><small class="muted header-note">${state.vault.wrap ? (state.vault.key ? 'end-to-end encrypted' : 'locked') : 'only you · not encrypted'}</small>${state.vault.key ? `<button class="link-btn header-lock" data-action="vault-lock" title="Lock it on this device">Lock</button>` : ''}`
       : channel ? `${icon('chat')}<span>${esc(channel.name)}</span>` : '';
+  $('copy-link').hidden = !hereLink();
+  showInAddress();
   const locked = channel?.kind === 'personal' && state.vault.wrap && !state.vault.key;
   $('input').disabled = Boolean(locked);
   // (A placeholder that wraps shows half a second line.)
   $('input').placeholder = locked ? (narrow ? 'Unlock it to write' : 'Unlock your Personal space to write')
     : channel?.kind === 'personal' ? (narrow ? 'Note to self' : 'Note to self: a link, a picture, anything')
       : channel ? `Message ${channel.name}` : 'Message';
+}
+
+/**
+ * The address bar says what's open (`/#place=space`, `/#channel=…`), so it can
+ * be copied or shared like any page's. Not while signing in, while it holds a
+ * sign-in pass (Add to Home Screen), or inside the iPhone/Mac app.
+ */
+function showInAddress() {
+  if (state.status !== 'online' || location.hash.includes('handoff=') || document.documentElement.dataset.embed) return;
+  const here = hereLink();
+  if (location.hash !== (here ? `#${here}` : '')) history.replaceState(history.state, '', `${location.pathname}${location.search}${here ? `#${here}` : ''}`);
 }
 
 export function renderUserPanel() {

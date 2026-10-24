@@ -1,6 +1,18 @@
 {
-  "current": "0.50.0",
+  "current": "0.51.0",
   "releases": [
+    {
+      "version": "0.51.0",
+      "date": "2026-10-24",
+      "title": "Links to every place",
+      "items": [
+        "Desktop app: right-click a text channel or a place (Draw, Space, Watch, When's good, the board) and pick Copy link to send friends straight there; the title bar's link button copies one to what's open.",
+        "Every place (Draw, Space, Watch, When's good, the board) and text channel has its own link: the button next to its name copies it, and anyone here who opens it lands right there.",
+        "Desktop app: a link in a message to a channel, a message or a place on your server (Draw, Space, Watch, When's good, the board) now takes you there.",
+        "iPhone and Mac: Copy link on a text channel or a place (long-press or right-click it, or its \"…\" menu) gives a link that takes anyone here straight there.",
+        "iPhone and Mac: tapping a link to a place or channel on your server opens it right in the app."
+      ]
+    },
     {
       "version": "0.50.0",
       "date": "2026-10-24",
@@ -1009,6 +1021,13 @@
     }
   ],
   "highlights": [
+    {
+      "date": "2026-10-24",
+      "emoji": "🔗",
+      "title": "Links to every place",
+      "text": "Draw, Space, Watch, When's good, the board and every text channel have their own link. Copy it (the link button by the name on the web; right-click or long-press in the apps) and send it: anyone here who opens it lands right there.",
+      "where": "Everywhere"
+    },
     {
       "date": "2026-10-24",
       "emoji": "🔒",

@@ -1,4 +1,5 @@
-//! The quick switcher (Ctrl/⌘+K): channels, places, people, actions.
+//! The quick switcher (Ctrl/⌘+K): channels, places, people, actions (and
+//! Copy a link to what's open).
 
 use super::*;
 
@@ -84,6 +85,13 @@ pub fn switcher(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut
         }
         if let Some(s) = score(label, &q) {
             hits.push((s.max(if q.is_empty() { 4 } else { 0 }), 3, label.to_string(), "action", icon, Hit::Action(id)));
+        }
+    }
+    // A link to what's open (a text channel, Draw or Space), not to a screen you're watching.
+    if let Some((name, _)) = super::super::here_link(m).filter(|_| !super::super::screen::in_pane(app, m)) {
+        let label = format!("Copy a link to {name}");
+        if let Some(s) = score(&label, &q) {
+            hits.push((s.max(if q.is_empty() { 4 } else { 0 }), 3, label, "action", "link", Hit::Action("link")));
         }
     }
     hits.sort_by_key(|h| (h.0, h.1));
@@ -179,6 +187,11 @@ pub fn switcher(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut
             "pins" => {
                 acts.push(Act::Cmd(Cmd::Pins(m.config.channel.clone())));
                 app.side = Some(super::super::side::Side::Pins);
+            }
+            "link" => {
+                if let Some((_, link)) = super::super::here_link(m) {
+                    acts.push(Act::Copy(link, super::super::LINK_COPIED));
+                }
             }
             "ping" => app.next_modal = Some(dialogs::Modal::Ping { note: String::new() }),
             "hang" => app.next_modal = Some(dialogs::Modal::PlanHang(PlanHang::new(m))),

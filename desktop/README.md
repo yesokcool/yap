@@ -553,6 +553,25 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   (`/api/minecraft`, polled once a minute while focused; hover for who's on,
   click to copy the address). A server without one shows no Minecraft at all
   and is never polled.
+- **Links to places and channels** (PROTOCOL.md › Links to places and
+  channels; `core/links.rs`): right-click a text channel, or Draw, Space,
+  Watch, When's good or the board, for **Copy link**
+  (`<server>/#channel=<id>`, `<server>/#place=space`; never the invite key,
+  so it's for people who already use Yap here); the chat's title bar has the
+  same as a link button for the open text channel, Draw or Space, and so
+  does the quick switcher ("Copy a link to general"). "Link copied. Anyone
+  here who opens it lands right here." (the web's words). Voice channels,
+  the Personal space and the server's plain links have none. **Clicking
+  one in a message** opens it here when it's this server's (the same
+  address, path `/`, `#place=` or `#channel=`, and no `key=` or `handoff=`:
+  invite and sign-in links still go to the browser), the way the sidebar
+  opens it: Draw and Space in the app, Watch and When's good in the browser
+  signed in, the board at `<server>/board`, a channel switched to (with
+  `&message=<id>`, that message scrolled to and flashed, older pages loaded
+  to find it, like a search result). A place this server doesn't have says
+  "That link is to a place this server doesn't have.", a channel that's
+  gone "That channel is gone (or isn't yours to see)." (`ui::open_link`).
+  Every other link opens in the browser, as before.
 - **Sidebar footer:** pinned at the very bottom of the left panel, outside
   the scrolling list (like the web's): "v0.x · what's new" (the changelog),
   Updates (this app's updates: checks and opens the update dialog) and Privacy
@@ -783,7 +802,7 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
     (plays now if nothing is on) and the browser opens Watch together signed in.
   - **Quick switcher:** Ctrl+K (⌘K) — channels, Places, people (opens them in
     People), actions (Settings, Catch up, the shelf, pins, Ping, Plan a hang,
-    away message, the soundboard in a call); ↑/↓, Enter, Esc; the last row
+    away message, the soundboard in a call, Copy a link to what's open); ↑/↓, Enter, Esc; the last row
     always searches messages.
   - **Since you left:** opening a channel you hadn't read (or coming back after
     a restart) draws a quiet "New since 9:41 PM" line above the first new

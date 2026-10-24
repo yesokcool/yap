@@ -1477,7 +1477,11 @@ a.btn { text-decoration: none; }
 /* Phones: the place's name gets the header ("voice keeps going" cut it to "Space voice keeps g"). */
 @media (max-width: 600px) { .view-note { display: none; } }
 /* …and Personal space's "only you · not encrypted" (it cut the title to "P…"; the space itself says it). */
-@media (max-width: 600px) { .chat-header .header-note { display: none; } }
+@media (max-width: 600px) {
+  .chat-header .header-note { display: none; }
+  /* Room for the name next to the link button: no "- Yap" after it on a phone. */
+  .chat-header h1:not(:empty)::after { content: none; }
+}
 .yt-watch .icon { width: 11px; height: 11px; }
 
 .poll { display: flex; flex-direction: column; gap: 3px; max-width: 360px; margin: 4px 0 2px; padding: 4px; background: var(--window); box-shadow: var(--sunken); }

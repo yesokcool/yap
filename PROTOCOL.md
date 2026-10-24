@@ -562,6 +562,20 @@ top hit; ↑/↓ move; Esc closes. The last row is always **Search messages for
 "…"**, which opens search with that text (search's own shortcut moves to
 Ctrl/⌘+Shift+F; ⌘F on Mac in native apps).
 
+### Links to places and channels (client only)
+Every place and text channel has a link anyone here can open:
+`https://<server>/#place=draw|space|watch|when|board` (the board only on a
+server with one) and `https://<server>/#channel=<id>` (`&message=<id>` jumps
+to a message, as pushes do). No invite key and no Personal space: a link is
+for people who already use Yap. The web app keeps what's open in its address
+bar (so it copies and shares like any page; not while it holds a sign-in pass,
+nor in `&embed=1` pages), the header's link button copies it, and a click on
+such a link opens it in the same tab (Ctrl/⌘/Shift-click: a new one), as does
+one pasted into the address bar. One for a place this server doesn't have, or
+a channel that's gone, says so. Opened signed out, it signs in first, then
+goes there. Native apps may open these in the browser, or go there
+themselves.
+
 ### Since you left
 Clients already remember, per channel, the newest message time they've read
 (`lastRead`). On opening a channel with unread messages, show a quiet

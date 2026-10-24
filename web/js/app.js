@@ -17,7 +17,7 @@ import { applyTheme } from './app/look.js';
 import { postSound } from './app/uploads.js';
 import { bindUpdates, onBuild, reloadForUpdate, restoreAfterUpdate } from './app/updates.js';
 import { syncBrowserPush } from './app/push.js';
-import { VIEWS, boardCursors, drawBoard, setView, spaceWorld, watchParty, whenPlanner } from './app/places.js';
+import { LINKABLE, boardCursors, drawBoard, hasBoard, hereLink, setView, spaceWorld, watchParty, whenPlanner } from './app/places.js';
 import { adoptResumed, bindShareDialog, onVoiceRowWheel, setVolumeFor, changeScreenShare, deferLeaveChime, dismissRejoin, dropGhost, holdGhost, joinVoice, leaveVoice, onSound, onVoice, openVoiceMore, rejoinVoice, renderSharePanel, renderVoicePanel, stopWatchingScreen, toggleDeafen, toggleMute, toggleScreenShare, voice, watchScreen } from './app/voice-ui.js';
 import { bindChannelDialog, bindLinkDialog, openChannelDialog, openLinkDialog, renderChannels, renderConn, renderHeader, renderLinks, renderRequests, renderUserPanel, showVersion, startMinecraft } from './app/sidebar.js';
 import { renderJumpPill, renderMessages, renderNewPill, renderTyping, tapMessage } from './app/messages.js';
@@ -146,7 +146,7 @@ function readInviteFromUrl() {
   if (name && !settings.name) save({ name });
   const place = hash.get('place');
   if (place) state.openPlace = place;
-  // A browser push tapped while Yap was closed (sw.js): open that message once we're in.
+  // A shared channel link, or a browser push tapped while Yap was closed (sw.js): open it once we're in.
   const channel = hash.get('channel');
   if (channel) state.openMessage = { channelId: channel, id: hash.get('message') };
   if (location.hash) history.replaceState(null, '', location.pathname + location.search);
@@ -614,10 +614,11 @@ function onReady(msg) {
     state.restoreView = null;
     setView(view);
   }
-  // A link straight to a place (the desktop/iPhone apps open /#place=when).
-  if (state.openPlace && VIEWS[state.openPlace]) {
-    setView(state.openPlace);
+  // A link straight to a place (a shared /#place=space; the desktop/iPhone apps open /#place=when).
+  if (state.openPlace) {
+    const place = state.openPlace;
     state.openPlace = null;
+    openPlace(place);
   }
   if (state.openMessage) {
     const { channelId, id } = state.openMessage;
@@ -632,6 +633,32 @@ function onReady(msg) {
   renderAll();
   requestUnreadCounts();
   if (admitted) welcomeIn();
+}
+
+/** A place a link points at (`#place=…`), if it's one a link can open here. */
+function openPlace(place) {
+  if (!LINKABLE.includes(place) || (place === 'board' && !hasBoard())) return toast('That link is to a place this server doesn’t have.');
+  setView(place);
+}
+
+/**
+ * Go where a Yap link points (`#place=space`, `#channel=<id>[&message=<id>]`),
+ * in this tab. False if it isn't such a link: an invite or a sign-in link
+ * (`key=`, `handoff=`) is left to a fresh load, which handles those.
+ */
+function followLink(hash) {
+  const p = new URLSearchParams(hash.replace(/^#/, ''));
+  if (p.has('key') || p.has('handoff')) return false;
+  const place = p.get('place');
+  const channel = p.get('channel');
+  if (place) {
+    if (state.status === 'online') openPlace(place);
+    else state.openPlace = place; // (once we're in: onReady)
+  } else if (channel) {
+    if (state.status === 'online' && !state.channels.has(channel)) toast('That channel is gone (or isn’t yours to see).');
+    else openFromPush(channel, p.get('message'));
+  } else return false;
+  return true;
 }
 
 /** A tapped push (sw.js): that message, or its channel; once we're connected if we aren't yet. */
@@ -736,6 +763,22 @@ export function renderAll() {
 
 function bindUi() {
   document.addEventListener('click', onClick);
+  // A link to a place or channel here (shared in chat, say): open it in this tab, not a new one.
+  // (Ctrl/⌘/Shift/middle click still gets a new tab. Inside the iPhone/Mac app's page, the app
+  // takes it: it opens the place or channel its own way.)
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest?.('a[href]');
+    if (!a || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || document.documentElement.dataset.embed) return;
+    let url;
+    try {
+      url = new URL(a.href);
+    } catch {
+      return;
+    }
+    if (url.origin === location.origin && url.pathname === '/' && followLink(url.hash)) e.preventDefault();
+  });
+  // One opened in this tab some other way (pasted into the address bar): go there.
+  addEventListener('hashchange', () => followLink(location.hash));
   // A browser push tapped while this tab was open (sw.js): go to its message.
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('message', (e) => {
@@ -1004,6 +1047,12 @@ function onClick(e) {
     case 'create-obs':
       if (!$('obs-channel').value) return toast('Make a voice channel first.');
       return conn?.send({ t: 'obs.create' });
+    case 'copy-link': {
+      const here = hereLink();
+      if (!here) return;
+      const link = `${location.origin}/#${here}`;
+      return navigator.clipboard.writeText(link).then(() => toast('Link copied. Anyone here who opens it lands right here.'), () => copyByHand('Link to this', link));
+    }
     case 'copy-obs':
       return navigator.clipboard.writeText($('obs-link').value).then(() => toast('OBS link copied. In OBS: Sources › + › Browser › paste it as the URL.'), () => $('obs-link').select());
     case 'show-all':
