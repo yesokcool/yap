@@ -393,8 +393,8 @@ final class VoiceInteropTests {
         #expect(webSide.remoteDescriptionHasTunedOpus == true, "native's SDP carries the Opus tuning")
 
         // Mute: the web sees the flag and the level drops.
-        var nudges: [(at: ContinuousClock.Instant, first: Bool)] = []
-        voice.onEvent = { if case .talkingWhileMuted(let first) = $0 { nudges.append((.now, first)) } }
+        var nudges: [(at: ContinuousClock.Instant, blip: Bool, first: Bool)] = []
+        voice.onEvent = { if case .talkingWhileMuted(let blip, let first) = $0 { nudges.append((.now, blip, first)) } }
         voice.toggleMute()
         try await waitUntil("web sees mute flag and silence", timeout: .seconds(8)) {
             guard let latest = VoiceTestEnv.webStatus()?.scenarios["webFirst"]?.latest else { return false }
@@ -403,12 +403,13 @@ final class VoiceInteropTests {
         // Voice activity measures the mic before the mute gate (so it can reopen).
         let muted = try #require(await voice.engine.peerStats().first)
         print("VOICE local level while muted: \(muted.localAudioLevel)")
-        // …so talking while muted is seen: "You're muted", a blip at most every 5 s.
+        // …so talking while muted is seen: "You're muted" at most every 5 s, the blip only the first time.
         try await waitUntil("a second nudge", timeout: .seconds(13)) { nudges.count >= 2 }
         let gaps = zip(nudges.dropFirst(), nudges).map { ($0.at - $1.at) / .seconds(1) }
         print("TALK muted: level \(Int(VoiceGate.dB(voice.engine.localLevel))) dBFS, nudges \(nudges.count), gaps \(gaps.map { String(format: "%.2f", $0) })")
         #expect(VoiceGate.dB(voice.engine.localLevel) > -40, "the level before the mute")
         #expect(nudges.first?.first == true && nudges.dropFirst().allSatisfy { !$0.first }, "explained once")
+        #expect(nudges.first?.blip == true && nudges.dropFirst().allSatisfy { !$0.blip }, "one blip per mute")
         #expect(gaps.allSatisfy { $0 >= 4.95 }, "at most every 5 s: \(gaps)")
         #expect(voice.mutedNudgeShown || nudges.count >= 2)
         voice.onEvent = nil

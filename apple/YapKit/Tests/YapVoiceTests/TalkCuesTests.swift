@@ -10,20 +10,39 @@ import Testing
 struct TalkCuesTests {
     // MARK: "You're muted"
 
-    @Test func nudgeAtMostEveryFiveSeconds() {
+    @Test func nudgeAtMostEveryFiveSecondsBlipOncePerMute() {
         var nudge = MutedNudge()
         let r1 = nudge.talking(at: 100)
-        #expect(r1)
+        #expect(r1 == .blip, "the first since muting blips")
         let r2 = nudge.talking(at: 100.025)
-        #expect(!r2)
+        #expect(r2 == nil)
         let r3 = nudge.talking(at: 104.9)
-        #expect(!r3)
+        #expect(r3 == nil)
         let r4 = nudge.talking(at: 105.0)
-        #expect(r4, "5 s later, again")
+        #expect(r4 == .quiet, "5 s later, again: just the words")
         let r5 = nudge.talking(at: 109)
-        #expect(!r5)
+        #expect(r5 == nil)
         let r6 = nudge.talking(at: 200)
-        #expect(r6, "a new bout of talking")
+        #expect(r6 == .quiet, "a new bout of talking, still the same mute")
+        nudge.muted()
+        let r7 = nudge.talking(at: 300)
+        #expect(r7 == .blip, "muted again: the blip again")
+    }
+
+    @Test func noNudgeWhileAnotherOfMyDevicesIsLive() {
+        func live(_ voice: VoiceState?, uid: String = "u1", sid: String = "s2", client: String = "web") -> Bool {
+            let mine = Session(sid: "s1", uid: "u1", voice: VoiceState(channelId: "c1", muted: true, deafened: false))
+            let other = Session(sid: sid, uid: uid, client: client, voice: voice)
+            return MutedNudge.liveElsewhere([mine, other], uid: "u1", mySid: "s1", channelId: "c1")
+        }
+        #expect(live(VoiceState(channelId: "c1", muted: false, deafened: false)), "my PC, unmuted in this call")
+        #expect(!live(VoiceState(channelId: "c1", muted: true, deafened: false)), "muted there too")
+        #expect(!live(VoiceState(channelId: "c1", muted: false, deafened: true)), "deafened there")
+        #expect(!live(VoiceState(channelId: "c2", muted: false, deafened: false)), "another call")
+        #expect(!live(nil), "not in voice")
+        #expect(!live(VoiceState(channelId: "c1", muted: false, deafened: false), uid: "u2"), "someone else")
+        #expect(!live(VoiceState(channelId: "c1", muted: false, deafened: false), sid: "s1"), "this device")
+        #expect(!live(VoiceState(channelId: "c1", muted: false, deafened: false), client: "obs"), "an OBS link")
     }
 
     // MARK: Push to talk: hold, double-tap, tap to stop

@@ -362,7 +362,7 @@ pub(super) fn voice_tab(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
         }
         ui.add_space(4.0);
         let mut remind = m.config.remind_muted;
-        if theme::tip(theme::checkbox(ui, &mut remind, "Remind me when I talk while muted", p), "A soft blip and \"You're muted\" by the Mute button, at most every 5 seconds").changed() {
+        if theme::tip(theme::checkbox(ui, &mut remind, "Remind me when I talk while muted", p), "\"You're muted\" by the Mute button, and a soft blip the first time after you mute").changed() {
             acts.push(Act::Config(Box::new(move |c| c.remind_muted = remind)));
         }
         ui.add_space(4.0);

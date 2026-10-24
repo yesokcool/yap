@@ -29,8 +29,8 @@ public struct VoiceSettings: Codable, Sendable, Equatable {
     public var screenVolumes: [String: Double] = [:]
     /// Smooth / Sharp / Max for my next share (the Mac).
     public var shareQuality: ScreenQuality = .smooth
-    /// "Remind me when I talk while muted": a soft blip and "You're muted"
-    /// (PROTOCOL.md › Voice › Transmit gate).
+    /// "Remind me when I talk while muted": "You're muted", and a soft blip
+    /// the first time since muting (PROTOCOL.md › Voice › Transmit gate).
     public var mutedReminder = true
     /// "Push-to-talk click": a quiet click, for my ears only, when push to
     /// talk opens and when it closes.
@@ -101,9 +101,10 @@ public enum VoiceEvent: Sendable, Equatable {
     case peerLeft(uid: String)
     /// I muted/unmuted or deafened/undeafened (true = now quiet).
     case quieted(Bool)
-    /// I'm talking while muted (at most every 5 s): the soft blip.
-    /// `firstTime`: the first ever on this device (say what the sound means).
-    case talkingWhileMuted(firstTime: Bool)
+    /// I'm talking while muted (at most every 5 s): "You're muted", and the
+    /// soft blip if `blip` (the first since I muted). `firstTime`: the first
+    /// blip ever on this device (say what the sound means).
+    case talkingWhileMuted(blip: Bool, firstTime: Bool)
     /// Push to talk went live / closed after its tail: the click (if it's on).
     case pushToTalk(live: Bool)
 }
@@ -218,7 +219,7 @@ public final class VoiceController: VoiceCoordinator {
     @ObservationIgnored private var networkWatch: NetworkWatch?
     @ObservationIgnored private var network: String?
     @ObservationIgnored private var noted = NotedState()
-    /// "You're muted": one nudge every 5 s at most.
+    /// "You're muted": one nudge every 5 s at most, the blip once per mute.
     @ObservationIgnored private var nudge = MutedNudge()
     @ObservationIgnored private var nudgeHide: Task<Void, Never>?
     /// "You're muted" shows by the Mute button (for 2.5 s after each nudge).
@@ -356,13 +357,17 @@ public final class VoiceController: VoiceCoordinator {
         return engine.speaking.contains(session.sid)
     }
 
-    /// Talking while muted (the engine says so on every reading): a soft blip
-    /// and "You're muted" at most every 5 s, if the reminder is on; the first
-    /// time ever on this device, the app also says what the sound means.
+    /// Talking while muted (the engine says so on every reading): "You're
+    /// muted" at most every 5 s, if the reminder is on, with a soft blip the
+    /// first time since muting; the first blip ever on this device, the app
+    /// also says what the sound means. Not while another of my devices is
+    /// live in this call.
     func talkingWhileMuted() {
-        guard settings.mutedReminder, settings.muted, !settings.deafened, !micDenied, isInVoice, nudge.talking(at: now()) else { return }
+        guard settings.mutedReminder, settings.muted, !settings.deafened, !micDenied, isInVoice,
+              !MutedNudge.liveElsewhere(client.sessions.values, uid: client.uid, mySid: client.mySid, channelId: channelId),
+              let kind = nudge.talking(at: now()) else { return }
         let key = settingsKey + ".mutedNudgeExplained"
-        let firstTime = !defaults.bool(forKey: key)
+        let firstTime = kind == .blip && !defaults.bool(forKey: key)
         if firstTime { defaults.set(true, forKey: key) }
         mutedNudgeShown = true
         nudgeHide?.cancel()
@@ -371,7 +376,7 @@ public final class VoiceController: VoiceCoordinator {
             guard !Task.isCancelled else { return }
             self?.mutedNudgeShown = false
         }
-        onEvent?(.talkingWhileMuted(firstTime: firstTime))
+        onEvent?(.talkingWhileMuted(blip: kind == .blip, firstTime: firstTime))
     }
 
     /// Screenshots: "You're muted" by the button, without talking.
@@ -412,6 +417,7 @@ public final class VoiceController: VoiceCoordinator {
         engine.prepare(iceServers: ice)
         engine.setMuted(settings.muted || !micOK)
         engine.setDeafened(settings.deafened)
+        nudge.muted() // (a new call: its first nudge blips, muted or not yet)
         let proof = keeper.joinProof(for: channelId)
         client.send(.voiceJoin(channelId: channelId, muted: settings.muted || !micOK, deafened: settings.deafened,
                                resume: true, prev: proof?.prev, proof: proof?.proof, screen: sharing != nil))
@@ -804,6 +810,7 @@ public final class VoiceController: VoiceCoordinator {
         engine.setMuted(settings.muted || micDenied)
         engine.setDeafened(settings.deafened)
         if old == nil || old?.mode != settings.mode { engine.resetPushToTalk() }
+        if settings.muted, old?.muted == false { nudge.muted() }
         if !settings.muted || settings.deafened, mutedNudgeShown {
             nudgeHide?.cancel()
             mutedNudgeShown = false

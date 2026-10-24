@@ -1,26 +1,54 @@
 import Foundation
+import YapCore
 
 // Round 10's small rules around talking (PROTOCOL.md › Voice › Transmit
 // gate, and › Connection hints › Shared media, for yourself): pure values the
 // engine and the controller feed, so each is tested on a hand-cranked clock.
 
 /// "You're muted": while you're muted, talking — the gate *would* open on
-/// the level measured before the mute, or push to talk is pressed — gets a
-/// soft blip and "You're muted" by the Mute button, at most once every 5 s.
+/// the level measured before the mute, or push to talk is pressed — gets
+/// "You're muted" by the Mute button, at most once every 5 s. Only the first
+/// nudge since you muted (or joined a call muted) blips, so staying muted
+/// while you talk to someone in the room doesn't beep every 5 s.
 public struct MutedNudge: Sendable, Equatable {
     public static let every: TimeInterval = 5
     /// How long "You're muted" stays by the button.
     public static let shownFor: TimeInterval = 2.5
 
+    public enum Kind: Sendable, Equatable {
+        /// The first since you muted: the soft blip and the words.
+        case blip
+        /// Just the words.
+        case quiet
+    }
+
     private var lastAt: TimeInterval = -.infinity
+    private var blipped = false
 
     public init() {}
 
-    /// Talking while muted, right now: is a nudge due?
-    public mutating func talking(at now: TimeInterval) -> Bool {
-        guard now - lastAt >= Self.every else { return false }
+    /// You just muted, or joined a call muted: the next nudge blips.
+    public mutating func muted() {
+        blipped = false
+    }
+
+    /// Talking while muted, right now: is a nudge due, and with the blip?
+    public mutating func talking(at now: TimeInterval) -> Kind? {
+        guard now - lastAt >= Self.every else { return nil }
         lastAt = now
-        return true
+        if blipped { return .quiet }
+        blipped = true
+        return .blip
+    }
+
+    /// Another of my devices is in this call, unmuted: I'm talking through
+    /// that one, so no nudge here (OBS listeners are always muted).
+    public static func liveElsewhere(_ sessions: some Sequence<Session>, uid: String, mySid: String?, channelId: String?) -> Bool {
+        guard let channelId else { return false }
+        return sessions.contains { s in
+            guard s.uid == uid, s.sid != mySid, !s.isListener, let voice = s.voice else { return false }
+            return voice.channelId == channelId && !voice.muted && !voice.deafened
+        }
     }
 }
 

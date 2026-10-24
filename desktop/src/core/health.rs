@@ -166,8 +166,9 @@ impl Core {
     }
 
     /// Talking while muted (PROTOCOL.md › Voice › Transmit gate): "You're
-    /// muted" by the Mute button and a soft blip, at most every 5 s; the first
-    /// time on this device, what the blip means.
+    /// muted" by the Mute button, at most every 5 s, with a soft blip the
+    /// first time since we muted or joined; the first blip on this device,
+    /// what it means. Not while another of our devices is live in the call.
     fn tick_nudge(&mut self, in_voice: bool) {
         let g = &self.shared.audio.gate;
         let talked = g.talked_muted_ms.load(Ordering::Relaxed);
@@ -175,17 +176,21 @@ impl Core {
             return;
         }
         self.nudge_seen = talked;
-        let (remind, muted, first) = {
+        let (remind, muted, first, elsewhere) = {
             let m = self.shared.model.lock();
             // (Not while deafened, like the web: you meant to be out of it.)
-            (m.config.remind_muted, m.config.muted && !m.config.deafened, !m.config.muted_explained)
+            (m.config.remind_muted, m.config.muted && !m.config.deafened, !m.config.muted_explained, m.live_elsewhere())
         };
         let now = Instant::now();
-        if !in_voice || !remind || !muted || !nudge_due(talked, g.now_ms(), self.last_nudge, now) {
+        if !in_voice || !remind || !muted || elsewhere || !nudge_due(talked, g.now_ms(), self.last_nudge, now) {
             return;
         }
         self.last_nudge = Some(now);
-        self.shared.audio.mixer.play_notes(&NUDGE_NOTES, 0.11, 0.07, 0.035, false);
+        let blip = std::mem::take(&mut self.nudge_blip);
+        let first = first && blip;
+        if blip {
+            self.shared.audio.mixer.play_notes(&NUDGE_NOTES, 0.11, 0.07, 0.035, false);
+        }
         {
             let mut m = self.shared.model.lock();
             // (The first time's explanation stays up its whole 8 s.)
@@ -198,7 +203,7 @@ impl Core {
                 m.config_dirty = true;
             }
         }
-        self.emit(CoreEvent::Extra("NUDGE", if first { "you're muted (explained)".into() } else { "you're muted".into() }));
+        self.emit(CoreEvent::Extra("NUDGE", if first { "you're muted (explained)".into() } else if blip { "you're muted".into() } else { "you're muted (quiet)".into() }));
         self.repaint();
     }
 

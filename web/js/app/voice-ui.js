@@ -350,19 +350,27 @@ voice.addEventListener('ptt-latch', () => {
   renderUserPanel();
   callNote(voice.pttLatched ? 'Push-to-talk latched on (double-tap)' : 'Push-to-talk latch off');
 });
-// Talking (or pressing push-to-talk) while muted, in a call: a soft blip and "You're muted" by the Mute button
-// for a few seconds (voice.js says when, at most every 5 s). The first time on this device, what the sound means.
+// Talking (or pressing push-to-talk) while muted, in a call: "You're muted" by the Mute button for a few
+// seconds (voice.js says when, at most every 5 s), and a soft blip the first time since you muted. The first
+// time on this device, what the sound means. Not while another of your devices is live in this call: you're
+// talking through that one.
 const MUTED_NOTE_MS = 3000;
 let mutedNoteTimer = null;
-voice.addEventListener('muted-talk', () => {
-  if (!state.voiceChannel || !settings.mutedReminder || !settings.muted || settings.deafened) return;
-  sounds.mutedTalk();
-  state.remindedMuted = (state.remindedMuted ?? 0) + 1; // (tests read this)
+const liveElsewhere = () =>
+  [...state.sessions.values()].some((s) => s.uid === settings.uid && s.sid !== state.sid && s.sid !== state.staleSid && s.sid !== state.resume?.sid
+    && s.client !== 'obs' && s.voice?.channelId === state.voiceChannel && !s.voice.muted && !s.voice.deafened);
+voice.addEventListener('muted-talk', ({ detail: { blip } }) => {
+  if (!state.voiceChannel || !settings.mutedReminder || !settings.muted || settings.deafened || liveElsewhere()) return;
+  if (blip) {
+    sounds.mutedTalk();
+    state.mutedBlips = (state.mutedBlips ?? 0) + 1; // (tests read these)
+  }
+  state.remindedMuted = (state.remindedMuted ?? 0) + 1;
   state.mutedNoteUntil = Date.now() + MUTED_NOTE_MS;
   renderUserPanel();
   clearTimeout(mutedNoteTimer);
   mutedNoteTimer = setTimeout(renderUserPanel, MUTED_NOTE_MS + 50);
-  if (!settings.mutedReminderExplained) {
+  if (blip && !settings.mutedReminderExplained) {
     save({ mutedReminderExplained: true });
     toast("That sound means you're muted. Turn it off in Settings › Voice.");
   }
@@ -393,7 +401,7 @@ export async function joinVoice(channelId) {
     console.warn('voice setup failed', err);
   }
   if (state.voiceWanted !== channelId) return; // changed their mind meanwhile
-  voice.setMuted(settings.muted);
+  voice.setMuted(settings.muted, { joined: true });
   voice.setDeafened(settings.deafened);
   // `resume`: we keep calls across reconnects. `prev`/`proof`: this join continues our call from before the reconnect.
   // `screen`: still sharing (back after a reconnect, or moving to another channel: it goes on there, like the desktop app).

@@ -200,7 +200,7 @@ public final class VoiceEngine {
     /// We're muted (not deafened) and talking: the level measured before the
     /// mute would open the gate, or push to talk is pressed. Called on every
     /// level reading while it lasts and on each press; the controller keeps
-    /// it to one nudge every 5 s.
+    /// it to one nudge every 5 s (and one blip per mute).
     @ObservationIgnored public var onTalkWhileMuted: (() -> Void)?
     /// Push to talk went live (true) or closed after its tail (false): the click.
     @ObservationIgnored public var onPushToTalk: ((_ live: Bool) -> Void)?

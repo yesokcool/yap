@@ -1924,12 +1924,13 @@ await test('mute shows on the other side and silences audio', async () => {
   await a.click('[data-action="toggle-mute"]');
 });
 
-await test("talking while muted: a soft blip and \"You're muted\" by the Mute button, at most every 5 s; the first time says what it means; the setting turns it off", async () => {
+await test("talking while muted: \"You're muted\" by the Mute button at most every 5 s, a soft blip only the first time since muting; the first time says what it means; not while another of your devices is live; the setting turns it off", async () => {
   try {
     await a.evaluate(() => {
       globalThis.__reminders = [];
       yap.voice.addEventListener('muted-talk', () => __reminders.push(performance.now()));
       yap.state.remindedMuted = 0;
+      yap.state.mutedBlips = 0;
       yap.settings.mutedReminderExplained = false; // as on a device that never heard it
     });
     await b.evaluate(() => (yap.state.remindedMuted = 0));
@@ -1938,20 +1939,30 @@ await test("talking while muted: a soft blip and \"You're muted\" by the Mute bu
     // (Within 5 s of an earlier reminder — the mute test before this one talks while muted too — it waits its turn.)
     await a.waitForSelector('#user-panel .me-bubble:text-is("You\'re muted")', { timeout: 8000 });
     assert.equal(await a.textContent('#toast'), "That sound means you're muted. Turn it off in Settings › Voice.");
-    assert.equal(await a.evaluate(() => yap.state.remindedMuted), 1, 'the blip played once');
+    assert.equal(await a.evaluate(() => yap.state.remindedMuted), 1);
+    assert.equal(await a.evaluate(() => yap.state.mutedBlips), 1, 'the blip played once');
     await a.locator('#user-panel').screenshot({ path: path.join(OUT, 'TW1-muted-reminder.png') });
     await until(() => a.evaluate(() => yap.state.remindedMuted >= 2), 8000, 'a second reminder');
     const gaps = await a.evaluate(() => __reminders.slice(1).map((t, i) => t - __reminders[i]));
     assert.ok(gaps.every((g) => g >= 4990 && g < 6000), `5 s apart: ${gaps.map(Math.round).join(', ')} ms`);
+    assert.equal(await a.evaluate(() => yap.state.mutedBlips), 1, 'the words again, without the blip');
     assert.equal(await a.evaluate(() => yap.settings.mutedReminderExplained), true, 'explained once on this device');
     assert.ok(await a.isHidden('#toast'), 'the explanation is not shown again (the first one went after 4 s)');
+    // Another of Ada's devices in this call, unmuted: she's talking through that one, so nothing here.
+    let before = await a.evaluate(() => {
+      yap.state.sessions.set('s_other', { sid: 's_other', uid: yap.settings.uid, client: 'web', voice: { channelId: yap.state.voiceChannel, muted: false, deafened: false } });
+      return yap.state.remindedMuted;
+    });
+    await a.waitForTimeout(6000);
+    assert.equal(await a.evaluate(() => yap.state.remindedMuted), before, 'live on another device: no reminder');
+    await a.evaluate(() => yap.state.sessions.delete('s_other'));
     // Off in Settings › Voice: nothing.
     await a.click('[data-action="open-settings"]');
     await a.click('#settings-tabs [role=tab]:text-is("Voice")');
     assert.equal(await a.isChecked('#settings-form [name=mutedReminder]'), true, 'on by default');
     await a.uncheck('#settings-form [name=mutedReminder]');
     await a.click('#settings-form .settings-actions .btn');
-    const before = await a.evaluate(() => yap.state.remindedMuted);
+    before = await a.evaluate(() => yap.state.remindedMuted);
     await a.waitForTimeout(6000);
     assert.equal(await a.evaluate(() => yap.state.remindedMuted), before, 'switched off: no blip');
     assert.equal(await a.locator('#user-panel .me-bubble').count(), 0);
@@ -1960,6 +1971,10 @@ await test("talking while muted: a soft blip and \"You're muted\" by the Mute bu
     await a.click('[data-action="toggle-mute"]');
     assert.equal(await a.locator('#user-panel .me-bubble').count(), 0);
     assert.equal(await b.evaluate(() => yap.state.remindedMuted), 0);
+    // Muted again: the blip again, once.
+    await a.click('[data-action="toggle-mute"]');
+    await until(() => a.evaluate(() => yap.state.mutedBlips >= 2), 8000, 'a blip after muting again');
+    await a.click('[data-action="toggle-mute"]');
   } finally {
     await voiceReset(a);
   }

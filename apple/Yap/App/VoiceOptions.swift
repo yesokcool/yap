@@ -84,10 +84,10 @@ enum VoiceOptions {
 enum TalkWords {
     /// By the Mute button when you talk while muted.
     static let youreMuted = "You're muted"
-    /// Said once per device, the first time the nudge plays.
+    /// Said once per device, the first time the nudge blips.
     static let explainNudge = "That sound means you're muted. Turn it off in Settings › Voice."
     static let reminder = "Remind me when I talk while muted"
-    static let reminderNote = "A soft blip and “You're muted”, at most every 5 seconds."
+    static let reminderNote = "“You're muted” by the button, and a soft blip the first time after you mute."
     static let pushToTalkClick = "Push-to-talk click"
     static let pushToTalkClickNote = "A quiet click when it opens and closes (only you hear it)."
     /// By the push-to-talk button after a double-tap.

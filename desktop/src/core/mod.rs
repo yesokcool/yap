@@ -221,6 +221,7 @@ pub fn start_with_done(
         hear: None,
         nudge_seen: 0,
         last_nudge: None,
+        nudge_blip: true,
         ptt_latched: false,
         last_report: None,
         debug_fail: std::env::var("YAP_DEBUG_AUDIO_FAIL").ok().filter(|_| cfg!(debug_assertions)),
@@ -285,6 +286,8 @@ struct Core {
     /// Talking while muted: the gate's last report we looked at, and the last nudge.
     nudge_seen: u64,
     last_nudge: Option<Instant>,
+    /// The next nudge blips: none has since we muted or joined a call.
+    nudge_blip: bool,
     /// Push-to-talk latched, as last noted in the call report.
     ptt_latched: bool,
     /// The call report's last reading of the connections.

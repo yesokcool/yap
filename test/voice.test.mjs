@@ -319,17 +319,18 @@ t('gate: says when you talk in every mode (the "You\'re muted" reminder), not on
   assert.ok(quiet.reports.every((r) => r.open && !r.voice), 'always-on: open, but nobody talking');
 });
 
-t('muted reminder: at most once every 5 s, never in the first second after muting', () => {
+t('muted reminder: at most once every 5 s, never in the first second after muting, the blip only the first time', () => {
   const r = new MutedReminder();
   r.muted(0);
   assert.equal(r.due(500), false, 'still finishing a word as you mute');
-  assert.equal(r.due(MUTED_REMINDER.graceMs), true, 'then the first reminder');
+  assert.equal(r.due(MUTED_REMINDER.graceMs), 'blip', 'then the first reminder, with the blip');
   assert.equal(r.due(MUTED_REMINDER.graceMs + 20), false);
   assert.equal(r.due(MUTED_REMINDER.graceMs + 4999), false, 'not again within 5 s');
-  assert.equal(r.due(MUTED_REMINDER.graceMs + 5000), true, 'again after 5 s');
+  assert.equal(r.due(MUTED_REMINDER.graceMs + 5000), 'quiet', 'again after 5 s, just the words');
+  assert.equal(r.due(MUTED_REMINDER.graceMs + 10_000), 'quiet');
   r.muted(20_000);
   assert.equal(r.due(20_400), false, 'muting again starts the grace again');
-  assert.equal(r.due(21_000), true);
+  assert.equal(r.due(21_000), 'blip', 'and the blip');
   assert.equal(MUTED_REMINDER.everyMs, 5000, 'the spec says 5 s');
 });
 

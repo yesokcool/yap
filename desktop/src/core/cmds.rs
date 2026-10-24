@@ -584,6 +584,9 @@ impl Core {
         if now == was {
             return;
         }
+        if now.0 && !was.0 {
+            self.nudge_blip = true;
+        }
         // (A deafen change is the news; else mute.)
         let (on, note) = if now.1 != was.1 { (now.1, if now.1 { "You deafened" } else { "You undeafened" }) } else { (now.0, if now.0 { "You muted" } else { "You unmuted" }) };
         self.call_note(note);

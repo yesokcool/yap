@@ -997,10 +997,12 @@ async function voiceScenario(label, nativeFirst) {
   await web.click('[data-action="leave-voice"]');
   await web.waitForFunction(() => yap.voice.peers.size === 0, null, { timeout: 5000 });
   const peer = summary?.peers?.[0] ?? {};
-  // Talking while muted (its WAV mic keeps going): "You're muted", at most every 5 s.
+  // Talking while muted (its WAV mic keeps going): "You're muted", at most every 5 s, the blip only the first time.
   const at = (l) => Number(l.match(/^\[\+\s*([\d.]+)s\]/)?.[1] ?? NaN);
   const mutedAt = at(n.lines.find((l) => /toggling mute/.test(l)) ?? '');
-  const nudges = n.lines.filter((l) => / NUDGE you're muted/.test(l)).map(at);
+  const nudgeLines = n.lines.filter((l) => / NUDGE you're muted/.test(l));
+  const nudges = nudgeLines.map(at);
+  const blips = nudgeLines.filter((l) => !/\(quiet\)/.test(l)).length;
   // Your own connection: what the web reports losing of ours (only an impaired network should say it's dropping).
   const ownHints = n.lines.filter((l) => / HINT self /.test(l)).map((l) => l.replace(/^\[\+\s*[\d.]+s\]\s*/, ''));
   const pct = (x) => +((100 * (x ?? 0)) / Math.max(1, peer.frames ?? 0)).toFixed(2);
@@ -1009,7 +1011,7 @@ async function voiceScenario(label, nativeFirst) {
     web: { inbound: s2.mime, outbound: s2.outMime, voiceCodecs: { web: s2.localOrder, native: s2.remoteOrder }, opusFmtp: s2.opusFmtp, outFmtp: s2.outFmtp, recvKbps: Math.round(kbps), sentKbps: Math.round(sentKbps),
       wireKbpsFromNative: Math.round(((s3.bytes - s1.bytes) * 8) / 1000 / secs), wireKbpsToNative: Math.round(((s3.sentBytes - s1.sentBytes) * 8) / 1000 / secs),
       packets: s2.packets, lost: s3.lost, patchedPct: patchedPct(s1, s3), audioLevel: s2.level, rtpExtAudioLevel: s2.rtpExtLevel, speakingRing: ring, levelWhileNativeMuted: muted.level, muteFlagShown: flag },
-    nudge: { mutedAt, nudges },
+    nudge: { mutedAt, nudges, blips },
     ownConnection: ownHints,
     native: { recvKbps: summary?.recvKbps, maxRecvLevel: summary?.maxRecvLevel, bytesReceived: peer.bytesReceived, packetsReceived: peer.packetsReceived, bytesSent: peer.bytesSent, opusBytesSent: peer.opusBytesSent, sendRed: peer.sendRed, redPacketsReceived: peer.redPackets, sendBitrate: peer.sendBitrate, polite: peer.polite, localFmtp: peer.localFmtp, remoteFmtp: peer.remoteFmtp,
       frames: peer.frames, concealed: peer.concealed, fec: peer.fec, redRebuilt: peer.red, patchedPct: pct(peer.concealed), fecPct: pct(peer.fec), redPct: pct(peer.red), late: peer.late, underruns: peer.underruns, lostPct: +((100 * Math.max(0, (peer.expected ?? 0) - (peer.packetsReceived ?? 0) - (peer.padding ?? 0))) / Math.max(1, peer.expected ?? 0)).toFixed(2), jitterTargetMs: peer.targetMs, lossHint: peer.lossHint },
@@ -1043,6 +1045,7 @@ async function voiceScenario(label, nativeFirst) {
   assert.ok(nudges.length >= 1 && nudges[0] - mutedAt < 2, `native, muted and still talking, gets "You're muted" at once (muted at ${mutedAt}, nudges ${nudges})`);
   assert.ok(nudges.every((t, i) => i === 0 || t - nudges[i - 1] >= 4.9), `at most every 5 s: ${nudges}`);
   assert.ok(nudges.every((t) => t >= mutedAt), 'never before muting');
+  assert.equal(blips, 1, `one blip per mute, then just the words: ${nudgeLines.join(' | ')}`);
   if (IMPAIR === 'loss5') assert.ok(ownHints.includes('HINT self dropping'), `5 % of native's packets lost on the way: native says its connection drops audio (${ownHints})`);
   if (!IMPAIR) assert.ok(!ownHints.includes('HINT self dropping'), `a clean network: no "Your connection is dropping…" (${ownHints})`);
   assert.ok((peer.packetsReceived ?? 0) > 100, `native received packets: ${peer.packetsReceived}`);

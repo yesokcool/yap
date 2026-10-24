@@ -74,8 +74,8 @@ pub struct Config {
     /// back out of the mic (AEC3), so friends don't hear themselves.
     pub echo_cancellation: bool,
     pub sounds: bool,
-    /// Settings › Voice › "Remind me when I talk while muted": a soft blip and
-    /// "You're muted" by the Mute button, at most every 5 s.
+    /// Settings › Voice › "Remind me when I talk while muted": "You're muted"
+    /// by the Mute button, at most every 5 s, and a soft blip the first time since muting.
     pub remind_muted: bool,
     /// That blip was explained once on this device.
     pub muted_explained: bool,

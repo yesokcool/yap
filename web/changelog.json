@@ -1,6 +1,15 @@
 {
-  "current": "0.51.0",
+  "current": "0.51.1",
   "releases": [
+    {
+      "version": "0.51.1",
+      "date": "2026-10-24",
+      "title": "Quieter when you're muted",
+      "items": [
+        "Talking while muted blips only the first time after you mute; after that \"You're muted\" shows by the button without a sound.",
+        "No \"You're muted\" reminder while another of your devices is unmuted in the same call."
+      ]
+    },
     {
       "version": "0.51.0",
       "date": "2026-10-24",

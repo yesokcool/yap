@@ -48,7 +48,7 @@ async function rnnoiseNode(ctx) {
  *         or went), 'screen-local' (our share started, stopped or changed),
  *         'viewers' (who watches our share changed), 'muted-talk' (you're
  *         talking, or pressed push-to-talk, while muted: remind them; at most
- *         every 5 s), 'push-mute' ({down}: the push-to-mute key),
+ *         every 5 s; {blip}: the first since they muted), 'push-mute' ({down}: the push-to-mute key),
  *         'own-quality' ({weak}: most people lose > 3 % of your audio, or
  *         not any more), 'ptt-latch' ({latched}: double-tapped to stay live, or not any
  *         more), 'ptt-click' ({open}: push-to-talk opened, or closed after
@@ -702,20 +702,23 @@ export class Voice extends EventTarget {
 
   // ── Transmit gate: mute / deafen / voice activity / push-to-talk ─────────
 
-  setMuted(muted) {
-    if (muted && !this.muted) this.#reminder.muted(performance.now());
+  /** `joined`: a call starts (its first talking-while-muted reminder blips again). */
+  setMuted(muted, { joined = false } = {}) {
+    if (muted && (joined || !this.muted)) this.#reminder.muted(performance.now());
     this.muted = muted;
     this.#applyGate();
   }
 
   /**
    * You're talking (the gate would open), or pressed push-to-talk, while
-   * muted: 'muted-talk', at most every 5 s (gate-worklet.js › MutedReminder).
-   * Not while deafened: that's a louder "I'm away" than mute.
+   * muted: 'muted-talk', at most every 5 s, with the blip only the first time
+   * since you muted (gate-worklet.js › MutedReminder). Not while deafened:
+   * that's a louder "I'm away" than mute.
    */
   #talkingWhileMuted() {
-    if (!this.muted || this.deafened || !this.micOk || !this.#reminder.due(performance.now())) return;
-    this.#emit('muted-talk');
+    if (!this.muted || this.deafened || !this.micOk) return;
+    const due = this.#reminder.due(performance.now());
+    if (due) this.#emit('muted-talk', { blip: due === 'blip' });
   }
 
   setDeafened(deafened) {

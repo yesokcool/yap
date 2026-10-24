@@ -615,6 +615,15 @@ impl Model {
         self.my_voice_channel().and_then(|c| c.bitrate).unwrap_or(self.config.bitrate)
     }
 
+    /// Another of our devices is in our call, unmuted: we're talking through
+    /// that one, so this one doesn't say "You're muted" (OBS links are always muted).
+    pub fn live_elsewhere(&self) -> bool {
+        let Some(channel) = self.voice_channel.as_deref() else { return false };
+        self.sessions.values().any(|s| {
+            s.uid == self.config.uid && Some(&s.sid) != self.sid.as_ref() && !s.is_obs() && s.voice.as_ref().is_some_and(|v| v.channel_id == channel && !v.muted && !v.deafened)
+        })
+    }
+
     /// Our newest message in a channel (Up-arrow edits it).
     pub fn last_own_message(&self, channel_id: &str) -> Option<&Message> {
         self.history.get(channel_id)?.messages.iter().rev().find(|m| m.uid == self.config.uid && !m.pending && !m.body.is_empty())
@@ -1075,5 +1084,32 @@ mod voice_tests {
         // The server takes Ada's OBS link out 5 minutes after she left.
         m.sessions.get_mut("o3").unwrap().voice = None;
         assert!(m.obs_listening("lounge").is_empty());
+    }
+
+    /// PROTOCOL.md › Voice › Transmit gate: no "You're muted" while another of
+    /// our devices is live in the call (we're talking through that one).
+    #[test]
+    fn live_on_another_device() {
+        let mut m = Model::new(Config { uid: "me".into(), ..Config::default() });
+        m.sid = Some("here".into());
+        m.voice_channel = Some("lounge".into());
+        let session = |sid: &str, uid: &str, client: &str, voice: serde_json::Value| -> Session {
+            serde_json::from_value(json!({ "sid": sid, "uid": uid, "client": client, "voice": voice })).unwrap()
+        };
+        let live = |m: &mut Model, s: Session| {
+            m.sessions.clear();
+            m.sessions.insert("here".into(), session("here", "me", "desktop", json!({ "channelId": "lounge", "muted": true })));
+            m.sessions.insert(s.sid.clone(), s);
+            m.live_elsewhere()
+        };
+        assert!(live(&mut m, session("phone", "me", "ios", json!({ "channelId": "lounge" }))), "my phone, unmuted in this call");
+        assert!(!live(&mut m, session("phone", "me", "ios", json!({ "channelId": "lounge", "muted": true }))), "muted there too");
+        assert!(!live(&mut m, session("phone", "me", "ios", json!({ "channelId": "lounge", "deafened": true }))), "deafened there");
+        assert!(!live(&mut m, session("phone", "me", "ios", json!({ "channelId": "games" }))), "another call");
+        assert!(!live(&mut m, session("phone", "me", "ios", serde_json::Value::Null)), "not in voice");
+        assert!(!live(&mut m, session("ben", "u2", "web", json!({ "channelId": "lounge" }))), "someone else");
+        assert!(!live(&mut m, session("o1", "me", "obs", json!({ "channelId": "lounge" }))), "an OBS link");
+        m.voice_channel = None;
+        assert!(!live(&mut m, session("phone", "me", "ios", json!({ "channelId": "lounge" }))), "not in a call here");
     }
 }

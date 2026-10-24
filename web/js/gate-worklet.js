@@ -244,24 +244,30 @@ export class Gate {
 /**
  * Talking while muted (PROTOCOL.md › Transmit gate): when to remind you. At
  * most once every 5 s, and not in the first second after you muted (you may
- * be finishing a word). The page plays the blip and shows "You're muted".
+ * be finishing a word). The page shows "You're muted" each time; only the
+ * first reminder since you muted (or joined a call muted) blips, so staying
+ * muted while you talk to someone in the room doesn't beep every 5 s.
  */
 export const MUTED_REMINDER = { everyMs: 5000, graceMs: 1000 };
 
 export class MutedReminder {
   #mutedAt = -Infinity;
   #remindedAt = -Infinity;
+  #blipped = false;
 
-  /** You just muted (ms, any clock). */
+  /** You just muted, or joined a call muted (ms, any clock). */
   muted(now) {
     this.#mutedAt = now;
+    this.#blipped = false;
   }
 
-  /** You're talking (or pressed push-to-talk) while muted: remind you now? */
+  /** You're talking (or pressed push-to-talk) while muted: remind you now? false, 'blip' (the first since you muted) or 'quiet'. */
   due(now) {
     if (now - this.#mutedAt < MUTED_REMINDER.graceMs || now - this.#remindedAt < MUTED_REMINDER.everyMs) return false;
     this.#remindedAt = now;
-    return true;
+    if (this.#blipped) return 'quiet';
+    this.#blipped = true;
+    return 'blip';
   }
 }
 

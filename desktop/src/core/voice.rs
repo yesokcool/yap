@@ -464,6 +464,7 @@ impl Core {
         if !still {
             return; // changed their mind meanwhile
         }
+        self.nudge_blip = true; // (a new call: its first "You're muted" blips)
         // `resume`: we keep calls across reconnects. `prev`/`proof`: this join continues our call from before the reconnect.
         let prev = self.resume.as_ref().filter(|r| r.channel == channel_id).map(|r| (r.sid.clone(), r.key.clone()));
         let screen = self.shared.screen.share.sharing();
