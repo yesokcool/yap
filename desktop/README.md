@@ -1284,7 +1284,8 @@ test pattern), `headless.rs`.
   packets (it names the one that decodes), so the tests look at the wire
   instead.
 - The mic: an 80 Hz high-pass, echo cancellation (optional, below), RNNoise
-  (optional), automatic gain (speech
+  (optional; loud, lasting sounds like a laugh get past it: `dsp::LoudPass`,
+  PROTOCOL.md › Voice › Transmit gate › Noise suppression), automatic gain (speech
   towards −23 dBFS while you talk, at most +20 dB, cuts fast, recovers
   ~3 dB/s, never clips; optional), then the transmit gate — a port of the
   web's `gate-worklet.js` (PROTOCOL.md › Voice › Transmit gate): hysteresis,

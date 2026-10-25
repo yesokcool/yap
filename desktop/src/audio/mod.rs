@@ -1053,6 +1053,10 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
     let mut resampled = Vec::with_capacity(BLOCK * 4);
     let mut highpass = dsp::HighPass::new(RATE, 80.0);
     let mut denoise = nnnoiseless::DenoiseState::new();
+    // Loud, lasting sounds (a laugh) past the noise removal; RNNoise is one block behind,
+    // so its output lines up with the block it was given before (`dry`).
+    let mut loud_pass = dsp::LoudPass::new(RATE);
+    let mut dry = [0f32; BLOCK];
     let mut agc = dsp::Agc::default();
     let mut mic_gain = dsp::MicGain::new(RATE);
     let mut tx = gate::Gate::new(RATE, gate.tx_mode(), gate.vad_threshold.get());
@@ -1118,6 +1122,12 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
                 for (d, s) in work.iter_mut().zip(&ns_out) {
                     *d = s / 32768.0;
                 }
+                loud_pass.process(&mut work, &dry);
+                for (d, s) in dry.iter_mut().zip(&ns_in) {
+                    *d = s / 32768.0;
+                }
+            } else {
+                loud_pass.reset();
             }
             if gate.auto_gain.load(Ordering::Relaxed) {
                 agc.process(&mut work, voice);

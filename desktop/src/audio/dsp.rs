@@ -1,6 +1,9 @@
 //! Small signal-processing pieces for the voice path: an 80 Hz high-pass and
-//! a slow automatic gain on the mic (V12), Settings › Voice › Mic volume, and
-//! the limiter on people you've turned up past 100 % (V13).
+//! a slow automatic gain on the mic (V12), loud sounds past the noise
+//! removal, Settings › Voice › Mic volume, and the limiter on people you've
+//! turned up past 100 % (V13).
+
+use std::collections::VecDeque;
 
 /// A 2nd-order Butterworth high-pass (RBJ cookbook biquad): takes rumble,
 /// desk thumps and mains hum out of the mic before anything else hears it.
@@ -124,6 +127,106 @@ impl Agc {
     }
 }
 
+/// Noise suppression lets loud, lasting sounds through (PROTOCOL.md › Voice
+/// › Transmit gate › Noise suppression; the web's `LoudPass` in
+/// `gate-worklet.js`). RNNoise is trained on speech, so a hard, high-pitched
+/// laugh, a shout or singing can come out of it 20–60 dB down. This
+/// crossfades to the plain mic while the mic is loud (−40 dBFS and 15 dB
+/// over the room's noise, per 10 ms), that lasts (3 of the last 8 blocks: a
+/// key click is one) and RNNoise takes more than 6 dB off it, for 250 ms at a
+/// time (renewed while it stays loud and lasting). Each block decides the next one.
+pub struct LoudPass {
+    /// A bit per 10 ms block, newest lowest: was it loud?
+    recent: u8,
+    /// Blocks left of passing.
+    held: u32,
+    want: f32,
+    /// 0 = RNNoise's output, 1 = the plain mic.
+    mix: f32,
+    step: f32,
+    /// The room's noise, measured like the gate's (on the mic before RNNoise).
+    buckets: VecDeque<f32>,
+    bucket_min: f32,
+    bucket_n: usize,
+    bucket_blocks: usize,
+    floor: f32,
+}
+
+pub const LOUD_PASS_MIN_DB: f32 = -40.0;
+pub const LOUD_PASS_OVER_FLOOR_DB: f32 = 15.0;
+/// Loud in this many of the last 8 blocks.
+pub const LOUD_PASS_LASTING: u32 = 3;
+pub const LOUD_PASS_CUT_DB: f32 = -6.0;
+pub const LOUD_PASS_HOLD_MS: u32 = 250;
+pub const LOUD_PASS_FADE_MS: u32 = 10;
+
+impl LoudPass {
+    pub fn new(rate: u32) -> Self {
+        Self {
+            recent: 0,
+            held: 0,
+            want: 0.0,
+            mix: 0.0,
+            step: 1.0 / (rate * LOUD_PASS_FADE_MS / 1000) as f32,
+            buckets: VecDeque::new(),
+            bucket_min: 0.0,
+            bucket_n: 0,
+            bucket_blocks: 0,
+            floor: -120.0,
+        }
+    }
+
+    /// Passing the plain mic through right now.
+    #[cfg(test)]
+    pub fn passing(&self) -> bool {
+        self.want == 1.0
+    }
+
+    /// Noise removal didn't run for a block (it fell behind, or it's off): start over.
+    pub fn reset(&mut self) {
+        self.recent = 0;
+        self.held = 0;
+        self.want = 0.0;
+        self.mix = 0.0;
+    }
+
+    /// One 10 ms block, in place: `wet` is RNNoise's output, `dry` the mic it
+    /// came from (the block before, since RNNoise is one block behind).
+    pub fn process(&mut self, wet: &mut [f32], dry: &[f32]) {
+        let (d, w) = (rms_db(dry), rms_db(wet));
+        for (x, &d) in wet.iter_mut().zip(dry) {
+            self.mix += (self.want - self.mix).clamp(-self.step, self.step);
+            *x += (d - *x) * self.mix;
+        }
+        // The room's noise: the quietest block in each 500 ms, the quietest of the last 8.
+        if d > -110.0 {
+            self.bucket_min = if self.bucket_n > 0 { self.bucket_min.min(d) } else { d };
+            self.bucket_n += 1;
+        }
+        self.bucket_blocks += 1;
+        if self.bucket_blocks == 50 {
+            self.bucket_blocks = 0;
+            if self.bucket_n > 0 {
+                self.buckets.push_back(self.bucket_min);
+            }
+            if self.buckets.len() > 8 {
+                self.buckets.pop_front();
+            }
+            self.bucket_n = 0;
+            self.floor = if self.buckets.is_empty() { -120.0 } else { self.buckets.iter().copied().fold(f32::INFINITY, f32::min) };
+        }
+        let loud = d >= LOUD_PASS_MIN_DB && d >= self.floor + LOUD_PASS_OVER_FLOOR_DB;
+        self.recent = (self.recent << 1) | loud as u8;
+        let lasting = self.recent.count_ones() >= LOUD_PASS_LASTING;
+        if loud && lasting && (w - d < LOUD_PASS_CUT_DB || self.held > 0) {
+            self.held = LOUD_PASS_HOLD_MS / 10;
+        } else {
+            self.held = self.held.saturating_sub(1);
+        }
+        self.want = if self.held > 0 { 1.0 } else { 0.0 };
+    }
+}
+
 /// Settings › Voice › Mic volume (0–200 %), on the capture thread just
 /// before the gate, so voice activity and the meter hear what friends will.
 /// A change ramps across one 10 ms block (no zipper noise). Above 100 % a
@@ -204,6 +307,152 @@ mod tests {
     use super::*;
 
     const SR: u32 = 48_000;
+
+    /// A seeded generator (normal), so every run hears the same noise.
+    struct Rng(u64);
+    impl Rng {
+        fn uniform(&mut self) -> f32 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 40) as f32 + 0.5) / (1u64 << 24) as f32
+        }
+        fn normal(&mut self) -> f32 {
+            (-2.0 * self.uniform().ln()).sqrt() * (2.0 * std::f32::consts::PI * self.uniform()).cos()
+        }
+    }
+
+    /// Pink noise (a fan, a room) at `db` dBFS RMS.
+    fn pink(n: usize, db: f32, seed: u64) -> Vec<f32> {
+        let mut r = Rng(seed);
+        let mut b = [0f32; 7];
+        let mut x: Vec<f32> = (0..n)
+            .map(|_| {
+                let w = r.normal();
+                b[0] = 0.99886 * b[0] + w * 0.0555179;
+                b[1] = 0.99332 * b[1] + w * 0.0750759;
+                b[2] = 0.969 * b[2] + w * 0.153852;
+                b[3] = 0.8665 * b[3] + w * 0.3104856;
+                b[4] = 0.55 * b[4] + w * 0.5329522;
+                b[5] = -0.7616 * b[5] - w * 0.016898;
+                let y = b[..6].iter().sum::<f32>() + b[6] + w * 0.5362;
+                b[6] = w * 0.115926;
+                y
+            })
+            .collect();
+        let k = 10f32.powf((db - rms_db(&x)) / 20.0);
+        x.iter_mut().for_each(|v| *v *= k);
+        x
+    }
+
+    /// Bursts of a voiced sound, pitch gliding `f0` → `f1`, with a little breath.
+    struct Voiced {
+        f0: f32,
+        f1: f32,
+        burst: f32,
+        gap: f32,
+        bursts: usize,
+        amp: f32,
+        harmonics: usize,
+        breath: f32,
+    }
+
+    fn voiced(v: Voiced) -> Vec<f32> {
+        let Voiced { f0, f1, burst, gap, bursts, amp, harmonics, breath } = v;
+        let mut r = Rng(3);
+        let mut x = vec![0f32; SR as usize / 10];
+        let mut ph = 0f32;
+        for _ in 0..bursts {
+            let len = (burst * SR as f32) as usize;
+            for i in 0..len {
+                let t = i as f32 / len as f32;
+                ph += 2.0 * std::f32::consts::PI * (f0 + (f1 - f0) * t + 30.0 * (2.0 * std::f32::consts::PI * 7.0 * i as f32 / SR as f32).sin()) / SR as f32;
+                let v: f32 = (1..=harmonics).map(|k| (k as f32 * ph).sin() / (k as f32).powf(1.2)).sum();
+                x.push(amp * (std::f32::consts::PI * t).sin().sqrt() * (v * 0.5 + breath * r.normal()));
+            }
+            x.extend((0..(gap * SR as f32) as usize).map(|_| amp * 0.02 * r.normal()));
+        }
+        x
+    }
+
+    /// The capture thread's noise removal, with or without the loud pass:
+    /// output, and the share of blocks that passed the plain mic.
+    fn denoise(x: &[f32], pass: bool) -> (Vec<f32>, f32) {
+        let mut ns = nnnoiseless::DenoiseState::new();
+        let mut lp = LoudPass::new(SR);
+        let (mut dry, mut out, mut passed) = ([0f32; 480], Vec::with_capacity(x.len()), 0);
+        for b in x.as_chunks::<480>().0 {
+            let input: Vec<f32> = b.iter().map(|s| s * 32768.0).collect();
+            let mut o = [0f32; 480];
+            ns.process_frame(&mut o, &input);
+            let mut work: Vec<f32> = o.iter().map(|s| s / 32768.0).collect();
+            if pass {
+                lp.process(&mut work, &dry);
+                passed += lp.passing() as usize;
+            }
+            dry.copy_from_slice(b);
+            out.extend(work);
+        }
+        (out, passed as f32 / (x.len() / 480) as f32)
+    }
+
+    /// What came out (one block behind) against what went in, in dB.
+    fn kept(x: &[f32], y: &[f32]) -> f32 {
+        rms_db(&y[480..]) - rms_db(&x[..y.len() - 480])
+    }
+
+    /// PROTOCOL.md › Voice › Transmit gate › Noise suppression.
+    #[test]
+    fn loud_lasting_sounds_get_past_the_noise_removal_fans_and_typing_dont() {
+        // A hard, high-pitched laugh (a squeal, 1–1.2 kHz): RNNoise guts it.
+        let squeal = voiced(Voiced { f0: 1200.0, f1: 1000.0, burst: 0.2, gap: 0.04, bursts: 16, amp: 0.3, harmonics: 6, breath: 0.05 });
+        let (gutted, _) = denoise(&squeal, false);
+        let (passed, share) = denoise(&squeal, true);
+        assert!(kept(&squeal, &gutted) < -6.0, "RNNoise alone: {:.1} dB", kept(&squeal, &gutted));
+        assert!(kept(&squeal, &passed) > -1.5, "with the loud pass: {:.1} dB", kept(&squeal, &passed));
+        assert!(share > 0.5);
+        // A low "ha ha ha" it keeps: nothing to do.
+        let ha = voiced(Voiced { f0: 260.0, f1: 220.0, burst: 0.12, gap: 0.08, bursts: 20, amp: 0.35, harmonics: 10, breath: 0.15 });
+        assert!(kept(&ha, &denoise(&ha, false).0) > -1.0);
+        assert_eq!(denoise(&ha, true).1, 0.0, "kept as it is");
+        // A fan stays out.
+        let fan = pink(SR as usize * 4, -50.0, 1);
+        let (out, share) = denoise(&fan, true);
+        assert_eq!(share, 0.0);
+        assert!(kept(&fan[SR as usize..], &out[SR as usize..]) < -15.0);
+        // Typing (6 ms clicks every ~120 ms over a quiet room) never trips it.
+        let mut keys = pink(SR as usize * 4, -60.0, 7);
+        let mut r = Rng(9);
+        let mut at = SR as usize * 3 / 10;
+        while at < keys.len() - 4800 {
+            for j in 0..288 {
+                keys[at + j] += r.normal() * (-(j as f32) / 57.6).exp() * 0.25;
+            }
+            at += 5760 + (r.normal() * 720.0) as usize;
+        }
+        assert_eq!(denoise(&keys, true).1, 0.0, "typing");
+    }
+
+    #[test]
+    fn loud_pass_fades_to_the_plain_mic_and_back() {
+        // A stand-in noise removal that takes 60 dB off a loud tone (1–2 s) over a quiet room.
+        let mut x = pink(SR as usize * 3, -60.0, 2);
+        for (i, s) in x.iter_mut().enumerate().take(2 * SR as usize).skip(SR as usize) {
+            *s += 0.1 * (2.0 * std::f32::consts::PI * 1100.0 * i as f32 / SR as f32).sin();
+        }
+        let mut lp = LoudPass::new(SR);
+        let mut out = Vec::new();
+        for (k, b) in x.as_chunks::<480>().0.iter().enumerate() {
+            let loud = (100..200).contains(&k);
+            let mut wet: Vec<f32> = b.iter().map(|s| if loud { s * 0.001 } else { *s }).collect();
+            lp.process(&mut wet, b);
+            out.push((rms_db(&wet) - rms_db(b), lp.passing()));
+        }
+        // Three loud blocks, then it decides for the next: from the 5th block on, the plain mic.
+        assert!(out[104..200].iter().all(|(db, _)| db.abs() < 0.01), "{:?}", &out[100..106]);
+        assert!(out[100].0 < -50.0, "the first loud block is still RNNoise's");
+        // It holds 250 ms after the last loud block, then it's RNNoise's again.
+        assert!(out[200].1 && !out[226].1);
+        assert!(out[230..].iter().all(|(db, p)| db.abs() < 0.01 && !p));
+    }
 
     fn tone(freq: f32, db: f32, secs: f32) -> Vec<f32> {
         let amp = 10f32.powf(db / 20.0) * std::f32::consts::SQRT_2;

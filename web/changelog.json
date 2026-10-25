@@ -1,6 +1,14 @@
 {
-  "current": "0.51.1",
+  "current": "0.52.0",
   "releases": [
+    {
+      "version": "0.52.0",
+      "date": "2026-10-24",
+      "title": "Laughs come through",
+      "items": [
+        "A loud laugh, a shout or singing no longer gets eaten by Noise suppression."
+      ]
+    },
     {
       "version": "0.51.1",
       "date": "2026-10-24",

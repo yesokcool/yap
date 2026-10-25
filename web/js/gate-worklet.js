@@ -316,6 +316,105 @@ export class PttLatch {
 }
 
 /**
+ * Noise suppression lets loud, lasting sounds through (PROTOCOL.md › Voice ›
+ * Transmit gate › Noise suppression). RNNoise is trained on speech, so a
+ * hard, high-pitched laugh, a shout or singing can come out of it 20–60 dB
+ * down. Given the mic both after RNNoise (`wet`) and as RNNoise got it
+ * (`dry`), this crossfades to the plain mic while the mic is loud (−40 dBFS
+ * and 15 dB over the room's noise, per 10 ms), that lasts (3 of the last 8
+ * blocks: a key click is one) and RNNoise takes more than 6 dB off it, for
+ * 250 ms at a time (renewed while it stays loud and lasting). Each 10 ms
+ * block decides the next one. The dry side waits `delay` samples, so it
+ * lines up with what RNNoise gives back.
+ */
+export const LOUD_PASS = { windowMs: 10, minDb: -40, overFloorDb: 15, lasting: 3, of: 8, cutDb: -6, holdMs: 250, fadeMs: 10 };
+/** The vendored RNNoise worklet's delay at 48 kHz: its 512-sample ring plus RNNoise's own 480 (test/voice.test.mjs measures it). */
+export const RNNOISE_DELAY = 992;
+
+export class LoudPass {
+  constructor(sampleRate, delay = RNNOISE_DELAY) {
+    const ms = (v) => Math.round((v / 1000) * sampleRate);
+    this.window = ms(LOUD_PASS.windowMs);
+    this.holdWindows = Math.round(LOUD_PASS.holdMs / LOUD_PASS.windowMs);
+    this.step = 1 / ms(LOUD_PASS.fadeMs);
+    this.windowsPerBucket = Math.round(GATE.floorBucketMs / LOUD_PASS.windowMs);
+    this.delay = delay;
+    this.ring = new Float32Array(Math.max(1, delay));
+    this.w = 0;
+    this.out = new Float32Array(128);
+    this.drySum = 0;
+    this.wetSum = 0;
+    this.n = 0;
+    this.recent = 0; // a bit per 10 ms block, newest lowest: was it loud?
+    this.held = 0; // blocks left of passing
+    this.want = 0;
+    this.mix = 0; // 0 = RNNoise's output, 1 = the plain mic
+    // The room's noise, measured like the gate's (on the mic before RNNoise).
+    this.buckets = [];
+    this.bucketMin = 0;
+    this.bucketN = 0;
+    this.bucketWindows = 0;
+    this.floor = -120;
+  }
+
+  /** Passing the plain mic through right now (tests). */
+  get passing() {
+    return this.want === 1;
+  }
+
+  /** One block, mono: RNNoise's output and the mic it was given. Returns the mix (a buffer reused next time). */
+  process(wet, dry) {
+    const n = wet.length;
+    if (this.out.length < n) this.out = new Float32Array(n);
+    const out = this.out;
+    for (let i = 0; i < n; i++) {
+      let d = dry[i] ?? 0;
+      if (this.delay > 0) {
+        const late = this.ring[this.w];
+        this.ring[this.w] = d;
+        this.w = (this.w + 1) % this.delay;
+        d = late;
+      }
+      const x = wet[i];
+      this.drySum += d * d;
+      this.wetSum += x * x;
+      const step = this.want - this.mix;
+      this.mix += step > this.step ? this.step : step < -this.step ? -this.step : step;
+      out[i] = x + (d - x) * this.mix;
+      if (++this.n === this.window) this.#decide();
+    }
+    return out.subarray(0, n);
+  }
+
+  #decide() {
+    const db = toDb(this.drySum / this.window);
+    const cut = toDb(this.wetSum / this.window) - db;
+    this.drySum = 0;
+    this.wetSum = 0;
+    this.n = 0;
+    if (db > -110) {
+      this.bucketMin = this.bucketN ? Math.min(this.bucketMin, db) : db;
+      this.bucketN++;
+    }
+    if (++this.bucketWindows === this.windowsPerBucket) {
+      this.bucketWindows = 0;
+      if (this.bucketN) this.buckets.push(this.bucketMin);
+      if (this.buckets.length > GATE.floorBuckets) this.buckets.shift();
+      this.bucketN = 0;
+      this.floor = this.buckets.length ? Math.min(...this.buckets) : -120;
+    }
+    const loud = db >= LOUD_PASS.minDb && db >= this.floor + LOUD_PASS.overFloorDb;
+    this.recent = ((this.recent << 1) | (loud ? 1 : 0)) & ((1 << LOUD_PASS.of) - 1);
+    let count = 0;
+    for (let b = this.recent; b; b &= b - 1) count++;
+    const lasting = count >= LOUD_PASS.lasting;
+    if (loud && lasting && (cut < LOUD_PASS.cutDb || this.held > 0)) this.held = this.holdWindows;
+    else if (this.held > 0) this.held--;
+    this.want = this.held > 0 ? 1 : 0;
+  }
+}
+
+/**
  * "Too loud (clipping)" on the mic meter: the loudest sample of a 20 ms
  * report at −1 dBFS or more, three times within 2 s, shows it for 3 s.
  * (Once is a pop; again and again is a mic turned up too far.)
@@ -338,15 +437,20 @@ export class ClipWatch {
 // ── Browser glue ─────────────────────────────────────────────────────────
 const Processor = globalThis.AudioWorkletProcessor ?? class {};
 
+/** Input 0: the mic (after RNNoise when it runs). Input 1, with RNNoise: the mic as RNNoise got it (LoudPass). */
 class GateProcessor extends Processor {
   constructor(options) {
     super();
     this.gate = new Gate(sampleRate, options?.processorOptions ?? {});
+    this.pass = new LoudPass(sampleRate);
     this.port.onmessage = (e) => this.gate.set(e.data);
   }
 
   process(inputs, outputs) {
-    const report = this.gate.process(inputs[0] ?? [], outputs[0] ?? []);
+    let input = inputs[0] ?? [];
+    const dry = inputs[1]?.[0];
+    if (dry && input[0]) input = [this.pass.process(input[0], dry)]; // (mono: RNNoise never runs in music mode)
+    const report = this.gate.process(input, outputs[0] ?? []);
     if (report) this.port.postMessage(report);
     return true;
   }

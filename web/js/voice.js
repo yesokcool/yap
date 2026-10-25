@@ -56,7 +56,8 @@ async function rnnoiseNode(ctx) {
  *
  * The mic's path: getUserMedia (the browser's echo cancellation and gain, and
  * its noise suppression only where RNNoise can't run) → RNNoise (Noise
- * suppression) → the transmit gate (gate-worklet.js,
+ * suppression; loud, lasting sounds like a laugh get past it: the gate
+ * worklet also hears the mic as RNNoise got it) → the transmit gate (gate-worklet.js,
  * on the audio thread: voice activity / push-to-talk with fades, a release
  * tail and a short pre-roll) → the track every peer sends. Mute and deafen
  * disable that track from here, so they hold even if the audio thread stalls.
@@ -534,7 +535,7 @@ export class Voice extends EventTarget {
     try {
       this.#source = ctx.createMediaStreamSource(stream);
       this.#gate = new AudioWorkletNode(ctx, 'yap-gate', {
-        numberOfInputs: 1,
+        numberOfInputs: 2,
         numberOfOutputs: 1,
         channelCount: channels,
         channelCountMode: 'explicit',
@@ -551,9 +552,12 @@ export class Voice extends EventTarget {
       this.#gate.connect(this.#dest);
       this.#gate.connect(hush).connect(ctx.destination);
       this.#hush = hush;
-      // mic → RNNoise → gate; voice activity hears the cleaned audio.
-      if (denoise) this.#source.connect(denoise).connect(this.#gate);
-      else this.#source.connect(this.#gate);
+      // mic → RNNoise → gate; voice activity hears the cleaned audio. The gate's second input is
+      // the mic as RNNoise got it: loud, lasting sounds (a laugh) come through (gate-worklet.js › LoudPass).
+      if (denoise) {
+        this.#source.connect(denoise).connect(this.#gate, 0, 0);
+        this.#source.connect(this.#gate, 0, 1);
+      } else this.#source.connect(this.#gate);
     } catch (err) {
       // (Firefox, for one, won't connect a mic at another sample rate.) A half-built mic would sit
       // there open and silent, and everything that checks `rawStream` would think it's fine.

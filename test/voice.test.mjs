@@ -1,10 +1,11 @@
 // Voice logic that needs no browser: SDP tuning, codec order (RED) and the transmit gate.
 //   node test/voice.test.mjs
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { orderAudioCodecs, orderCodecs, OwnConnection, panGains, SCREEN_QUALITY, tuneOpus } from '../web/js/voice.js';
 import { PAN, voicePan } from '../web/js/space-map.js';
 import { settings } from '../web/js/settings.js';
-import { CLIP, ClipWatch, Gate, GATE, limit, MutedReminder, MUTED_REMINDER, PttLatch, PTT_LATCH_MS } from '../web/js/gate-worklet.js';
+import { CLIP, ClipWatch, Gate, GATE, limit, LoudPass, LOUD_PASS, MutedReminder, MUTED_REMINDER, PttLatch, PTT_LATCH_MS, RNNOISE_DELAY } from '../web/js/gate-worklet.js';
 
 const cases = [];
 const t = (name, fn) => cases.push([name, fn]);
@@ -482,6 +483,171 @@ t('mic volume past 100 %: a soft limiter, never past 0 dBFS; "peak" is still the
   assert.ok(loudest.every((p) => p.peak < -2), `the mic's own peaks (${loudest[0].peak.toFixed(1)} dBFS): not clipping`);
   assert.ok(loudest.every((p) => p.boost > -1), `doubled, they reach the limiter (${loudest[0].boost.toFixed(1)} dBFS)`);
   assert.ok(run(x, { mode: 'open' }).reports.every((p) => p.boost === -120), 'at 100 % there is no boost to report');
+});
+
+// ── Noise suppression: loud, lasting sounds get past RNNoise (LoudPass) ──
+
+/** A seeded generator, so every run hears the same noise. */
+function rng(seed) {
+  let a = seed >>> 0;
+  const u = () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  return () => Math.sqrt(-2 * Math.log(u() || 1e-12)) * Math.cos(2 * Math.PI * u());
+}
+const dbOf = (x, from = 0, to = x.length) => {
+  let s = 0;
+  for (let i = from; i < to; i++) s += x[i] * x[i];
+  return 10 * Math.log10(s / Math.max(1, to - from) + 1e-12);
+};
+/** Pink noise (a fan, a room) at `db` dBFS RMS. */
+function pink(n, db, seed = 1) {
+  const g = rng(seed);
+  const x = new Float32Array(n);
+  let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+  for (let i = 0; i < n; i++) {
+    const w = g();
+    b0 = 0.99886 * b0 + w * 0.0555179; b1 = 0.99332 * b1 + w * 0.0750759; b2 = 0.969 * b2 + w * 0.153852;
+    b3 = 0.8665 * b3 + w * 0.3104856; b4 = 0.55 * b4 + w * 0.5329522; b5 = -0.7616 * b5 - w * 0.016898;
+    x[i] = b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362;
+    b6 = w * 0.115926;
+  }
+  const k = 10 ** (db / 20) / 10 ** (dbOf(x) / 20);
+  return x.map((v) => v * k);
+}
+/** Bursts of a voiced sound: pitch gliding f0 → f1, `harmonics` of them, a little breath. */
+function voiced({ f0, f1, burst, gap, bursts, amp, harmonics, breath, seed = 3 }) {
+  const g = rng(seed);
+  const out = [...new Float32Array(SR / 10)];
+  let ph = 0;
+  for (let b = 0; b < bursts; b++) {
+    const L = Math.round(burst * SR);
+    for (let i = 0; i < L; i++) {
+      const t = i / L;
+      ph += (2 * Math.PI * (f0 + (f1 - f0) * t + 30 * Math.sin((2 * Math.PI * 7 * i) / SR))) / SR;
+      let v = 0;
+      for (let k = 1; k <= harmonics; k++) v += Math.sin(k * ph) / k ** 1.2;
+      out.push(amp * Math.sqrt(Math.sin(Math.PI * t)) * (v * 0.5 + breath * g()));
+    }
+    for (let i = 0; i < Math.round(gap * SR); i++) out.push(amp * 0.02 * g());
+  }
+  return Float32Array.from(out);
+}
+/** A hard, high-pitched laugh (a squeal, 1–1.2 kHz): what RNNoise guts. */
+const squeal = () => voiced({ f0: 1200, f1: 1000, burst: 0.2, gap: 0.04, bursts: 16, amp: 0.3, harmonics: 6, breath: 0.05 });
+/** "Ha ha ha" low down (260 → 220 Hz): what RNNoise keeps. */
+const ha = () => voiced({ f0: 260, f1: 220, burst: 0.12, gap: 0.08, bursts: 20, amp: 0.35, harmonics: 10, breath: 0.15 });
+/** Typing: 6 ms clicks about every 120 ms over a quiet room. */
+function typing(n) {
+  const x = pink(n, -60, 7);
+  const g = rng(9);
+  for (let at = 0.3 * SR; at < n - SR / 10; at += 0.12 * SR + (g() * 0.015 * SR) | 0) {
+    for (let j = 0; j < 0.006 * SR; j++) x[at + j] += g() * Math.exp(-j / (0.0012 * SR)) * 0.25;
+  }
+  return x;
+}
+
+/** Run a LoudPass over `dry` and `wet`, 128 samples at a time (the worklet's blocks); also how often it passed. */
+function loudPass(dry, wet, delay = RNNOISE_DELAY) {
+  const p = new LoudPass(SR, delay);
+  const y = new Float32Array(dry.length);
+  let passed = 0;
+  for (let i = 0; i + 128 <= dry.length; i += 128) {
+    y.set(p.process(wet.subarray(i, i + 128), dry.subarray(i, i + 128)), i);
+    if (p.passing) passed++;
+  }
+  return { y, passed };
+}
+const late = (x, d) => { const y = new Float32Array(x.length); y.set(x.subarray(0, x.length - d), d); return y; };
+
+t('loud pass: a loud, lasting sound noise removal guts comes through as the plain mic; a click, a hum or what it keeps never trips it', () => {
+  const n = SR * 3, d = RNNOISE_DELAY;
+  // A quiet room, then a loud tone 1.0–2.0 s that a stand-in "RNNoise" takes 60 dB off (and passes the rest).
+  const dry = pink(n, -60);
+  for (let i = SR; i < 2 * SR; i++) dry[i] += 0.1 * Math.sin((2 * Math.PI * 1100 * i) / SR);
+  const wet = late(dry, d);
+  for (let i = SR + d; i < 2 * SR + d; i++) wet[i] *= 0.001;
+  const { y } = loudPass(dry, wet);
+  // From 50 ms in (3 loud blocks, a decision, a 10 ms fade) it's the mic, lined up with RNNoise's delay.
+  const from = SR + d + Math.round(0.06 * SR), to = 2 * SR + d;
+  assert.ok(Math.abs(dbOf(y, from, to) - dbOf(dry, from - d, to - d)) < 0.1, `passed: ${dbOf(y, from, to).toFixed(1)} dBFS`);
+  for (let i = from; i < to; i += 997) assert.ok(Math.abs(y[i] - dry[i - d]) < 1e-6, 'sample for sample, the plain mic');
+  // 250 ms after it went quiet, back to the noise removal's output.
+  const after = 2 * SR + d + Math.round(0.3 * SR);
+  assert.ok(Math.abs(y[after] - wet[after]) < 1e-9 && Math.abs(y[n - 200] - wet[n - 200]) < 1e-9, 'then RNNoise again');
+
+  // A click (one 10 ms block at −15 dBFS) that's taken out: never passed.
+  const click = pink(n, -60);
+  for (let i = SR; i < SR + 480; i++) click[i] += 0.25 * Math.sin(i);
+  const clickWet = late(click, d).map((v, i) => (i >= SR + d && i < SR + d + 480 ? v * 0.001 : v));
+  assert.equal(loudPass(click, clickWet).passed, 0, 'a click');
+  // Steady hum the noise removal takes out entirely, 15 dB over nothing: never loud.
+  const hum = pink(n, -45);
+  assert.equal(loudPass(hum, late(hum, d).map((v) => v * 0.01)).passed, 0, 'a fan');
+  // Loud, lasting, and the noise removal keeps it (speech): nothing to do.
+  const kept = late(dry, d);
+  assert.equal(loudPass(dry, kept).passed, 0, 'speech it keeps');
+  assert.deepEqual(LOUD_PASS, { windowMs: 10, minDb: -40, overFloorDb: 15, lasting: 3, of: 8, cutDb: -6, holdMs: 250, fadeMs: 10 }, 'the spec');
+});
+
+/** The web's RNNoise worklet (vendored, unchanged) run in Node, 128 samples at a time like the browser: a fresh one per call. */
+let RnnoiseProcessor = null;
+async function rnnoise(x) {
+  if (!RnnoiseProcessor) {
+    const before = { AudioWorkletProcessor: globalThis.AudioWorkletProcessor, registerProcessor: globalThis.registerProcessor, debug: console.debug };
+    globalThis.AudioWorkletProcessor = class { port = { addEventListener() {}, postMessage() {} }; };
+    globalThis.registerProcessor = (_name, c) => (RnnoiseProcessor = c);
+    globalThis.__dirname ??= '/'; // (emscripten looks for it under Node)
+    console.debug = () => {};
+    await import('../web/vendor/noise/rnnoise-worklet.js');
+    Object.assign(globalThis, { AudioWorkletProcessor: before.AudioWorkletProcessor, registerProcessor: before.registerProcessor });
+    console.debug = before.debug;
+  }
+  const p = new RnnoiseProcessor({ processorOptions: { wasmBinary: fs.readFileSync(new URL('../web/vendor/noise/rnnoise_simd.wasm', import.meta.url)), maxChannels: 1 } });
+  while (!p.processor) await new Promise((r) => setTimeout(r, 5));
+  const y = new Float32Array(x.length);
+  for (let i = 0; i + 128 <= x.length; i += 128) {
+    const out = new Float32Array(128);
+    p.process([[x.subarray(i, i + 128)]], [[out]]);
+    y.set(out, i);
+  }
+  p.destroy();
+  return y;
+}
+
+t("loud pass, with the web's real RNNoise: its delay is RNNOISE_DELAY; a squealing laugh it guts comes through; a fan and typing stay out", async () => {
+  // The delay: where RNNoise's output lines up with a voice it keeps.
+  const voice = ha();
+  const kept = await rnnoise(voice);
+  let best = 0, bestAt = 0;
+  for (let lag = 900; lag <= 1100; lag++) {
+    let c = 0;
+    for (let i = SR / 5; i < voice.length - 1200; i += 2) c += voice[i] * kept[i + lag];
+    if (c > best) [best, bestAt] = [c, lag];
+  }
+  assert.equal(bestAt, RNNOISE_DELAY, 'the vendored worklet changed: measure its delay again');
+  assert.ok(dbOf(kept) - dbOf(voice) > -1, 'a low "ha ha ha" RNNoise keeps');
+
+  const laugh = squeal();
+  const gutted = await rnnoise(laugh);
+  const passed = loudPass(laugh, gutted).y;
+  const lost = dbOf(gutted) - dbOf(laugh), now = dbOf(passed) - dbOf(laugh);
+  assert.ok(lost < -6, `RNNoise alone takes ${lost.toFixed(1)} dB off the squeal`);
+  assert.ok(now > -1.5, `with the loud pass: ${now.toFixed(1)} dB`);
+
+  const fan = pink(SR * 4, -50);
+  const fanOut = loudPass(fan, await rnnoise(fan));
+  assert.equal(fanOut.passed, 0);
+  assert.ok(dbOf(fanOut.y, SR) - dbOf(fan, SR) < -15, `the fan stays out: ${(dbOf(fanOut.y, SR) - dbOf(fan, SR)).toFixed(1)} dB`);
+
+  const keys = typing(SR * 4);
+  const keysWet = await rnnoise(keys);
+  const keysOut = loudPass(keys, keysWet);
+  assert.equal(keysOut.passed, 0, 'typing never trips it');
+  assert.ok(Math.abs(dbOf(keysOut.y) - dbOf(keysWet)) < 0.01);
 });
 
 let failed = 0;

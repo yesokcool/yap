@@ -367,7 +367,7 @@ pub(super) fn voice_tab(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
         }
         ui.add_space(4.0);
         let mut ns = m.config.noise_suppression;
-        if theme::tip(theme::checkbox(ui, &mut ns, "Noise suppression", p), "RNNoise: an AI filter for keyboards, fans and dogs").changed() {
+        if theme::tip(theme::checkbox(ui, &mut ns, "Noise suppression", p), "RNNoise: an AI filter for keyboards, fans and hum (loud laughs and shouts still come through)").changed() {
             acts.push(Act::Config(Box::new(move |c| c.noise_suppression = ns)));
             acts.push(Act::ApplyGate);
         }
