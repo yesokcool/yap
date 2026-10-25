@@ -4,10 +4,10 @@ import { ClipWatch, MutedReminder, PttLatch } from './gate-worklet.js';
 
 /**
  * RNNoise (the noise remover the desktop app uses too), as an AudioWorklet
- * with WebAssembly: what Noise suppression uses wherever it can run. Where
- * it can't (no WebAssembly, e.g. Safari's Lockdown Mode, or it didn't load),
- * the browser's own noise suppression steps in. Loaded the first time the
- * mic opens with Noise suppression on. Assumes 48 kHz, which is why the
+ * with WebAssembly: Stronger noise removal, instead of the browser's own
+ * noise suppression. Where it can't run (no WebAssembly, e.g. Safari's
+ * Lockdown Mode, or it didn't load), the browser's steps in. Loaded the
+ * first time the mic opens with it on. Assumes 48 kHz, which is why the
  * audio graph runs at 48 kHz.
  */
 const NOISE = new URL('../vendor/noise/', import.meta.url);
@@ -54,10 +54,10 @@ async function rnnoiseNode(ctx) {
  *         more), 'ptt-click' ({open}: push-to-talk opened, or closed after
  *         its tail; for your ears only).
  *
- * The mic's path: getUserMedia (the browser's echo cancellation and gain, and
- * its noise suppression only where RNNoise can't run) → RNNoise (Noise
- * suppression; loud, lasting sounds like a laugh get past it: the gate
- * worklet also hears the mic as RNNoise got it) → the transmit gate (gate-worklet.js,
+ * The mic's path: getUserMedia (the browser's echo cancellation, gain and
+ * noise suppression) → with Stronger noise removal, RNNoise in place of the
+ * browser's noise suppression (loud, lasting sounds like a laugh get past it:
+ * the gate worklet also hears the mic as RNNoise got it) → the transmit gate (gate-worklet.js,
  * on the audio thread: voice activity / push-to-talk with fades, a release
  * tail and a short pre-roll) → the track every peer sends. Mute and deafen
  * disable that track from here, so they hold even if the audio thread stalls.
@@ -483,10 +483,11 @@ export class Voice extends EventTarget {
     const ctx = this.#ctx;
     if (!ctx) return;
     const music = settings.music;
-    // Noise suppression (off in music mode) = RNNoise wherever it runs. It's loaded before the
-    // mic opens, so the browser's own filter is asked for only where RNNoise can't run (never both).
+    // Noise suppression (off in music mode) = the browser's own; Stronger noise removal = RNNoise
+    // instead, wherever it runs. RNNoise is loaded before the mic opens, so the browser's filter is
+    // asked for only when RNNoise isn't running (never both).
     let denoise = null;
-    if (!music && settings.noiseSuppression && !this.#rnnoiseBroken) {
+    if (!music && settings.noiseSuppression && settings.strongerNoise && !this.#rnnoiseBroken) {
       try {
         denoise = await rnnoiseNode(ctx);
       } catch (err) {

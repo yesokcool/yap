@@ -724,7 +724,7 @@ impl Core {
         [
             ("Quality", format!("{}{}", kbps(c.bitrate), shared.map(|b| format!(" (this channel: {} for everyone)", kbps(b))).unwrap_or_default())),
             ("Input mode", mode),
-            ("Noise suppression", if c.noise_suppression { "on (RNNoise)".into() } else { "off".into() }),
+            ("Noise suppression", if !c.noise_suppression { "off".into() } else if c.stronger_noise { "stronger (RNNoise)".into() } else { "on (WebRTC's)".into() }),
             ("Echo cancellation", echo_cancellation(c)),
             ("Automatic gain", on_off(c.auto_gain)),
             ("Music mode", "off (not in this app)".into()),

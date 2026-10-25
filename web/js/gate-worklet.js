@@ -316,8 +316,8 @@ export class PttLatch {
 }
 
 /**
- * Noise suppression lets loud, lasting sounds through (PROTOCOL.md › Voice ›
- * Transmit gate › Noise suppression). RNNoise is trained on speech, so a
+ * Stronger noise removal lets loud, lasting sounds through (PROTOCOL.md ›
+ * Voice › Transmit gate › Noise suppression). RNNoise is trained on speech, so a
  * hard, high-pitched laugh, a shout or singing can come out of it 20–60 dB
  * down. Given the mic both after RNNoise (`wet`) and as RNNoise got it
  * (`dry`), this crossfades to the plain mic while the mic is loud (−40 dBFS

@@ -1,6 +1,14 @@
 {
-  "current": "0.52.0",
+  "current": "0.53.0",
   "releases": [
+    {
+      "version": "0.53.0",
+      "date": "2026-10-24",
+      "title": "The normal noise filter again",
+      "items": [
+        "Noise suppression is the gentle, normal filter again (fans and hum); the AI filter that also takes out typing is now Settings › Voice › Advanced › Stronger noise removal."
+      ]
+    },
     {
       "version": "0.52.0",
       "date": "2026-10-24",

@@ -127,7 +127,41 @@ impl Agc {
     }
 }
 
-/// Noise suppression lets loud, lasting sounds through (PROTOCOL.md › Voice
+/// Settings › Voice › Noise suppression: WebRTC's own noise suppression,
+/// what a browser runs for `noiseSuppression: true` (through `sonora`, at
+/// its High level). Steady noise (fans, hum) comes down about 20 dB; a laugh
+/// or a shout is left alone, since it only learns the room's steady noise.
+/// Made when first needed and dropped when off, so it starts fresh.
+#[derive(Default)]
+pub struct WebrtcNs {
+    apm: Option<Box<sonora::AudioProcessing>>,
+    input: Vec<f32>,
+}
+
+impl WebrtcNs {
+    pub fn reset(&mut self) {
+        self.apm = None;
+    }
+
+    /// One 10 ms block at 48 kHz, in place.
+    pub fn process(&mut self, block: &mut [f32]) {
+        let apm = self.apm.get_or_insert_with(|| {
+            use sonora::config::{NoiseSuppression, NoiseSuppressionLevel, Pipeline};
+            let config = sonora::Config {
+                pipeline: Pipeline { multi_channel_render: false, multi_channel_capture: false, ..Default::default() },
+                noise_suppression: Some(NoiseSuppression { level: NoiseSuppressionLevel::High, ..Default::default() }),
+                ..Default::default()
+            };
+            let stream = sonora::StreamConfig::new(48_000, 1);
+            Box::new(sonora::AudioProcessing::builder().config(config).capture_config(stream).render_config(stream).build())
+        });
+        self.input.clear();
+        self.input.extend_from_slice(block);
+        let _ = apm.process_capture_f32(&[&self.input], &mut [block]);
+    }
+}
+
+/// Stronger noise removal lets loud, lasting sounds through (PROTOCOL.md › Voice
 /// › Transmit gate › Noise suppression; the web's `LoudPass` in
 /// `gate-worklet.js`). RNNoise is trained on speech, so a hard, high-pitched
 /// laugh, a shout or singing can come out of it 20–60 dB down. This
@@ -429,6 +463,24 @@ mod tests {
             at += 5760 + (r.normal() * 720.0) as usize;
         }
         assert_eq!(denoise(&keys, true).1, 0.0, "typing");
+    }
+
+    /// Settings › Voice › Noise suppression (WebRTC's): a laugh RNNoise guts comes through, a fan comes down.
+    #[test]
+    fn webrtc_noise_suppression_keeps_a_laugh_and_takes_a_fan_down() {
+        let run = |x: &[f32]| {
+            let mut ns = WebrtcNs::default();
+            let mut y = x.to_vec();
+            y.as_chunks_mut::<480>().0.iter_mut().for_each(|b| ns.process(b));
+            y
+        };
+        let squeal = voiced(Voiced { f0: 1200.0, f1: 1000.0, burst: 0.2, gap: 0.04, bursts: 16, amp: 0.3, harmonics: 6, breath: 0.05 });
+        let out = run(&squeal);
+        assert!(rms_db(&out) - rms_db(&squeal) > -1.5, "the squeal: {:.1} dB", rms_db(&out) - rms_db(&squeal));
+        let fan = pink(SR as usize * 4, -50.0, 1);
+        let out = run(&fan);
+        let s = SR as usize * 2;
+        assert!(rms_db(&out[s..]) - rms_db(&fan[s..]) < -12.0, "the fan: {:.1} dB", rms_db(&out[s..]) - rms_db(&fan[s..]));
     }
 
     #[test]

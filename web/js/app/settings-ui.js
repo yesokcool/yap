@@ -146,7 +146,7 @@ export function openSettings(tab) {
   renderMicVolume();
   form.bitrate.value = String(settings.bitrate);
   renderBitrateWarning();
-  for (const k of ['music', 'noiseSuppression', 'echoCancellation', 'autoGain', 'sounds', 'relayOnly', 'mutedReminder', 'pttClick', 'duckMedia']) form[k].checked = settings[k];
+  for (const k of ['music', 'noiseSuppression', 'strongerNoise', 'echoCancellation', 'autoGain', 'sounds', 'relayOnly', 'mutedReminder', 'pttClick', 'duckMedia']) form[k].checked = settings[k];
   // Relay-only needs a TURN relay on the server; say so instead of pretending.
   fetchIce().then((ice) => {
     const ok = hasRelay(ice);
@@ -283,6 +283,7 @@ function syncSettingsVisibility() {
   for (const el of form.querySelectorAll('[data-hide-music]')) el.hidden = settings.music;
   for (const el of form.querySelectorAll('[data-show-music]')) el.hidden = !settings.music;
   $('music-vad-note').hidden = !(settings.music && settings.mode === 'vad');
+  form.strongerNoise.disabled = !settings.noiseSuppression; // (it replaces the normal filter, so it needs that on)
 }
 
 /**
@@ -538,6 +539,7 @@ export function bindSettings() {
         return renderVoicePanel();
       case 'music':
       case 'noiseSuppression':
+      case 'strongerNoise':
       case 'echoCancellation':
       case 'autoGain':
         save({ [field]: form[field].checked });

@@ -55,6 +55,8 @@ node tools/restore.mjs <backup.json.gz> --to <url>   # disaster recovery into an
 - **Deleted messages are erased** (2026-10-05: "dont save deleted posts") — that's the one hard delete, and only of what the person deleted. Everything else stays soft (`deleted_at`, `archived_at`); never erase anything else without asking.
 - Before changing the schema or any persisted shape, audit every reader/writer in `worker/hub.ts` and `worker/hub-*.ts`.
 
+**Voice is never part of a sweep** (2026-10-24, maintainer: "voice is a sensitive area of code that cannot be included in big sweeping grandiose changes"): rounds like "review it yourself and improve things" leave the voice path alone (capture, noise removal, the gate, cues and reminders, codecs and RED, playout, the OBS page) and at most list voice ideas for him to pick. Change voice only for a problem someone reported or a change he asked for, measured before and after on real recordings, not just the happy case.
+
 **Untested surfaces — call out "Please test this manually":**
 - Voice across real networks (CGNAT/cellular may need TURN; tests only cover localhost).
 - Safari / iOS / Firefox voice (tests run Chromium only), output-device picking, Bluetooth headsets.

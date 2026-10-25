@@ -413,16 +413,15 @@ await test('Settings: Advanced starts closed, long lists show 5 then all, and it
   await b.waitForFunction((run) => (yap.state.invites ?? []).filter((x) => x.label.endsWith(run)).length >= 3, RUN, { timeout: 5000 });
   const tab = (name) => a.click(`#settings-tabs [role=tab]:text-is("${name}")`);
   await a.click('[data-action="open-settings"]');
-  // Voice: everyday groups (one Noise suppression switch), then Advanced (closed) with quality, music mode, relay-only and OBS.
+  // Voice: everyday groups (Noise suppression with them), then Advanced (closed) with quality, Stronger noise removal, music mode, relay-only and OBS.
   await tab('Voice');
   assert.deepEqual(await a.$$eval('#settings-form section:not([hidden]) .settings-group > legend', (els) => els.map((e) => e.textContent)), ['Mic & output', 'How you talk', 'Sounds']);
   assert.equal(await a.evaluate(() => document.getElementById('voice-advanced').open), false, 'Advanced starts closed');
   assert.equal(await a.isVisible('#settings-form select[name=bitrate]'), false);
   await a.click('#voice-advanced > summary');
   await a.waitForSelector('#settings-form select[name=bitrate]', { state: 'visible' });
-  assert.equal(await a.locator('#settings-form [name=rnnoise]').count(), 0, 'no second noise switch');
   assert.equal(await a.evaluate(() => document.querySelector('#settings-form [name=noiseSuppression]').closest('#voice-advanced')), null, 'Noise suppression is with the everyday ones');
-  for (const name of ['music', 'relayOnly']) assert.ok(await a.evaluate((n) => document.querySelector(`#settings-form [name=${n}]`).closest('#voice-advanced'), name), `${name} is under Advanced`);
+  for (const name of ['strongerNoise', 'music', 'relayOnly']) assert.ok(await a.evaluate((n) => document.querySelector(`#settings-form [name=${n}]`).closest('#voice-advanced'), name), `${name} is under Advanced`);
   // OK stays on screen however long the tab is (the tab scrolls inside).
   const ok = await a.locator('#settings-form .settings-actions .btn').boundingBox();
   assert.ok(ok && ok.y + ok.height <= 800, 'OK is on screen');
@@ -2090,45 +2089,56 @@ await test('Test mic in a call: says the mic is already on, the bar moves, and s
   assert.ok(await a.evaluate(() => yap.voice.rawStream && [...yap.voice.peers.values()].some((p) => p.pc.connectionState === 'connected')), 'still in the call, mic open');
 });
 
-await test('one Noise suppression switch: RNNoise in the call (not the browser\'s too); music mode turns it off; an old "stronger" setting keeps it on', async () => {
+await test("Noise suppression is the browser's own; Stronger noise removal is RNNoise instead (never both), and needs it on; music mode turns both off; an old \"stronger\" setting keeps noise suppression on", async () => {
   const mic = () => a.evaluate(() => ({ rnnoise: yap.voice.rnnoise, asked: window.__micAsked?.noiseSuppression ?? null }));
   const reopen = (patch) => a.evaluate(async (p) => {
     Object.assign(yap.settings, p);
     await yap.voice.restartMic();
   }, patch);
   try {
-    await reopen({ noiseSuppression: true }); // (off for everyone else here, for the test signal's sake: see user())
-    if (SYNTH) assert.deepEqual(await mic(), { rnnoise: true, asked: false }, 'RNNoise, and not the browser\'s filter as well');
+    // (Off for everyone else here, for the test signal's sake: see user().)
+    await reopen({ noiseSuppression: true, strongerNoise: false });
+    if (SYNTH) assert.deepEqual(await mic(), { rnnoise: false, asked: true }, "the browser's filter, no RNNoise");
+    else assert.equal((await mic()).rnnoise, false);
+    await reopen({ strongerNoise: true });
+    if (SYNTH) assert.deepEqual(await mic(), { rnnoise: true, asked: false }, "stronger: RNNoise, and not the browser's filter as well");
     else assert.equal((await mic()).rnnoise, true);
     await reopen({ music: true });
     assert.equal((await mic()).rnnoise, false, 'music mode: off');
     if (SYNTH) assert.equal((await mic()).asked, false);
     await reopen({ music: false, noiseSuppression: false });
-    assert.equal((await mic()).rnnoise, false, 'switched off: off');
-    await reopen({ noiseSuppression: true });
-    assert.equal((await mic()).rnnoise, true);
+    assert.equal((await mic()).rnnoise, false, 'noise suppression off: stronger does nothing');
+    if (SYNTH) assert.equal((await mic()).asked, false);
+    // In Settings: Stronger is under Advanced, greyed out while Noise suppression is off.
+    await a.click('[data-action="open-settings"]');
+    await a.click('#settings-tabs [role=tab]:text-is("Voice")');
+    assert.equal(await a.isDisabled('#settings-form [name=strongerNoise]'), true);
+    await a.check('#settings-form [name=noiseSuppression]');
+    assert.equal(await a.isDisabled('#settings-form [name=strongerNoise]'), false);
+    await a.waitForFunction(() => yap.voice.rnnoise === true);
+    await a.click('#settings-form .settings-actions .btn');
     // Two changes in a row (on, with RNNoise to set up, then off at once): what ends up open is the last one asked for.
     const last = await a.evaluate(async () => {
-      yap.settings.noiseSuppression = false;
+      yap.settings.strongerNoise = false;
       const first = yap.voice.restartMic();
-      yap.settings.noiseSuppression = true;
+      yap.settings.strongerNoise = true;
       const second = yap.voice.restartMic();
-      yap.settings.noiseSuppression = false;
+      yap.settings.strongerNoise = false;
       await Promise.all([first, second, yap.voice.restartMic()]);
       return { rnnoise: yap.voice.rnnoise, open: yap.voice.rawStream?.getAudioTracks()[0]?.readyState };
     });
     assert.deepEqual(last, { rnnoise: false, open: 'live' }, 'the last change wins, with one live mic');
   } finally {
-    await reopen({ music: false, noiseSuppression: false }); // (the plain test signal again for the tests after this one)
+    await reopen({ music: false, noiseSuppression: false, strongerNoise: false }); // (the plain test signal again for the tests after this one)
   }
   await a.waitForFunction(() => [...yap.voice.peers.values()].some((p) => p.pc.connectionState === 'connected'));
-  // Settings from before: "Stronger noise removal" on (with the old switch off) means noise removal stays on.
+  // Settings from before 2026-10-11: "Stronger noise removal" on (with the old switch off) means noise suppression stays on.
   const ctx = await newContext({ viewport: { width: 800, height: 600 } }, 'old settings');
   await ctx.addInitScript(() => location.origin.startsWith('http') && localStorage.setItem('yap.settings', JSON.stringify({ noiseSuppression: false, rnnoise: true })));
   const page = await ctx.newPage();
   await page.goto(`${BASE}/`);
   await page.waitForFunction(() => globalThis.yap?.settings);
-  assert.deepEqual(await page.evaluate(() => [yap.settings.noiseSuppression, 'rnnoise' in yap.settings]), [true, false]);
+  assert.deepEqual(await page.evaluate(() => [yap.settings.noiseSuppression, yap.settings.strongerNoise, 'rnnoise' in yap.settings]), [true, false, false]);
   await ctx.close();
 });
 

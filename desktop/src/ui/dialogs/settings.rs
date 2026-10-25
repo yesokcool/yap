@@ -367,7 +367,7 @@ pub(super) fn voice_tab(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
         }
         ui.add_space(4.0);
         let mut ns = m.config.noise_suppression;
-        if theme::tip(theme::checkbox(ui, &mut ns, "Noise suppression", p), "RNNoise: an AI filter for keyboards, fans and hum (loud laughs and shouts still come through)").changed() {
+        if theme::tip(theme::checkbox(ui, &mut ns, "Noise suppression", p), "Takes out fans and hum").changed() {
             acts.push(Act::Config(Box::new(move |c| c.noise_suppression = ns)));
             acts.push(Act::ApplyGate);
         }
@@ -414,6 +414,13 @@ pub(super) fn voice_tab(app: &App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: 
             ui.label(egui::RichText::new(HIGH_BITRATE_WARNING).font(theme::font(theme::small())).color(p.warn));
         }
         note(ui, QUALITY_NOTE, p);
+        // Replaces the normal filter, so it needs that on (the web's words).
+        let mut strong = m.config.stronger_noise;
+        let r = ui.add_enabled_ui(m.config.noise_suppression, |ui| theme::checkbox(ui, &mut strong, "Stronger noise removal", p)).inner;
+        if theme::tip(r, "RNNoise, an AI filter: also takes out typing and clicks, but can dull a laugh or a shout. Needs Noise suppression on.").changed() {
+            acts.push(Act::Config(Box::new(move |c| c.stronger_noise = strong)));
+            acts.push(Act::ApplyGate);
+        }
         relay_toggle(ui, m, p, acts, st);
     });
     st.advanced = open;

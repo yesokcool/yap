@@ -172,6 +172,7 @@ async fn run_async(args: Args) -> i32 {
         key: args.key.clone().or(invite_key).unwrap_or_default(),
         name: if args.name.is_empty() { "Bot".into() } else { args.name.clone() },
         noise_suppression: args.denoise,
+        stronger_noise: args.denoise,
         mic_volume: args.mic_volume.unwrap_or(1.0),
         echo_cancellation: args.echo_cancel,
         sounds: false,

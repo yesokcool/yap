@@ -64,7 +64,10 @@ pub struct Config {
     pub push_to_mute_key: String,
     /// Opus bitrate in bits/s.
     pub bitrate: u32,
+    /// Settings › Voice › Noise suppression: WebRTC's own, what browsers use (fans and hum).
     pub noise_suppression: bool,
+    /// Settings › Voice › Advanced › Stronger noise removal: RNNoise instead (typing and clicks too).
+    pub stronger_noise: bool,
     /// Settings › Voice › Automatic gain: speech towards −23 dBFS, at most +20 dB.
     pub auto_gain: bool,
     /// Settings › Voice › Mic volume: how loud your mic goes out (1.0 = 100 %, 0–2),
@@ -171,6 +174,7 @@ impl Default for Config {
             push_to_mute_key: String::new(),
             bitrate: 128_000,
             noise_suppression: true,
+            stronger_noise: false,
             auto_gain: true,
             mic_volume: 1.0,
             echo_cancellation: true,

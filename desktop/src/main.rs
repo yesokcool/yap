@@ -58,7 +58,7 @@ OPTIONS (headless test mode):
   --record-wav FILE    Record what we hear (48 kHz stereo WAV)
   --bitrate BPS        Opus bitrate (default 128000)
   --mode open|vad|ptt  Transmit mode (default open)
-  --denoise            Enable RNNoise (default off in headless)
+  --denoise            Enable noise suppression, the stronger kind (RNNoise; default off in headless)
   --mic-volume PCT     Settings › Voice › Mic volume, 0–200 (default 100)
   --echo-cancel        Enable echo cancellation (default off in headless; the stats
                        line then shows aec=<delay estimate>)

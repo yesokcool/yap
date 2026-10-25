@@ -24,7 +24,8 @@ const DEFAULTS = {
   pushToMuteKey: '', // held = muted for a moment (a "cough button"), in any mode; '' = none
   bitrate: 128000,
   music: false,
-  noiseSuppression: true, // RNNoise wherever it runs, else the browser's own (voice.js)
+  noiseSuppression: true, // the browser's own (WebRTC's): fans and hum (voice.js)
+  strongerNoise: false, // Stronger noise removal: RNNoise instead, wherever it runs (voice.js)
   relayOnly: false, // voice only through the TURN relay, so people in a call never see your IP
   shareSurface: 'window', // screen sharing: window | monitor | browser
   shareQuality: 'smooth', // smooth (1080p60) | sharp (1440p30) | max (4K60)

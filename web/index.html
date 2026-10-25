@@ -515,7 +515,7 @@
             <small class="muted">Mute and deafen from anywhere in Yap: Ctrl/⌘+Shift+M and Ctrl/⌘+Shift+D.</small>
           </div>
           <label class="toggle"><input type="checkbox" name="mutedReminder"><span>Remind me when I talk while muted <small class="muted">— “You're muted” by the button, and a soft blip the first time after you mute</small></span></label>
-          <label class="toggle" data-hide-music><input type="checkbox" name="noiseSuppression"><span>Noise suppression <small class="muted">— RNNoise, the same AI filter the desktop app uses (keyboards, fans, hum); loud laughs and shouts still come through</small></span></label>
+          <label class="toggle" data-hide-music><input type="checkbox" name="noiseSuppression"><span>Noise suppression <small class="muted">— takes out fans and hum</small></span></label>
           <label class="toggle" data-hide-music><input type="checkbox" name="echoCancellation"><span>Echo cancellation</span></label>
           <label class="toggle" data-hide-music><input type="checkbox" name="autoGain"><span>Automatic gain</span></label>
           <p class="muted settings-note" data-show-music hidden>Music mode is on (under Advanced), so noise suppression, echo cancellation and automatic gain are off.</p>
@@ -552,6 +552,7 @@
               <small class="warn-note" id="bitrate-warn" hidden>No dropout protection at this quality (each bit of voice no longer fits twice in a packet), and several times the upload for each friend in the call.</small>
               <small class="muted">Voice goes straight between you and your friends, so better quality costs the server nothing. Your voice goes out at your setting, and each friend's at theirs.</small>
             </label>
+            <label class="toggle" data-hide-music><input type="checkbox" name="strongerNoise"><span>Stronger noise removal <small class="muted">— RNNoise, an AI filter: also takes out typing and clicks, but can dull a laugh or a shout. Needs Noise suppression on.</small></span></label>
             <label class="toggle"><input type="checkbox" name="music"><span>Music mode <small class="muted">— stereo, all processing off. Use with headphones.</small></span></label>
             <label class="toggle"><input type="checkbox" name="relayOnly"><span>Hide my IP address in calls <small class="muted" id="relay-note">— sends your voice through the server's voice relay instead of straight to friends</small></span></label>
             <div class="field obs-field">

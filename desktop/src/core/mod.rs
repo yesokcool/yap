@@ -102,6 +102,7 @@ impl Shared {
         g.set_mode(m.config.mode);
         g.vad_threshold.set(m.config.vad_threshold);
         g.noise_suppression.store(m.config.noise_suppression, Ordering::Relaxed);
+        g.stronger_noise.store(m.config.stronger_noise, Ordering::Relaxed);
         g.auto_gain.store(m.config.auto_gain, Ordering::Relaxed);
         g.mic_gain.set(m.config.mic_volume);
         g.echo_cancellation.store(m.config.echo_cancellation, Ordering::Relaxed);

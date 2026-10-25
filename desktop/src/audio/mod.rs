@@ -76,6 +76,8 @@ pub struct Gate {
     mode: AtomicU8,
     pub vad_threshold: AtomicF32,
     pub noise_suppression: AtomicBool,
+    /// Stronger noise removal: RNNoise in place of WebRTC's noise suppression.
+    pub stronger_noise: AtomicBool,
     /// Automatic gain (V12): speech towards −23 dBFS, at most +20 dB.
     pub auto_gain: AtomicBool,
     /// Settings › Voice › Mic volume (1 = 100 %, 0–2), after the automatic
@@ -123,6 +125,7 @@ impl Gate {
             mode: AtomicU8::new(0),
             vad_threshold: AtomicF32::new(-50.0),
             noise_suppression: AtomicBool::new(true),
+            stronger_noise: AtomicBool::new(false),
             auto_gain: AtomicBool::new(true),
             mic_gain: AtomicF32::new(1.0),
             echo_cancellation: AtomicBool::new(true),
@@ -1052,6 +1055,7 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
     let mut acc: Vec<f32> = Vec::with_capacity(BLOCK * 4);
     let mut resampled = Vec::with_capacity(BLOCK * 4);
     let mut highpass = dsp::HighPass::new(RATE, 80.0);
+    let mut webrtc_ns = dsp::WebrtcNs::default();
     let mut denoise = nnnoiseless::DenoiseState::new();
     // Loud, lasting sounds (a laugh) past the noise removal; RNNoise is one block behind,
     // so its output lines up with the block it was given before (`dry`).
@@ -1112,8 +1116,11 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
             if blocks.is_multiple_of(10) {
                 *gate.echo.lock() = canceller.stats();
             }
+            // Noise suppression: WebRTC's own, or with Stronger noise removal RNNoise instead.
             let mut voice = None;
-            if gate.noise_suppression.load(Ordering::Relaxed) && !behind {
+            let ns = gate.noise_suppression.load(Ordering::Relaxed) && !behind;
+            if ns && gate.stronger_noise.load(Ordering::Relaxed) {
+                webrtc_ns.reset();
                 for (d, s) in ns_in.iter_mut().zip(&work) {
                     *d = s * 32768.0;
                 }
@@ -1128,6 +1135,11 @@ fn process_capture(rx: std_mpsc::Receiver<Chunk>, shared: Capture) {
                 }
             } else {
                 loud_pass.reset();
+                if ns {
+                    webrtc_ns.process(&mut work);
+                } else {
+                    webrtc_ns.reset();
+                }
             }
             if gate.auto_gain.load(Ordering::Relaxed) {
                 agc.process(&mut work, voice);

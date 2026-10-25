@@ -1216,7 +1216,7 @@ its own, `vault.js` opens those (`node desktop/tests/vault-crosscheck.mjs`).
 | HTTP | `ureq` (rustls/ring) | Small, blocking, run on worker threads. |
 | WebRTC | `webrtc` 0.21 (webrtc-rs, sans-IO core) | Full ICE/STUN/TURN, DTLS-SRTP, pure Rust. |
 | Opus | `ropus` (pure-Rust port of libopus, bit-exact with the reference) | No C toolchain for any target. |
-| Noise suppression | `nnnoiseless` (RNNoise) | Pure Rust. |
+| Noise suppression | `sonora` (WebRTC's own noise suppressor, what browsers use); Stronger noise removal: `nnnoiseless` (RNNoise) | Both pure Rust. |
 | Echo cancellation | `sonora` (WebRTC's AEC3, the canceller browsers use) | A pure-Rust port, BSD-3-Clause, checked against WebRTC's own C++ tests; builds for all three targets like everything else. The C++ original (`webrtc-audio-processing`) needs meson, ninja and abseil at build time, which `build-cross.sh` can't give cargo-xwin or zig; SpeexDSP's canceller is weaker, and the OS's (macOS voice processing) would cover one platform. |
 | Audio I/O | `cpal` (WASAPI / ALSA / CoreAudio) + own sinc resampler | Prefers 48 kHz; resamples when a device can't. |
 | Push-to-talk and the other global keys | own poller: `GetAsyncKeyState`, evdev `EVIOCGKEY`, X11 `XQueryKeymap` (dlopen), `CGEventSourceKeyState` | Sees key down *and* up globally without grabbing the key from games. |
@@ -1283,9 +1283,11 @@ test pattern), `headless.rs`.
   call's quality. Chrome's stats call the codec `audio/opus` even for RED
   packets (it names the one that decodes), so the tests look at the wire
   instead.
-- The mic: an 80 Hz high-pass, echo cancellation (optional, below), RNNoise
-  (optional; loud, lasting sounds like a laugh get past it: `dsp::LoudPass`,
-  PROTOCOL.md › Voice › Transmit gate › Noise suppression), automatic gain (speech
+- The mic: an 80 Hz high-pass, echo cancellation (optional, below), noise
+  suppression (optional: WebRTC's own through `sonora`, `dsp::WebrtcNs`; or,
+  with Stronger noise removal, RNNoise, which loud, lasting sounds like a
+  laugh get past: `dsp::LoudPass`; PROTOCOL.md › Voice › Transmit gate ›
+  Noise suppression), automatic gain (speech
   towards −23 dBFS while you talk, at most +20 dB, cuts fast, recovers
   ~3 dB/s, never clips; optional), then the transmit gate — a port of the
   web's `gate-worklet.js` (PROTOCOL.md › Voice › Transmit gate): hysteresis,
