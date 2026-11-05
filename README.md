@@ -41,7 +41,10 @@ than most chat apps and costs nothing to run.
   - **Draw**, a shared board with layers;
   - **Space**, a little top-down world where rooms are voice zones;
   - **Watch together** for YouTube;
-  - **When's good**, a weekly planner with reminders.
+  - **When's good**, a weekly planner with reminders;
+  - **[Questboard](https://github.com/yesokcool/questboard)**, an optional
+    add-on: a shared backlog of Steam games with live prices and voting. It's a
+    separate project you run yourself, and it opens inside Yap.
 - **Personal space:** notes only you can see, optionally end-to-end encrypted
   with a passcode.
 - **Accounts that fit friends:**
