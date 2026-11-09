@@ -234,6 +234,10 @@ struct Shelf98: View {
                 CloseSheetButton { dismiss() }
             }
             .onAppear { model.client.loadShelf(channelId) }
+            // A reconnect drops loaded shelves: this open one loads again (it used to spin for good).
+            .onChange(of: shelf == nil) { _, gone in
+                if gone { model.client.loadShelf(channelId) }
+            }
         }
         .presentationDetents([.medium, .large])
         #if os(macOS)
@@ -287,7 +291,8 @@ struct Poll98: View {
                     ForEach(options.indices, id: \.self) { index in
                         HStack(spacing: 6) {
                             Text("\(index + 1).").font(Theme.chrome).foregroundStyle(Theme.text).frame(width: 20, alignment: .trailing)
-                            Field98 { TextField("", text: $options[index]) }
+                            // (Bounds-checked: SwiftUI can still read a removed row's binding as it goes.)
+                            Field98 { TextField("", text: Binding(get: { index < options.count ? options[index] : "" }, set: { if index < options.count { options[index] = $0 } })) }
                             if options.count > 2 {
                                 Button("Remove") { options.remove(at: index) }.buttonStyle(.win98Compact)
                             }

@@ -545,8 +545,22 @@ await test('OBS links: listen-only token can join voice (shown as obs) and nothi
   const ready = await obs.next((m) => m.t === 'ready');
   assert.equal(ready.uid, a.uid, 'listens as its maker');
   assert.equal(ready.key, undefined, 'no main key for OBS links');
+  assert.deepEqual([ready.notify, ready.emojis, ready.links, ready.sounds, ready.hangs, ready.vault], [{ mode: 'off', topic: null, quiet: null }, [], [], [], [], undefined], 'nor the account’s push topic, or the server’s emojis, places, sounds and hangs');
+  assert.ok(ready.users.length && ready.channels.some((c) => c.id === 'lounge'), 'it does get who is here and the channels (its page shows the call)');
   obs.send({ t: 'send', channelId: 'general', body: 'hi from obs' });
   assert.equal((await obs.next((m) => m.t === 'error' && m.re === 'send')).code, 'forbidden');
+  // It hears nothing of the chat: whoever holds the link can't read along.
+  a.send({ t: 'typing', channelId: 'general' });
+  a.send({ t: 'send', channelId: 'general', body: 'not for OBS links', nonce: 'obs-quiet' });
+  const said = (await b.next((m) => m.t === 'message' && m.message.body === 'not for OBS links')).message;
+  a.send({ t: 'react', id: said.id, emoji: '👍', on: true });
+  await b.next((m) => m.t === 'reaction' && m.messageId === said.id);
+  a.send({ t: 'edit', id: said.id, body: 'still not for OBS links' });
+  await b.next((m) => m.t === 'edited' && m.id === said.id);
+  a.send({ t: 'notify.quiet', quiet: null });
+  await a.next((m) => m.t === 'notify');
+  await pause(200);
+  assert.deepEqual(obs.inbox.map((m) => m.t).filter((t) => !['ready', 'user', 'session.join', 'session.leave', 'voice', 'signal', 'error'].includes(t)), [], 'only what its page needs');
   // It listens where its account is (next test).
   a.send({ t: 'voice.join', channelId: 'lounge' });
   await a.next((m) => m.t === 'voice' && m.sid === a.ready.sid && m.channelId === 'lounge');
@@ -1291,6 +1305,32 @@ await test('@mentions push to exactly who is named: "@Sam Lee" is never also "@S
   lee.close();
 });
 
+await test('"every message" pushes: none while you have Yap open; they come once you close it, also with your OBS link still connected', async () => {
+  const eve = await new Client(`Eve${RUN}`).open();
+  await eve.hello();
+  eve.send({ t: 'notify.settings', mode: 'all' });
+  const { topic } = await eve.next((m) => m.t === 'notify');
+  eve.send({ t: 'obs.create' });
+  const { token } = await eve.next((m) => m.t === 'obs.created');
+  const obs = await new Client('obs-all').open();
+  obs.send({ t: 'hello', v: 1, client: 'web', token });
+  await obs.next((m) => m.t === 'ready');
+  const mark = pushes.length;
+  a.send({ t: 'send', channelId: 'general', body: 'anyone around?', nonce: 'all1' });
+  await a.next((m) => m.t === 'message' && m.nonce === 'all1');
+  await pause(500);
+  assert.ok(!pushes.slice(mark).some((p) => p.topic === topic), 'no push while Yap is open');
+  const closed = closeOf(eve);
+  eve.close();
+  await closed;
+  await pause(200);
+  a.send({ t: 'send', channelId: 'general', body: 'gone already?', nonce: 'all2' });
+  await a.next((m) => m.t === 'message' && m.nonce === 'all2');
+  const push = await pushFor(topic, (p) => p.message === 'gone already?');
+  assert.match(push.title, / in general$/);
+  obs.close();
+});
+
 // A fake Web Push service: records what the Worker POSTs to subscriptions.
 const PUSH_PORT = Number(process.env.YAP_TEST_PUSH_PORT ?? 8791);
 const webPushes = [];
@@ -1351,12 +1391,26 @@ await test('browser pushes: subscribe, an @mention arrives encrypted + VAPID-sig
   assert.match(msg.title, /mentioned you/);
   assert.match(msg.body, /browser push\?/);
   assert.deepEqual([msg.channelId, msg.messageId], ['general', sent.id], 'the message it opens');
+  // A mention in a very long message still arrives: a push is one record of at most 4096 bytes, so the text is cut.
+  a.send({ t: 'send', channelId: 'general', body: `@${BOB} ${'long story 📜 '.repeat(2000)}`, nonce: 'wp-long' });
+  await a.next((m) => m.t === 'message' && m.nonce === 'wp-long');
+  let long;
+  for (let i = 0; i < 40 && !long; i++) {
+    long = webPushes.filter((p) => endpoint.endsWith(p.path))[1];
+    if (!long) await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(long, 'a push for the long message');
+  assert.ok(long.body.length <= 4096, `fits one Web Push record (${long.body.length} bytes)`);
+  const longMsg = openWebPush(long.body, ua, auth);
+  assert.ok(longMsg.body.startsWith(`@${BOB} long story 📜 long story`), longMsg.body.slice(0, 60));
+  assert.match(longMsg.body, /…$/);
+  assert.ok(longMsg.body.length <= 401);
   b.send({ t: 'push.unsubscribe', endpoint });
   await new Promise((r) => setTimeout(r, 200));
   const before = webPushes.length;
   a.send({ t: 'send', channelId: 'general', body: `@${BOB} still there?`, nonce: 'wp2' });
   await new Promise((r) => setTimeout(r, 1200));
-  assert.equal(webPushes.filter((p) => endpoint.endsWith(p.path)).length, 1, 'no more after unsubscribing');
+  assert.equal(webPushes.filter((p) => endpoint.endsWith(p.path)).length, 2, 'no more after unsubscribing');
   assert.ok(webPushes.length >= before);
 });
 
@@ -1903,6 +1957,9 @@ await test('drawing: shapes (straight segments) and text strokes are kept and re
 });
 
 await test('drawing: live pieces + strokes reach others; undo is yours; clear starts fresh; saves go to the gallery', async () => {
+  // (Earlier tests leave `view` messages unread: an old "on draw" one would let this go on before
+  // the server has put both on the board, and the first piece would then reach nobody.)
+  for (const c of [a, b]) c.inbox = c.inbox.filter((m) => m.t !== 'view');
   a.send({ t: 'view', view: 'draw' });
   b.send({ t: 'view', view: 'draw' });
   await b.next((m) => m.t === 'view' && m.sid === a.ready.sid && m.view === 'draw');

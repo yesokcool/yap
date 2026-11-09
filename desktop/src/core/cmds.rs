@@ -256,14 +256,26 @@ impl Core {
                     let m = self.shared.model.lock();
                     (m.config.server.clone(), m.config.key.clone(), m.sid.clone(), m.upload_token.clone().unwrap_or_default(), m.config.channel.clone())
                 };
+                // (Whatever stops it, the caption goes back in the box: the message box was cleared when Send was pressed.)
                 let Some(sid) = sid else {
-                    self.shared.model.lock().toast("Not connected yet.");
+                    let mut m = self.shared.model.lock();
+                    m.toast("Not connected yet.");
+                    if !caption.trim().is_empty() {
+                        m.composer_restore.push((channel, caption));
+                    }
+                    drop(m);
                     return self.repaint();
                 };
                 let seal = match self.seal_for(&channel) {
-                    Err(()) => return self.locked_toast(),
+                    Err(()) => {
+                        if !caption.trim().is_empty() {
+                            self.shared.model.lock().composer_restore.push((channel, caption));
+                        }
+                        return self.locked_toast();
+                    }
                     Ok(k) => k,
                 };
+                let caption_back = caption.clone();
                 {
                     let mut m = self.shared.model.lock();
                     m.sending_picture = true;
@@ -312,7 +324,12 @@ impl Core {
                             let _ = tx.send(Cmd::PictureUploaded { channel, body, image, reply_to });
                         }
                         Err(e) => {
-                            shared.model.lock().toast(format!("Couldn't send that picture: {e}"));
+                            let mut m = shared.model.lock();
+                            m.toast(format!("Couldn't send that picture: {e}"));
+                            if !caption_back.trim().is_empty() {
+                                m.composer_restore.push((channel, caption_back));
+                            }
+                            drop(m);
                             (shared.repaint)();
                         }
                     }
@@ -346,8 +363,14 @@ impl Core {
                 }
             }
             Cmd::CreateChannel { name, kind } => {
-                self.shared.model.lock().awaiting_channel = Some(kind.clone());
-                self.send(out::channel_create(&name, &kind));
+                // Only while it's really on its way: a create that never went out used to leave this
+                // waiting, and the next channel of that kind anyone made, hours later, opened by itself.
+                if self.send(out::channel_create(&name, &kind)) {
+                    self.shared.model.lock().awaiting_channel = Some(kind.clone());
+                } else {
+                    self.shared.model.lock().toast("Not connected right now. Try again in a moment.");
+                    self.repaint();
+                }
             }
             Cmd::ArchiveChannel(id) => {
                 self.send(out::channel_archive(&id));

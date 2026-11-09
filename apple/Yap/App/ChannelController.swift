@@ -40,6 +40,8 @@ final class ChannelController {
     var newBelow = NewMessagesPill()
 
     @ObservationIgnored private var opened = false
+    /// Showing right now (not under Settings, Invite or the screen viewer, pushed over it on iPhone).
+    @ObservationIgnored private var isUp = false
     /// The kept draft went into the box (not while the Personal space was locked).
     @ObservationIgnored private var restoredDraft = true
     @ObservationIgnored private var debugDone: Set<String> = []
@@ -70,11 +72,15 @@ final class ChannelController {
     /// On appear: open the channel (the first time) and run the DEBUG
     /// launch switches (`YAP_SEARCH` is the Find window's to show).
     func appear() {
+        isUp = true
         if !opened {
             opened = true
             unreadAfter = client.open(channel: channelId)
         } else {
-            client.activeChannelId = channelId
+            // Back from a screen pushed over this one. A reconnect meanwhile threw every history
+            // away and reloaded only the channel on screen, which this one wasn't: `open` loads it
+            // again (it used to show a spinner until you left the channel and came back).
+            _ = client.open(channel: channelId)
         }
         let launch = DebugLaunch.current
         if launch.wants("gifs") { picker = .gif }
@@ -93,6 +99,7 @@ final class ChannelController {
     }
 
     func disappear() {
+        isUp = false
         client.close(channel: channelId)
         // The draft waits here (an edit in progress gives back the draft behind it).
         let text = editing?.savedDraft ?? draft
@@ -101,7 +108,8 @@ final class ChannelController {
 
     /// After a reconnect the history reloads; keep the screen's channel active.
     func phaseChanged(_ phase: YapClient.Phase) {
-        guard phase == .online else { return }
+        // (Not while another screen covers this one: its new messages would count as read, unseen.)
+        guard phase == .online, isUp else { return }
         client.activeChannelId = channelId
     }
 
@@ -315,7 +323,15 @@ final class ChannelController {
             replyingTo = nil
             draft = ""
             Task {
-                if await !attachment.send(caption: caption, in: channel.id, replyTo: reply, model: model), draft.isEmpty { draft = caption }
+                guard await !attachment.send(caption: caption, in: channel.id, replyTo: reply, model: model) else { return }
+                // It didn't go (not connected yet, the upload failed, refused): the picture or GIF
+                // goes back in the tray with its caption, so Send tries again (it used to be
+                // thrown away, to be picked all over again).
+                if draft.isEmpty { draft = caption }
+                if staged == nil { staged = attachment }
+                if replyingTo == nil { replyingTo = reply }
+                // Left the channel meanwhile: the caption waits there as its draft.
+                if !isUp, model.drafts.text(for: channelId).isEmpty { model.drafts.keep(caption, for: channelId) }
             }
         } else if client.send(text: draft, in: channel.id, replyTo: replyingTo) {
             draft = ""

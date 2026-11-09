@@ -13,7 +13,7 @@ import { openedBy, popoverOpened, toast } from './ui.js';
 import { postImage, postSound } from './uploads.js';
 import { whenPlanner } from './places.js';
 import { renderChannels, renderLinks } from './sidebar.js';
-import { isUnread } from './chat.js';
+import { isUnread, reading } from './chat.js';
 import { reactPicker } from './composer.js';
 
 export let doodlePad = null;
@@ -28,7 +28,7 @@ export function requestUnreadCounts() {
 export function onUnreadCounts(counts) {
   // Mentions that came while you were away (older servers don't count them: `mentions` is missing).
   for (const [id, c] of Object.entries(counts)) {
-    if (typeof c.mentions !== 'number' || (id === settings.channel && document.visibilityState === 'visible')) continue;
+    if (typeof c.mentions !== 'number' || reading(id)) continue;
     if (c.mentions > (state.mentions.get(id) ?? 0)) state.mentions.set(id, c.mentions);
   }
   renderChannels();

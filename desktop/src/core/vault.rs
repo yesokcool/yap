@@ -18,6 +18,9 @@ pub(super) struct SealWait {
     pub until: Instant,
 }
 
+/// A passcode can only be set or changed while connected (the server keeps the wrapped key).
+const NOT_CONNECTED: &str = "Not connected right now. Try again in a moment.";
+
 impl Core {
     /// Ok(Some(key)): an encrypted Personal space, unlocked. Ok(None): post as is. Err: locked.
     pub(super) fn seal_for(&self, channel: &str) -> Result<Option<crate::vault::Key>, ()> {
@@ -163,6 +166,15 @@ impl Core {
                 tokio::task::spawn_blocking(move || crate::vault::forget(&s, &u));
                 return self.repaint();
             }
+            // A new or changed passcode lives on the server (the wrapped key): without a connection
+            // this device would seal notes with a key that's thrown away at the next reconnect.
+            if !self.online && !matches!(op, VaultOp::Unlock { .. }) {
+                m.vault_error = Some(NOT_CONNECTED.into());
+                m.vault_seq += 1;
+                drop(m);
+                self.emit(CoreEvent::Vault(NOT_CONNECTED.into()));
+                return self.repaint();
+            }
             m.vault_busy = true;
             m.vault_error = None;
             (m.vault.clone(), m.config.server.clone(), m.config.uid.clone())
@@ -209,6 +221,11 @@ impl Core {
             Cmd::Vault(op) => self.vault_op(op),
             Cmd::SealBatches { batches, failed } => self.send_sealed(batches, failed),
             Cmd::VaultDone(r) => {
+                // (The connection went while the passcode was being stretched: nothing is adopted.)
+                let r = match r {
+                    Ok(VaultResult::Set { .. }) if !self.online => Err(NOT_CONNECTED.to_string()),
+                    r => r,
+                };
                 let set = {
                     let mut m = self.shared.model.lock();
                     m.vault_busy = false;

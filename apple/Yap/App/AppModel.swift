@@ -478,6 +478,12 @@ final class AppModel {
             // Signed out: nothing typed, and no call, of that account stays.
             drafts.removeAll()
             rejoinOffer.forget()
+            // Nor where they were: the next sign-in starts at the channel list, not on the
+            // last account's Settings page or a channel this one doesn't have.
+            path = []
+            selection = nil
+            jump = nil
+            searchRequest = nil
         }
         if phase == .online {
             if config == nil { refreshConfig() }

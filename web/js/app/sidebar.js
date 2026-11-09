@@ -5,7 +5,7 @@ import { settings, api } from '../settings.js';
 import { icon } from '../icons.js';
 import { esc } from '../format.js';
 import { $, conn, isMod, state } from './state.js';
-import { avatar, hangWhen, holdFocus } from './ui.js';
+import { avatar, hangWhen, holdFocus, toast } from './ui.js';
 import { VIEWS, hereLink, watchParty } from './places.js';
 import { obsListening, voice, voiceMember } from './voice-ui.js';
 import { isUnread, updateTitle } from './chat.js';
@@ -265,8 +265,8 @@ export function bindChannelDialog() {
     if (dialog.returnValue !== 'create') return;
     const name = form.name.value.trim();
     if (!name) return;
-    state.awaitingChannel = { kind: form.kind.value, name };
-    conn?.send({ t: 'channel.create', name, kind: form.kind.value });
+    if (!conn?.send({ t: 'channel.create', name, kind: form.kind.value })) return toast('Not connected right now. Try again in a moment.');
+    state.awaitingChannel = { kind: form.kind.value, name, at: Date.now() };
   });
 }
 

@@ -244,7 +244,8 @@ public final class YapClient {
     @ObservationIgnored var connection: YapConnection?
     @ObservationIgnored var pendingHello: HelloAuth?
     @ObservationIgnored var lastTypingSent: [String: Date] = [:]
-    @ObservationIgnored var pendingCreate: (name: String, kind: ChannelKind)?
+    /// The channel I just asked for, until it arrives (or a few seconds pass, or the server says no).
+    @ObservationIgnored var pendingCreate: (name: String, kind: ChannelKind, at: Date)?
 
     /// Messages per history page (tests use small pages).
     public static var historyPage = 50

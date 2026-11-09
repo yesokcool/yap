@@ -89,7 +89,8 @@ export function plainText(text, { line = false } = {}) {
 /** At most `n` characters, cut at a word where there's one nearby, with "…" (never "end.…"). */
 export function clip(text, n) {
   if (text.length <= n) return text;
-  const cut = text.slice(0, n);
+  // (Never half an emoji: a cut between the two halves of one would show as "�".)
+  const cut = text.slice(0, /[\ud800-\udbff]/.test(text[n - 1]) ? n - 1 : n);
   const space = /\s/.test(text[n]) ? n : cut.lastIndexOf(' '); // (a cut that ends a word keeps it)
   return `${(space > n * 0.6 ? cut.slice(0, space) : cut).replace(/[\s.,;:!?…—-]+$/, '')}…`;
 }

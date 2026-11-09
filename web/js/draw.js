@@ -26,6 +26,14 @@ export const PIX_W = 640;
 export const PIX_H = 400;
 const PAPER = '#ffffff';
 const SEND_EVERY_MS = 40;
+/**
+ * What the server keeps of a stroke (worker/validate.ts › cleanStroke): at most
+ * this many numbers (x, y pairs), each no further than this past the page. A
+ * stroke outside either is refused whole, so the pen stays inside both.
+ */
+const STROKE_NUMBERS = 8000;
+const OFF_PAGE = 500;
+const clampTo = (n, max) => Math.min(max + OFF_PAGE, Math.max(-OFF_PAGE, n));
 const LAYERS = 3;
 const LAYER_NAMES = ['bottom', 'middle', 'top'];
 const THUMB_W = 40;
@@ -559,7 +567,8 @@ export class DrawBoard {
 
   #toBoard(e) {
     const r = this.paper.getBoundingClientRect();
-    return [Math.round(((e.clientX - r.left) / r.width) * BOARD_W), Math.round(((e.clientY - r.top) / r.height) * BOARD_H)];
+    // (A captured pointer keeps drawing past the page's edge, over the tools: the line stops just outside it.)
+    return [clampTo(Math.round(((e.clientX - r.left) / r.width) * BOARD_W), BOARD_W), clampTo(Math.round(((e.clientY - r.top) / r.height) * BOARD_H), BOARD_H)];
   }
 
   #bindPointer() {
@@ -593,7 +602,17 @@ export class DrawBoard {
         Object.assign(this.drawing, { k: undefined }, shapeStroke(this.drawing.shape, this.drawing.x0, this.drawing.y0, x, y));
         return this.#scheduleLive();
       }
-      for (const ev of e.getCoalescedEvents?.() ?? [e]) this.drawing.p.push(...this.#toBoard(ev));
+      for (const ev of e.getCoalescedEvents?.() ?? [e]) {
+        const d = this.drawing;
+        const [x, y] = this.#toBoard(ev);
+        if (x === d.p.at(-2) && y === d.p.at(-1)) continue; // (a fast mouse reports the same spot many times)
+        d.p.push(x, y);
+        if (d.p.length < STROKE_NUMBERS) continue;
+        // As long as a stroke may be: it's kept, and the line goes on as a new one from here.
+        finish();
+        this.drawing = { pointer: d.pointer, sk: id(), c: d.c, w: d.w, e: d.e, l: d.l, p: [x, y], sent: 0, lastSend: 0 };
+        this.live.set('me', this.drawing);
+      }
       this.#pump(false);
       this.#scheduleLive();
     });

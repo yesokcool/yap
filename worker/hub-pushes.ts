@@ -1,7 +1,7 @@
 // Pushes and pings: notification settings and quiet hours, ntfy and browser
 // pushes, @mention and "all" pushes, pings, and away-message replies.
 import { NOTIFY_MODES, newTopic, publish } from './notify';
-import { plainText } from '../web/js/format.js';
+import { clip, plainText } from '../web/js/format.js';
 import { sendWebPush } from './webpush';
 import type { Attachment } from './attachment';
 import { MEMBER_ROLES } from './rows';
@@ -66,6 +66,14 @@ export function pushTargets(hub: HubHost): { id: string; name: string; topic: st
     .map((r) => ({ id: r.id, name: r.name, topic: r.ntfy_topic, mode: r.ntfy_mode }));
 }
 
+/**
+ * How much of a message a browser push carries. A Web Push is one encrypted
+ * record of at most 4096 bytes (webpush.ts), and push services refuse more, so
+ * a mention inside a long message used to reach no browser at all. A
+ * notification shows a few lines anyway (ntfy pushes are cut the same way).
+ */
+const PUSH_CHARS = 400;
+
 /** The message a push is about: tapping it opens that message (PROTOCOL.md › `push.subscribe`). */
 type PushOpens = { channelId: string; messageId: string };
 
@@ -98,7 +106,7 @@ export function deliver(hub: HubHost, target: { id: string; topic: string | null
   for (const sub of subs) {
     hub.ctx.waitUntil((async () => {
       try {
-        const status = await sendWebPush(sub, { title: push.title, body: push.message, tag: push.tag ?? 'yap', ...(push.open ? { channelId: push.open.channelId, messageId: push.open.messageId } : {}) }, jwk, hub.publicUrl());
+        const status = await sendWebPush(sub, { title: push.title, body: clip(push.message, PUSH_CHARS), tag: push.tag ?? 'yap', ...(push.open ? { channelId: push.open.channelId, messageId: push.open.messageId } : {}) }, jwk, hub.publicUrl());
         // Gone (unsubscribed, browser reset): forget it.
         if (status === 404 || status === 410) hub.sql.exec('DELETE FROM push_subs WHERE endpoint = ?', sub.endpoint);
         else if (status >= 400) console.warn('web push failed', status, new URL(sub.endpoint).host);
@@ -139,8 +147,9 @@ export function onPushSubscribe(hub: HubHost, ws: WebSocket, me: Attachment, msg
   hub.send(ws, { t: 'notify', ...notifySettings(hub, me.uid) });
 }
 
+/** Who has Yap open somewhere. An OBS link isn't its person reading along: OBS left running mustn't hold their pushes back. */
 function onlineUids(hub: HubHost): Set<string> {
-  return new Set(hub.sockets().map((ws) => (ws.deserializeAttachment() as Attachment).uid));
+  return new Set(hub.sockets().map((ws) => ws.deserializeAttachment() as Attachment).filter((a) => !a.listen).map((a) => a.uid));
 }
 
 export function onPing(hub: HubHost, me: Attachment, msg: Extract<ClientMessage, { t: 'ping' }>) {

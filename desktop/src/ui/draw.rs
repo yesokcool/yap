@@ -641,7 +641,10 @@ fn board(app: &mut App, ui: &mut egui::Ui, m: &Model, paper: Rect, acts: &mut Ve
     if resp.hovered() {
         ui.ctx().set_cursor_icon(if st.tool == Tool::Text { egui::CursorIcon::Text } else { egui::CursorIcon::Crosshair });
     }
-    let to_board = |pos: Pos2| -> (f32, f32) { (((pos.x - paper.left()) / paper.width() * BOARD_W).round(), ((pos.y - paper.top()) / paper.height() * BOARD_H).round()) };
+    // (A drag goes on past the page's edge; the server refuses a stroke with a point more than 500 outside it.)
+    let to_board = |pos: Pos2| -> (f32, f32) {
+        (((pos.x - paper.left()) / paper.width() * BOARD_W).round().clamp(-500.0, BOARD_W + 500.0), ((pos.y - paper.top()) / paper.height() * BOARD_H).round().clamp(-500.0, BOARD_H + 500.0))
+    };
     if st.tool == Tool::Text {
         if resp.clicked()
             && let Some(pos) = resp.interact_pointer_pos()
@@ -667,6 +670,12 @@ fn board(app: &mut App, ui: &mut egui::Ui, m: &Model, paper: Rect, acts: &mut Ve
                     if n < 2 || (d.p[n - 2] - x).abs() + (d.p[n - 1] - y).abs() > 2.0 {
                         d.p.push(x);
                         d.p.push(y);
+                    }
+                    if d.p.len() >= crate::drawing::MAX_NUMBERS {
+                        // As long as a stroke may be (the server refuses a longer one whole): it's
+                        // kept, and the line goes on as a new stroke from here.
+                        let full = std::mem::replace(d, Drawing { sk: id(), tool: d.tool, l: d.l, p: vec![x, y], start: (x, y), sent: 0, last_send: 0.0 });
+                        acts.push(Act::Cmd(Cmd::DrawStroke(Stroke { id: full.sk, uid: me.clone(), c: st.color.clone(), w: st.size, e: st.eraser, p: full.p, k: None, text: None, l: full.l })));
                     }
                 } else {
                     d.p.truncate(2);

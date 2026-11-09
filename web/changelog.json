@@ -1,6 +1,29 @@
 {
-  "current": "0.53.0",
+  "current": "0.53.1",
   "releases": [
+    {
+      "version": "0.53.1",
+      "date": "2026-11-09",
+      "title": "A round of fixes",
+      "items": [
+        "An @mention or reply inside a very long message reaches your browser's notifications again.",
+        "\"Every message\" notifications arrive on your phone while your OBS link is open.",
+        "A message or @mention that arrives in your channel while you're in Draw, Space, Watch or When's good shows as new, with its sound and badge, instead of counting as read.",
+        "Draw: a stroke that runs off the page or goes on for very long is kept for everyone (it used to vanish on the next reload).",
+        "A picture or GIF waiting to be sent stays with its channel when you look at another one.",
+        "An edit made while offline stays open instead of quietly going back to the old text.",
+        "Watch together: starting the same video again after it ended plays it.",
+        "iPhone and Mac: a channel no longer gets stuck on its loading spinner after you come back from Settings or an invite.",
+        "iPhone and Mac: a picture that fails to send stays in the tray, so Send tries again.",
+        "iPhone and Mac: joining another server, or another person signing in on your device, starts caught up instead of showing everything as unread.",
+        "Desktop app: turning on Personal space encryption can no longer replace a picture with an error page if the download fails.",
+        "Desktop app: a picture that fails to send gives its caption back.",
+        "Desktop app: a Draw stroke that runs off the page or goes on for very long is kept for everyone.",
+        "Desktop app: your own name and color update right away when you change them on another device.",
+        "Desktop app: \"Slow down a little.\" no longer appears while you're just reading unread channels.",
+        "A Stream to OBS link no longer receives chat messages or your notification settings: it gets only what it needs to play the call."
+      ]
+    },
     {
       "version": "0.53.0",
       "date": "2026-10-24",
@@ -1046,6 +1069,27 @@
     }
   ],
   "highlights": [
+    {
+      "date": "2026-11-09",
+      "emoji": "🔔",
+      "title": "Nothing slips by while you're in a place",
+      "text": "A message or @mention that arrives in your channel while you're in Draw, Space, Watch or When's good shows as new, with its sound and badge, and a “New since” line marks it when you go back. It used to count as read.",
+      "where": "Web"
+    },
+    {
+      "date": "2026-11-09",
+      "emoji": "✏️",
+      "title": "Draw keeps every stroke",
+      "text": "A stroke that ran off the page, or one very long scribble, used to show only for you and vanish on the next reload. Now it's kept for everyone.",
+      "where": "Web and the desktop app"
+    },
+    {
+      "date": "2026-11-09",
+      "emoji": "🎥",
+      "title": "OBS links get only the call",
+      "text": "A Stream to OBS link now receives just what it needs to play the call: no chat messages, and none of your notification settings.",
+      "where": "Settings › Voice › Advanced"
+    },
     {
       "date": "2026-10-24",
       "emoji": "🔗",

@@ -228,6 +228,11 @@ pub fn upload_drawing(server: &str, key: &str, sid: &str, ut: &str, bytes: Vec<u
 /// Fetch a picture's bytes and its type (≤ 8 MB).
 pub fn get_bytes(url: &str) -> Result<(Vec<u8>, String), String> {
     let mut res = agent().get(url).call().map_err(|e| e.to_string())?;
+    // (The agent hands back error pages like any answer. One must never be taken for the picture:
+    // sealing earlier notes would encrypt it in the picture's place, and the server then erases the original.)
+    if res.status() != 200 {
+        return Err(format!("HTTP {}", res.status().as_u16()));
+    }
     let mime = res.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("image/webp").to_string();
     let bytes = res.body_mut().with_config().limit(8 * 1024 * 1024).read_to_vec().map_err(|e| e.to_string())?;
     Ok((bytes, mime))

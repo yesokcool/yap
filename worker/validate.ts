@@ -92,7 +92,7 @@ export function cleanVaultWrap(value: unknown): VaultWrap | null {
   if (typeof value !== 'object' || value === null) return null;
   const v = value as Record<string, unknown>;
   const iter = Number(v.iter);
-  if (v.v !== 1 || !(iter >= 100_000 && iter <= 10_000_000)) return null;
+  if (v.v !== 1 || !(Number.isInteger(iter) && iter >= 100_000 && iter <= 10_000_000)) return null;
   if (typeof v.salt !== 'string' || !B64URL(16).test(v.salt)) return null;
   if (typeof v.iv !== 'string' || !B64URL(12).test(v.iv)) return null;
   if (typeof v.ct !== 'string' || !B64URL(48).test(v.ct)) return null;

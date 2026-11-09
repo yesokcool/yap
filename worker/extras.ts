@@ -24,7 +24,8 @@ export function cleanQuiet(value: unknown): QuietHours {
   } catch {}
   if (from < 0 || to < 0 || !zoneOk) throw new ClientError('bad_quiet', 'Quiet hours need a start, an end and a time zone.');
   const now = Date.now();
-  const until = v.until === null || v.until === undefined ? null : Number(v.until);
+  // (A whole number of milliseconds, like every time on the wire: the desktop app reads nothing else.)
+  const until = v.until === null || v.until === undefined ? null : Math.round(Number(v.until));
   if (until !== null && !(until > now && until <= now + 7 * 86_400_000)) throw new ClientError('bad_quiet', 'Snooze for at most a week.');
   return { from, to, tz, mentions: v.mentions === true, until };
 }
@@ -49,7 +50,9 @@ export function cleanAway(value: unknown): Away {
   const text = cleanName(v.text, LIMITS.awayChars);
   if (!text) throw new ClientError('bad_away', 'Say what you’re up to (up to 80 characters).');
   const now = Date.now();
-  const until = v.until === null || v.until === undefined ? null : Number(v.until);
+  // A whole number: a fraction here went out to everyone in `ready`, and the desktop app
+  // (which reads times as whole numbers) then couldn't read `ready` at all, so it never connected.
+  const until = v.until === null || v.until === undefined ? null : Math.round(Number(v.until));
   if (until !== null && !(until > now && until <= now + 7 * 86_400_000)) throw new ClientError('bad_away', 'Pick an end time within the next week.');
   return { text, until, since: now };
 }

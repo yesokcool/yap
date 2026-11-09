@@ -31,6 +31,11 @@ impl Core {
     }
 
     pub(super) fn jump_to(&mut self, channel: String, id: String) {
+        // (A bookmark in the Personal space can point into a channel that was archived since.)
+        if !self.shared.model.lock().channel(&channel).is_some_and(|c| c.is_chat()) {
+            self.shared.model.lock().toast("That message's channel is gone.");
+            return self.repaint();
+        }
         let current = self.shared.model.lock().config.channel.clone();
         if channel != current || self.shared.model.lock().view.is_some() {
             self.open_channel(channel.clone());

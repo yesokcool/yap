@@ -46,6 +46,7 @@ t('clip: cut at a word, one ellipsis, never "end.…"', () => {
   assert.equal(clip('short', 10), 'short');
   assert.equal(clip('the cafe at the far end. Then back', 24), 'the cafe at the far end…');
   assert.equal(clip('supercalifragilistic', 10), 'supercalif…');
+  assert.equal(clip('123456789😀 and more', 10), '123456789…', 'never half an emoji');
 });
 t('mentions: longest name wins, not inside words or emails', () => {
   assert.match(renderBody('hi @Sam Lee!', ['Sam', 'Sam Lee']), /<span class="mention">@Sam Lee<\/span>!/);

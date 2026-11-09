@@ -25,9 +25,21 @@ extension YapClient {
     }
 
     public func createChannel(name: String, kind: ChannelKind) {
-        pendingCreate = (name, kind)
         createdChannel = nil
-        send(.channelCreate(name: name, kind: kind))
+        guard send(.channelCreate(name: name, kind: kind)) else {
+            // (It used to close the sheet and say nothing.)
+            pendingCreate = nil
+            notice = Notice(text: "Not connected right now. Try again in a moment.")
+            return
+        }
+        pendingCreate = (name, kind, Date())
+    }
+
+    /// Is `made` the name the server gives a channel asked for as `asked`? (It tidies names:
+    /// composed characters, single spaces, 32 at most.)
+    static func sameChannelName(_ asked: String, _ made: String) -> Bool {
+        let tidy = asked.precomposedStringWithCanonicalMapping.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return tidy == made || (!made.isEmpty && made.utf16.count >= 32 && tidy.hasPrefix(made))
     }
 
     public func archiveChannel(_ id: String) { send(.channelArchive(channelId: id)) }

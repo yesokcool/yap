@@ -167,6 +167,9 @@ function saveEdit(body) {
     cancelEdit();
     return askDelete(id);
   }
+  // Nothing goes out while offline (edits aren't queued like new messages): the edit stays open
+  // instead of looking saved and coming back as the old text.
+  if (m && body !== (note ? note.text : m.body) && !conn?.open) return toast('Not connected right now. Your edit is still here; save it again in a moment.');
   if (m && note) {
     // Encrypted note: re-seal the new text with whatever GIF/picture it had.
     if (body !== note.text) {
@@ -397,9 +400,9 @@ export function shrinkStaged(staged) {
   staged.size = null;
   staged.ready = preparePicture(staged.file, { full: staged.full }).catch((err) => err);
   staged.ready.then((r) => {
-    if (state.staged !== staged || r instanceof Error) return;
+    if (r instanceof Error) return;
     staged.size = r.blob.size;
-    renderStaged();
+    if (state.staged === staged) renderStaged(); // (else it's waiting in another channel's tray, or gone)
   });
 }
 

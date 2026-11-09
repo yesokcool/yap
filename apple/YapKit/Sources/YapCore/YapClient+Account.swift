@@ -51,6 +51,9 @@ extension YapClient {
             connection = nil
             credentials.token = nil
             resetServerState()
+            // Read marks are per server (channel ids like "general" repeat): the new one starts caught up.
+            lastRead = [:]
+            credentials.lastRead = [:]
             onSignedOut?()
         }
         credentials.endpoint = endpoint
@@ -236,6 +239,9 @@ extension YapClient {
             } else if re == "shelf" {
                 // Stop the spinner; say why.
                 for key in shelves.keys where shelves[key]?.loading == true { shelves[key]?.loading = false }
+                notice = Notice(text: message)
+            } else if re == "channel.create" {
+                pendingCreate = nil
                 notice = Notice(text: message)
             } else if re == "invite.resetMain" {
                 mainResetAsked = false

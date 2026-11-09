@@ -59,5 +59,13 @@ export interface Attachment {
 /** All an OBS (listen-only) session may do. */
 export const LISTEN_ALLOWED = new Set(['hello', 'voice.join', 'voice.leave', 'voice.state', 'signal']);
 
+/**
+ * All an OBS (listen-only) session is ever sent: what its page (web/js/obs.js)
+ * needs to join the call and draw its overlay. Never chat (messages, edits,
+ * reactions, typing), pings, places or settings: whoever holds an OBS link
+ * could otherwise read along (Hub.send and Hub.sendWhere check this).
+ */
+export const LISTEN_SENT = new Set(['ready', 'user', 'session.join', 'session.leave', 'voice', 'signal', 'error']);
+
 /** Only sessions doing something shared (voice, a shared view) are visible: no presence. */
 export const visible = (a: Attachment) => Boolean(a.vc || a.view || a.watching);

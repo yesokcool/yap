@@ -101,6 +101,7 @@ export class WatchParty {
     this.seekAt = 0;
     this.seeks = 0; // catch-up seeks in a row that didn't catch up (a slow connection)
     this.nextAt = 0;
+    this.showOver = false; // nothing's on since the last video (sync loads the next one afresh)
     this.volAt = 0;
     this.touchedAt = -Infinity; // the person last clicked into the player
     this.visibilityAt = -Infinity;
@@ -433,11 +434,15 @@ export class WatchParty {
         this.cmd('stopVideo');
         this.pauseAskedAt = now;
       }
+      // The show is over: whatever comes next is loaded afresh, the same video too
+      // (it used to sit on YouTube's end screen, since "that one's already loaded").
+      this.showOver = true;
       return;
     }
     const want = this.expected();
-    if (p.video !== s.videoId) {
+    if (p.video !== s.videoId || this.showOver) {
       // A new video: same iframe, so nothing reloads (and autoplay stays allowed).
+      this.showOver = false;
       Object.assign(p, { video: s.videoId, time: null, duration: 0, started: false, error: 0 });
       this.setBlocked(0);
       this.cmd(s.playing ? 'loadVideoById' : 'cueVideoById', [s.videoId, Math.floor(want)]);

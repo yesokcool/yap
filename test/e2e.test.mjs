@@ -1349,11 +1349,42 @@ await test('unread: a channel you are not in lights up (dot, bright name) until 
   await b.waitForFunction(() => !document.querySelector('[data-action="open-channel"][data-id="general"] .unread-dot'));
 });
 
-await test("What's new opens with highlights from the past week", async () => {
+await test('a place covers the chat: a message to your open channel meanwhile is unread (dot, mention badge), and "New since" marks it when you come back', async () => {
+  await b.click('[data-action="open-channel"][data-id="general"]');
+  await b.click('[data-action="open-view"][data-view="when"]');
+  await b.waitForSelector('#when-view:not([hidden])');
+  await a.evaluate((t) => yap.ui.send({ t: 'send', channelId: 'general', body: t }), `@Ben while you plan ${RUN}`);
+  await b.waitForSelector('[data-action="open-channel"][data-id="general"].unread .mention-badge', { timeout: 5000 });
+  assert.equal(await b.evaluate(() => yap.state.mentions.get('general')), 1, 'the mention is counted (it used to be swallowed)');
+  await b.click('[data-action="open-channel"][data-id="general"]');
+  await b.waitForSelector('#new-divider', { timeout: 5000 });
+  await b.waitForFunction(() => !document.querySelector('[data-action="open-channel"][data-id="general"]:is(.unread, :has(.mention-badge))') && !yap.state.mentions.get('general'));
+  // Looking at the chat again: the next one is read as it arrives.
+  await a.evaluate((t) => yap.ui.send({ t: 'send', channelId: 'general', body: t }), `@Ben and now you see it ${RUN}`);
+  await b.waitForSelector(`.msg .body:has-text("and now you see it ${RUN}")`, { timeout: 5000 });
+  assert.ok(!(await b.evaluate(() => yap.state.mentions.get('general'))), 'no badge for what you are reading');
+});
+
+await test("What's new opens with highlights from the past week, and older ones drop off", async () => {
   const p = await a.context().newPage();
+  // The real list only has something this recent in the week after a release (this test used to
+  // fail the rest of the time): the page gets one highlight from today and one from last month.
+  const day = (ago) => new Date(Date.now() - ago * 86_400_000).toISOString().slice(0, 10);
+  await p.route('**/changelog.json', async (route) => {
+    const log = await (await route.fetch()).json();
+    const highlights = [
+      { date: day(0), emoji: '🧪', title: `Fresh ${RUN}`, text: 'From today.', where: 'Everywhere' },
+      { date: day(30), emoji: '🧪', title: `Stale ${RUN}`, text: 'From last month.' },
+    ];
+    await route.fulfill({ json: { ...log, highlights } });
+  });
   await p.goto(`${BASE}/changelog`);
   await p.waitForSelector('#highlights:not([hidden]) li');
   assert.match(await p.locator('#highlights h2').innerText(), /Highlights from the past week/);
+  const shown = await p.locator('#highlights').innerText();
+  assert.ok(shown.includes(`Fresh ${RUN}`), 'today’s highlight shows');
+  assert.ok(!shown.includes(`Stale ${RUN}`), 'last month’s is gone');
+  assert.ok((await p.locator('#releases .release').count()) > 0, 'the releases are still listed below');
   await p.screenshot({ path: path.join(OUT, 'changelog-highlights.png'), fullPage: true });
   await p.close();
 });
@@ -3260,6 +3291,40 @@ await test('draw together: strokes show up live for the other person', async () 
   await b.waitForFunction(() => [...yap.state.history.get('general')?.messages ?? []].some((m) => m.image?.width === 640), null, { timeout: 8000 });
 });
 
+await test('draw: a stroke that runs off the page stops just outside it, and a very long one goes on as a second stroke; the server keeps both (it used to refuse them whole)', async () => {
+  const box = await a.locator('.draw-paper').boundingBox();
+  const count = () => b.evaluate(() => yap.ui.draw.strokes.length);
+  const before = await count();
+  // Off the top-left corner, far past the page.
+  await a.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.3);
+  await a.mouse.down();
+  await a.mouse.move(box.x - box.width * 0.4, box.y - box.height * 0.6, { steps: 6 });
+  await a.mouse.up();
+  await b.waitForFunction((n) => yap.ui.draw.strokes.length === n + 1, before, { timeout: 5000 });
+  const off = await b.evaluate(() => yap.ui.draw.strokes.at(-1).p);
+  assert.ok(Math.min(...off) === -500, `clamped 500 past the edge: ${Math.min(...off)}`);
+  // 4,500 points without lifting the pen (a fast mouse, a long scribble): more than one stroke may hold.
+  await a.mouse.move(box.x + box.width * 0.1, box.y + box.height * 0.9);
+  await a.mouse.down();
+  await a.evaluate(({ x, y, w }) => {
+    const paper = document.querySelector('.draw-paper');
+    const pointerId = yap.ui.draw.drawing.pointer;
+    for (let batch = 0; batch < 9; batch++) {
+      const at = (i) => ({ pointerId, clientX: x + ((batch * 500 + i) / 4500) * w, clientY: y + (i % 2) * 3 });
+      const coalescedEvents = Array.from({ length: 500 }, (_, i) => new PointerEvent('pointermove', at(i)));
+      paper.dispatchEvent(new PointerEvent('pointermove', { ...at(499), coalescedEvents, bubbles: true }));
+    }
+  }, { x: box.x + box.width * 0.1, y: box.y + box.height * 0.9, w: box.width * 0.8 });
+  await a.mouse.up();
+  await b.waitForFunction((n) => yap.ui.draw.strokes.length === n + 3, before, { timeout: 5000 });
+  const lengths = await b.evaluate(() => yap.ui.draw.strokes.slice(-2).map((s) => s.p.length));
+  assert.ok(lengths[0] === 8000 && lengths[1] > 2 && lengths[1] < 8000, `one full stroke, then the rest: ${lengths}`);
+  assert.ok(!(await a.isVisible('#toast:has-text("broken")')), 'nothing was refused');
+  // Undo takes them back off, piece by piece (the page is as the next tests expect).
+  for (let i = 0; i < 3; i++) await a.evaluate(() => yap.ui.draw.undo());
+  await b.waitForFunction((n) => yap.ui.draw.strokes.length === n, before, { timeout: 5000 });
+});
+
 await test('draw layers: draw on the top layer, erase it without touching the bottom, hide one, clear one for everyone', async () => {
   // Both are still on Draw from the test before; Ada's page has her strokes on the bottom layer.
   const box = await a.locator('.draw-paper').boundingBox();
@@ -3433,6 +3498,28 @@ await test('pictures: attach one, everyone sees it in the chat', async () => {
   await a.waitForFunction(() => /MB|KB/.test(document.querySelector('#staged .staged-text small')?.textContent ?? '') && !/compressed/.test(document.querySelector('#staged').textContent), null, { timeout: 10000 });
   await a.click('.send-btn');
   await sent(3000);
+});
+
+await test('a picture waiting in the tray stays with its channel, like its caption (it used to follow you and post where you went)', async () => {
+  const mine = await a.evaluate(() => `p_${yap.settings.uid}`);
+  await a.click('[data-action="open-channel"][data-id="general"]');
+  const png = await a.evaluate(() => {
+    const c = Object.assign(document.createElement('canvas'), { width: 40, height: 30 });
+    c.getContext('2d').fillRect(5, 5, 20, 20);
+    return c.toDataURL('image/png').split(',')[1];
+  });
+  await a.setInputFiles('#image-file', { name: 'dot.png', mimeType: 'image/png', buffer: Buffer.from(png, 'base64') });
+  await a.waitForSelector('#staged:not([hidden]) img');
+  await a.fill('#input', `for general only ${RUN}`);
+  await a.click(`[data-action="open-channel"][data-id="${mine}"]`);
+  assert.equal(await a.isHidden('#staged'), true, 'the tray is empty in the other channel');
+  assert.equal(await a.inputValue('#input'), '');
+  await a.click('[data-action="open-channel"][data-id="general"]');
+  assert.equal(await a.isVisible('#staged img'), true, 'back in general: the picture is waiting');
+  assert.equal(await a.inputValue('#input'), `for general only ${RUN}`, 'with its caption');
+  await a.fill('#input', '');
+  await a.click('[data-action="unstage"]');
+  assert.equal(await a.isHidden('#staged'), true);
 });
 
 await test('pictures & GIFs shelf: every picture in the channel, newest first; click to jump', async () => {

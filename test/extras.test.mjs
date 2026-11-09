@@ -67,6 +67,9 @@ t('away: 1–80 characters, ending within a week or "until I’m back"', () => {
   const a = cleanAway({ text: '  dinner   🍝 ', until: null });
   assert.deepEqual([a.text, a.until, typeof a.since], ['dinner 🍝', null, 'number']);
   assert.equal(cleanAway({ text: 'x'.repeat(200), until: null }).text.length, 80);
+  // Times are whole numbers on the wire (the desktop app can't read `ready` with a fraction in it).
+  assert.ok(Number.isInteger(cleanAway({ text: 'brb', until: Date.now() + 3_600_000.5 }).until));
+  assert.ok(Number.isInteger(cleanQuiet({ from: 0, to: 60, tz: 'UTC', until: Date.now() + 3_600_000.5 }).until));
   for (const bad of [{ text: '', until: null }, { text: 'a', until: Date.now() - 1 }, { text: 'a', until: Date.now() + 8 * 86_400_000 }]) {
     assert.equal(code(() => cleanAway(bad)), 'bad_away', JSON.stringify(bad));
   }

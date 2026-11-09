@@ -14,7 +14,7 @@ pub enum Side {
         everywhere: bool,
         /// When the query last changed (searches after a short pause) / what was sent.
         edited: f64,
-        sent: Option<(String, bool)>,
+        sent: Option<(String, bool, String)>,
         focus: bool,
     },
     Pins,
@@ -119,11 +119,12 @@ pub fn body(app: &mut App, ui: &mut egui::Ui, m: &Model, p: &Pal, acts: &mut Vec
             // (No-break spaces: a line never starts with "·" or splits "a phrase".)
             ui.label(egui::RichText::new("from:Name\u{a0}· has:image\u{a0}· has:gif\u{a0}· has:link\u{a0}· \"a\u{a0}phrase\"").font(theme::font(theme::small())).color(p.gray));
             // Search after a short pause (or right away on Enter).
-            let want = (q.trim().to_string(), *everywhere);
+            // ("This channel" is part of what was asked: another channel is another search.)
+            let want = (q.trim().to_string(), *everywhere, if *everywhere { String::new() } else { m.config.channel.clone() });
             let due = enter || (now - *edited > 0.6 && sent.as_ref() != Some(&want));
             if due && sent.as_ref() != Some(&want) {
                 *sent = Some(want.clone());
-                let channel = (!want.1).then(|| m.config.channel.clone());
+                let channel = (!want.1).then(|| want.2.clone());
                 acts.push(Act::Cmd(Cmd::Search { q: want.0.clone(), channel }));
             } else if sent.as_ref() != Some(&want) {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));

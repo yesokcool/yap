@@ -26,6 +26,7 @@ export const state = {
   mentions: new Map(),
   /** channelId -> what you'd typed there and not sent (the open channel's is the message box itself) */
   drafts: new Map(),
+  stagedDrafts: new Map(), // channel id -> the picture or GIF left waiting in its tray (like its draft)
   /** Someone wrote below while you're scrolled up in the open channel (the "↓ New messages" pill) */
   newBelow: false,
   /** A message to open once connected ({ channelId, id }): a tapped browser push (sw.js) */

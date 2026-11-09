@@ -320,8 +320,33 @@ impl Core {
                 if re.as_deref() == Some("send") && self.send_refused(&code) {
                     return;
                 }
-                // (`watch.get` to a server from before Watch together: nothing to say.)
-                if code != "no_peer" && !re.as_deref().is_some_and(|r| r.starts_with("watch.")) {
+                // What was waiting on the refused request stops waiting (it used to stay on
+                // "Loading…" / "Searching…", or keep waiting for a channel that was never made).
+                {
+                    let mut m = self.shared.model.lock();
+                    match re.as_deref() {
+                        Some("channel.create") => m.awaiting_channel = None,
+                        Some("shelf") => m.shelf.values_mut().for_each(|st| st.loading = false),
+                        Some("search") => {
+                            if let Some(st) = m.search.as_mut() {
+                                st.loading = false;
+                            }
+                        }
+                        // The name or color asked for was turned down: back to what the server has.
+                        Some("profile") => {
+                            let me = m.users.get(&m.config.uid).map(|u| (u.name.clone(), u.color.clone()));
+                            if let Some((name, color)) = me {
+                                m.config.name = name;
+                                m.config.color = color;
+                                m.config_dirty = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // (`watch.get` to a server from before Watch together: nothing to say. Nor about
+                // unread counts: the app asks for those by itself, sometimes faster than allowed.)
+                if code != "no_peer" && !re.as_deref().is_some_and(|r| r.starts_with("watch.") || r == "unread.counts") {
                     self.shared.model.lock().toast(message.clone());
                     self.repaint();
                 }
@@ -733,6 +758,13 @@ impl Core {
             ServerMsg::User { user } => {
                 {
                     let mut m = self.shared.model.lock();
+                    // Me, renamed or recolored (on another device, or the server turned down the
+                    // name this one asked for): the panel and Settings show what the server has.
+                    if user.id == m.config.uid && (m.config.name != user.name || m.config.color != user.color) {
+                        m.config.name = user.name.clone();
+                        m.config.color = user.color.clone();
+                        m.config_dirty = true;
+                    }
                     // Kept for names on old messages; `is_member()` hides
                     // pending/banned users from the member list.
                     m.users.insert(user.id.clone(), user);

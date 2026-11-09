@@ -262,7 +262,8 @@ fn inline_at(s: &str, style: Style, names: &[String], out: &mut Vec<Span>, prev:
                 let inner = &body[..at];
                 let ok = !before.is_whitespace()
                     && (!single || (!after.is_some_and(is_word) && after != marker.chars().next() && !inner.contains('\n')));
-                if ok && !(single && marker == "*" && inner.starts_with('*')) {
+                // (Like the web: nothing with the marker inside it is italic, so `__init__.py` stays as typed.)
+                if ok && !(single && inner.contains(marker)) {
                     flush(&mut buf, out);
                     let st = match marker {
                         "**" => Style { bold: true, ..style },
@@ -745,6 +746,10 @@ mod tests {
         let b = parse_t("_hi_ *there*");
         let Block::Para(spans) = &b[0] else { panic!() };
         assert_eq!(spans[0], Span::Text("hi".into(), Style { italic: true, ..Style::default() }));
+        // Double underscores are no markup (as on the web): Python's names stay as typed.
+        for text in ["__init__.py", "if __name__ == '__main__':"] {
+            assert_eq!(parse_t(text), vec![Block::Para(vec![t(text)])], "{text}");
+        }
     }
 
     #[test]

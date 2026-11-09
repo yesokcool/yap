@@ -13,7 +13,7 @@ import { autosize, hideToast, toast } from './ui.js';
 import { setView } from './places.js';
 import { renderChannels } from './sidebar.js';
 import { nearBottom, nodeCache, renderMessages, renderNewPill, renderTyping } from './messages.js';
-import { cancelEdit, cancelReply, putBack } from './composer.js';
+import { cancelEdit, cancelReply, putBack, renderStaged } from './composer.js';
 import { renderResultList } from './search.js';
 import { renderShelfGrid } from './extras.js';
 
@@ -51,7 +51,7 @@ export function onHistory(msg) {
   for (const resolve of h.waiters?.splice(0) ?? []) resolve();
   if (msg.channelId === settings.channel) {
     renderMessages({ keep: h.mode === 'older' ? 'anchor' : 'bottom' });
-    markRead(msg.channelId);
+    if (reading(msg.channelId)) markRead(msg.channelId);
     // Short first page on a tall screen: keep filling until it scrolls.
     const scroller = $('messages');
     if (h.hasMore && scroller.scrollHeight <= scroller.clientHeight) loadOlder(msg.channelId);
@@ -79,7 +79,7 @@ export function onMessage({ message: m, nonce }) {
       renderNewPill();
     }
     renderTyping();
-    if (document.visibilityState === 'visible') markRead(m.channelId);
+    if (reading(m.channelId)) markRead(m.channelId);
   }
   renderChannels();
   updateTitle();
@@ -227,13 +227,14 @@ export function openChannel(id) {
   if (!id) return;
   if (state.editing && state.editing.channelId !== id) cancelEdit();
   if (state.replying && state.replying.channelId !== id) cancelReply();
+  const fromPlace = state.view !== 'chat';
   setView('chat');
   if (id !== settings.channel) {
     state.since.delete(settings.channel);
     rememberSince(id);
     swapDraft(settings.channel, id);
     state.newBelow = false;
-  }
+  } else if (fromPlace) rememberSince(id); // back from a place: what came meanwhile is new
   save({ channel: id });
   if (!state.history.has(id)) loadLatest(id);
   $('app').classList.remove('sidebar-open');
@@ -244,11 +245,35 @@ export function openChannel(id) {
 }
 
 /**
+ * The chat is showing again after a place (places.js › setView, also when a
+ * screen share ends by itself): what came to the open channel meanwhile is
+ * new ("New since…"), and now read.
+ */
+export function chatShown() {
+  if (state.view !== 'chat') return;
+  const id = settings.channel;
+  const before = state.since.get(id);
+  rememberSince(id);
+  if (state.since.get(id) !== before) renderMessages();
+  markRead(id);
+}
+
+/**
  * Each channel keeps what you'd typed in it (in memory, until you send it):
  * switching puts this one's away and brings back the other's, so Enter never
  * sends it to the wrong channel.
  */
 function swapDraft(from, to) {
+  // A picture or GIF waiting in the tray stays with its channel too (it used to follow you,
+  // without its caption, and Enter posted it wherever you'd gone).
+  const theirTray = state.stagedDrafts.get(to) ?? null;
+  state.stagedDrafts.delete(to);
+  if (state.channels.has(from)) {
+    if (state.staged) state.stagedDrafts.set(from, state.staged);
+    state.staged = theirTray;
+  } else if (!state.staged) state.staged = theirTray;
+  else if (theirTray?.url) URL.revokeObjectURL(theirTray.url);
+  renderStaged();
   const input = $('input');
   const text = input.value;
   const theirs = state.drafts.get(to) ?? '';
@@ -282,6 +307,16 @@ export function loadOlder(channelId) {
   return true;
 }
 
+/**
+ * Are you looking at this channel right now: it's the open one, the chat is
+ * showing (not a place: Draw, Space, Watch… cover it) and so is the tab. Only
+ * then does a new message count as read, and a mention stay quiet. (Inside the
+ * iPhone/Mac app's web view, which only ever shows a place, the app itself
+ * keeps track: there it's as before, the open channel.)
+ */
+export const reading = (channelId) => channelId === settings.channel && document.visibilityState === 'visible'
+  && (state.view === 'chat' || Boolean(document.documentElement.dataset.embed));
+
 export function markRead(channelId, ts) {
   if (state.mentions.delete(channelId)) renderChannels();
   const channel = state.channels.get(channelId);
@@ -294,7 +329,7 @@ export function markRead(channelId, ts) {
 
 export function isUnread(channel) {
   if (channel.kind === 'voice' || !channel.lastMessageAt) return false;
-  if (channel.id === settings.channel && document.visibilityState === 'visible') return false;
+  if (reading(channel.id)) return false;
   return channel.lastMessageAt > (settings.lastRead[channel.id] ?? 0);
 }
 
@@ -303,10 +338,10 @@ export function updateTitle() {
   if (state.titleNote && document.visibilityState === 'visible') state.titleNote = null;
   document.title = state.titleNote ? `${state.titleNote} · Yap` : unread.length ? `(${unread.length}) Yap` : 'Yap';
   // Phones: the sidebar is hidden, so the menu button says "something new elsewhere".
-  const elsewhere = unread.some((c) => c.id !== settings.channel);
+  const elsewhere = unread.some((c) => !reading(c.id));
   const menu = document.querySelector('[data-action="toggle-sidebar"]');
   menu?.classList.toggle('has-unread', elsewhere);
-  menu?.classList.toggle('has-mention', [...state.mentions.entries()].some(([id, n]) => n && id !== settings.channel));
+  menu?.classList.toggle('has-mention', [...state.mentions.entries()].some(([id, n]) => n && !reading(id)));
   updateAppBadge();
 }
 
@@ -368,12 +403,12 @@ export function onPing({ from, text }) {
 
 function maybeNotify(m) {
   if (mentionsMe(m)) {
-    if (m.channelId !== settings.channel || document.visibilityState !== 'visible') {
+    if (!reading(m.channelId)) {
       state.mentions.set(m.channelId, (state.mentions.get(m.channelId) ?? 0) + 1);
       renderChannels();
     }
     if (isQuietNow(state.notify?.quiet, true)) return;
-    if (document.visibilityState !== 'visible' || m.channelId !== settings.channel) sounds.mention();
+    if (!reading(m.channelId)) sounds.mention();
     if (!state.browserPush && settings.desktopNotify !== 'off' && document.visibilityState !== 'visible' && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
       const n = new Notification(`${state.users.get(m.uid)?.name ?? 'Someone'} mentioned you`, { body: plainText(m.body, { line: true }).slice(0, 200), tag: m.channelId, icon: '/icon.svg' });
       // Clicked: straight to the message that mentions you (like a message notification opens its channel).
@@ -419,6 +454,8 @@ export async function loadUntil(channelId, id) {
 }
 
 export async function openAndJump(channelId, id) {
+  // (A bookmark in your Personal space can point into a channel that was archived since.)
+  if (!state.channels.has(channelId)) return toast('That message’s channel is gone.');
   if (settings.channel !== channelId || state.view !== 'chat') openChannel(channelId);
   if (!(await loadUntil(channelId, id))) return toast('Couldn’t find that message (it may be very far back, or deleted).');
   renderMessages();

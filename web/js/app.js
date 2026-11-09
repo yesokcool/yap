@@ -21,7 +21,7 @@ import { LINKABLE, boardCursors, drawBoard, hasBoard, hereLink, setView, spaceWo
 import { adoptResumed, bindShareDialog, onVoiceRowWheel, setVolumeFor, changeScreenShare, deferLeaveChime, dismissRejoin, dropGhost, holdGhost, joinVoice, leaveVoice, onSound, onVoice, openVoiceMore, rejoinVoice, renderSharePanel, renderVoicePanel, stopWatchingScreen, toggleDeafen, toggleMute, toggleScreenShare, voice, watchScreen } from './app/voice-ui.js';
 import { bindChannelDialog, bindLinkDialog, openChannelDialog, openLinkDialog, renderChannels, renderConn, renderHeader, renderLinks, renderRequests, renderUserPanel, showVersion, startMinecraft } from './app/sidebar.js';
 import { renderJumpPill, renderMessages, renderNewPill, renderTyping, tapMessage } from './app/messages.js';
-import { addLocalNote, isQuietNow, jumpTo, loadLatest, loadOlder, markRead, onDeleted, onHistory, onMessage, onPing, onSendError, onSendsLost, openAndJump, openChannel, queueSend, rememberSince, sendOutbox, updateTitle, welcomeIn } from './app/chat.js';
+import { addLocalNote, isQuietNow, jumpTo, loadLatest, loadOlder, markRead, onDeleted, onHistory, onMessage, onPing, onSendError, onSendsLost, openAndJump, openChannel, queueSend, reading, rememberSince, sendOutbox, updateTitle, welcomeIn } from './app/chat.js';
 import { askDelete, bindComposer, cancelEdit, cancelReply, clearStaged, deleteMessage, emojiPicker, gifPicker, openReactPicker, reactPicker, renderStaged, saveToPersonal, shrinkStaged, startEdit, startReply, toggleEmojis, toggleGifs } from './app/composer.js';
 import { openMemberMenu, openPeople, renderMembers } from './app/people.js';
 import { addToHomeScreen, bindPinDialog, bindWelcome, isStandalone, onHelloError, passwordLater, renderAccountBars, renderDevices, renderHomeBar, showPinDialog, showWelcome, startOver, toggleReveal } from './app/account.js';
@@ -461,12 +461,15 @@ function handle(msg) {
         callSettingsChanged(); // (the call report notes the channel's quality)
         renderVoicePanel();
       }
+      // The channel you just made opens. Only that one: the same kind and name, within a few
+      // seconds (a create that was refused used to leave this waiting, and the next channel
+      // anyone made, hours later, opened in the middle of your typing).
       const wanted = state.awaitingChannel;
-      if (wanted && wanted.kind === msg.channel.kind && msg.channel.kind === 'text') {
+      const asNamed = (name) => name.normalize('NFC').replace(/\s+/g, ' ').trim().slice(0, 32);
+      if (wanted && Date.now() - wanted.at > 15_000) state.awaitingChannel = null;
+      else if (wanted && wanted.kind === msg.channel.kind && asNamed(wanted.name) === msg.channel.name) {
         state.awaitingChannel = null;
-        openChannel(msg.channel.id);
-      } else if (wanted && msg.channel.kind === 'voice') {
-        state.awaitingChannel = null;
+        if (msg.channel.kind === 'text') openChannel(msg.channel.id);
       }
       return renderChannels();
     }
@@ -474,6 +477,8 @@ function handle(msg) {
       state.channels.delete(msg.channelId);
       if (settings.channel === msg.channelId) openChannel(firstTextChannel()?.id); // (what you'd typed there comes along)
       state.drafts.delete(msg.channelId);
+      if (state.stagedDrafts.get(msg.channelId)?.url) URL.revokeObjectURL(state.stagedDrafts.get(msg.channelId).url);
+      state.stagedDrafts.delete(msg.channelId);
       return renderChannels();
     case 'voice': return onVoice(msg);
     case 'emoji':
@@ -496,6 +501,7 @@ function handle(msg) {
       if (msg.re === 'hello') return onHelloError(msg);
       if (msg.re === 'send') return onSendError(msg);
       if (msg.re === 'invite.resetMain') state.resettingMain = false;
+      if (msg.re === 'channel.create') state.awaitingChannel = null;
       if (msg.re === 'account.pin') {
         $('pin-error').textContent = msg.message;
         $('pin-error').hidden = false;
@@ -841,7 +847,7 @@ function bindUi() {
   });
 
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') markRead(settings.channel);
+    if (reading(settings.channel)) markRead(settings.channel);
     updateTitle();
   });
 

@@ -1,6 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { BUILD } from './build';
-import { LISTEN_ALLOWED, visible, type Attachment } from './attachment';
+import { LISTEN_ALLOWED, LISTEN_SENT, visible, type Attachment } from './attachment';
 import { MEMBER_ROLES, toChannel, toSession, toUser, voiceResume, type ChannelRow, type UserRow } from './rows';
 import { migrate } from './schema';
 import { b64urlEncode, hex, sameSecret } from './encoding';
@@ -454,19 +454,21 @@ export class Hub extends DurableObject<Env> {
       uid: me.uid,
       token,
       needsPin: !hasPin,
-      notify: notifySettings(this, me.uid),
+      // An OBS link gets what its page uses (who is here and in which call) and nothing else of
+      // the account's or the server's: no push topic or quiet hours, emojis, places, sounds or hangs.
+      notify: me.listen ? { mode: 'off', topic: null, quiet: null } : notifySettings(this, me.uid),
       channels: me.listen ? this.channels() : [this.personalChannel(me.uid), ...this.channels()],
       users: this.users(),
       sessions: [...this.sessions().filter((s) => s.voice || s.view || s.watching), toSession(updated)],
-      emojis: this.emojis(),
+      emojis: me.listen ? [] : this.emojis(),
       // The waiting room is for the owner and mods (they let people in); everyone else gets [].
       pending: this.isMod(me.uid) && !me.listen ? this.pendingUsers() : [],
       build: BUILD,
       ...(key ? { key } : {}),
-      links: links(this),
-      sounds: sounds(this),
-      hangs: hangs(this),
-      ...(this.isMod(me.uid) && this.ctx.storage.sql.databaseSize > DB_LIMIT_BYTES * 0.8 ? { storageWarning: true } : {}),
+      links: me.listen ? [] : links(this),
+      sounds: me.listen ? [] : sounds(this),
+      hangs: me.listen ? [] : hangs(this),
+      ...(!me.listen && this.isMod(me.uid) && this.ctx.storage.sql.databaseSize > DB_LIMIT_BYTES * 0.8 ? { storageWarning: true } : {}),
       ...(ut ? { uploadToken: ut } : {}),
       ...(me.rk ? { resumeKey: me.rk } : {}),
       ...(me.listen ? {} : { vault: vaultOf(this, me.uid), ...secret }),
@@ -1129,6 +1131,8 @@ export class Hub extends DurableObject<Env> {
   // ── Sending ────────────────────────────────────────────────────────────
 
   send(ws: WebSocket, msg: ServerMessage) {
+    // (An OBS link is only ever sent LISTEN_SENT: attachment.ts.)
+    if (!LISTEN_SENT.has(msg.t) && (ws.deserializeAttachment() as Attachment | null)?.listen) return;
     try {
       ws.send(JSON.stringify(msg));
     } catch {
@@ -1143,8 +1147,13 @@ export class Hub extends DurableObject<Env> {
   /** One message to every signed-in connection `to` picks (all of them without it), serialized once. */
   sendWhere(msg: ServerMessage, to?: (a: Attachment) => boolean, except?: WebSocket | null) {
     const frame = JSON.stringify(msg);
+    const forListeners = LISTEN_SENT.has(msg.t); // (OBS links get nothing else: attachment.ts)
     for (const ws of this.sockets()) {
-      if (ws === except || (to && !to(ws.deserializeAttachment() as Attachment))) continue;
+      if (ws === except) continue;
+      if (to || !forListeners) {
+        const a = ws.deserializeAttachment() as Attachment;
+        if ((!forListeners && a.listen) || (to && !to(a))) continue;
+      }
       try {
         ws.send(frame);
       } catch {} // socket died mid-send; its close handler cleans up

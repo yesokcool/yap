@@ -57,6 +57,11 @@ struct WebPageView: View {
         .onAppear {
             if page == .board { model.client.send(.view("board")) }
         }
+        // A reconnect is a new session, on no view: say again that I'm on the board
+        // (friends used to stop seeing me there after any return from the background).
+        .onChange(of: model.client.mySid) { _, sid in
+            if sid != nil, page == .board { model.client.send(.view("board")) }
+        }
         .onDisappear {
             if page == .board { model.client.send(.view(nil)) }
         }

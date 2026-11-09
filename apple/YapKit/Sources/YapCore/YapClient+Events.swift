@@ -100,9 +100,16 @@ extension YapClient {
         case .channel(let channel):
             channelsById[channel.id] = channel
             voice?.clientChannelChanged(channel)
-            if let pendingCreate, pendingCreate.kind == channel.kind {
-                self.pendingCreate = nil
-                createdChannel = channel
+            // The channel I just made (it opens): that kind and name, within a few seconds. A
+            // create the server refused used to leave this waiting, and the next channel anyone
+            // made, hours later, opened over whatever I was doing.
+            if let pendingCreate {
+                if Date().timeIntervalSince(pendingCreate.at) > 15 {
+                    self.pendingCreate = nil
+                } else if pendingCreate.kind == channel.kind, Self.sameChannelName(pendingCreate.name, channel.name) {
+                    self.pendingCreate = nil
+                    createdChannel = channel
+                }
             }
         case .channelArchived(let channelId):
             channelsById.removeValue(forKey: channelId)
@@ -228,6 +235,7 @@ extension YapClient {
         if let notify = ready.notify { notifySettings = notify }
         unreadCounts = nil
         shelves = shelves.filter { shelfWanted.contains($0.key) }
+        pendingCreate = nil
         weakPin = ready.weakPin
         weakReason = ready.weakPin ? ready.weakReason : nil
         secretKind = ready.secretKind ?? secretKind
@@ -235,6 +243,9 @@ extension YapClient {
         syncVault(ready.vault)
         pendingHello = nil
         authError = nil
+        // Another account used this device before: its read marks aren't mine (I start caught
+        // up below, like on any new device, not with their unread counts and mention badges).
+        if let before = credentials.uid, !before.isEmpty, before != ready.uid { lastRead = [:] }
         // (uid is set above, before the vault looks up my key.)
         credentials.uid = ready.uid
         mySid = ready.sid

@@ -12,6 +12,7 @@ import { avatar, toast } from './ui.js';
 import { shareDrawing, uploadDrawing } from './uploads.js';
 import { screenView, stopWatchingScreen, voice } from './voice-ui.js';
 import { renderChannels, renderHeader, renderLinks } from './sidebar.js';
+import { chatShown } from './chat.js';
 
 export let boardCursors = null;
 export let drawBoard = null;
@@ -105,7 +106,8 @@ export function setView(view) {
       send: (m) => conn?.send(m),
       me: () => settings.uid,
       users: () => state.users,
-      hangs: () => [...state.hangs.values()].sort((a, b) => a.at - b.at),
+      // (Like the server's list: a hang drops off two hours after it started.)
+      hangs: () => [...state.hangs.values()].filter((h) => h.at > Date.now() - 2 * 3_600_000).sort((a, b) => a.at - b.at),
       canCancel: (h) => h.uid === settings.uid || isMod(),
       voiceChannels: () => [...state.channels.values()].filter((c) => c.kind === 'voice').sort((a, b) => a.position - b.position),
     });
@@ -116,6 +118,8 @@ export function setView(view) {
   renderHeader();
   renderChannels();
   renderLinks();
+  // (After whoever asked for the chat has picked its channel: openChannel does that right after this.)
+  if (view === 'chat') queueMicrotask(chatShown);
 }
 
 function ensureBoardFrame() {

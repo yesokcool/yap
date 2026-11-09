@@ -213,6 +213,8 @@ export function bindVaultDialog() {
       if (pass.length < 8) return fail('Use at least 8 characters (a short phrase is easiest to remember).');
       if (/^\d+$/.test(pass) && pass.length < 12) return fail('Numbers alone are easy to guess. Add some words.');
       if (pass !== form.again.value) return fail('Those two don’t match.');
+      // The server keeps the wrapped key: without it this device would seal notes with a key that's thrown away on reconnect.
+      if (!conn?.open) return fail('Not connected right now. Try again in a moment.');
     }
     $('vault-ok').disabled = true;
     $('vault-ok').textContent = 'Working…';

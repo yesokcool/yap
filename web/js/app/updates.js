@@ -36,7 +36,7 @@ function renderUpdateBar() {
 
 function quietMoment() {
   // (Nothing written or on its way: a picture waiting in the tray, or still uploading, counts.)
-  return !state.voiceWanted && !$('input').value.trim() && !state.staged && !state.sendingPictures && !state.outbox.length && !document.querySelector('dialog[open]') && !drawBoard?.drawing && !watchParty.busy()
+  return !state.voiceWanted && !$('input').value.trim() && !state.staged && !state.stagedDrafts.size && !state.sendingPictures && !state.outbox.length && !document.querySelector('dialog[open]') && !drawBoard?.drawing && !watchParty.busy()
     && (document.visibilityState === 'hidden' || Date.now() - lastActivity > IDLE_RELOAD_MS);
 }
 
