@@ -924,7 +924,7 @@ dialog.confirm-sheet { width: min(360px, calc(100vw - 16px)); }
 .board-view iframe { flex: 1; width: 100%; border: 0; background: var(--window); }
 
 /* Draw looks like Paint: grey workspace, white page, colour box below. */
-.draw-view { flex: 1; min-height: 0; display: flex; flex-direction: column; margin-top: 3px; }
+.draw-view { flex: 1; min-height: 0; display: flex; flex-direction: column; margin-top: 3px; container-type: inline-size; }
 .draw-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 3px 2px 5px; }
 .draw-colors { display: grid; grid-template-columns: 31px repeat(14, 15px); gap: 1px; padding: 1px; }
 .draw-sizes { display: flex; gap: 2px; align-items: center; padding: 2px; box-shadow: var(--thin-in); }
@@ -946,8 +946,74 @@ dialog.confirm-sheet { width: min(360px, calc(100vw - 16px)); }
 .draw-tags { position: absolute; inset: 0; pointer-events: none; }
 .draw-tag { position: absolute; transform: translate(10px, -22px); padding: 0 4px; background: var(--info); color: #000; font-size: 11px; white-space: nowrap; box-shadow: 0 0 0 1px #000; }
 .draw-tag::before { content: ''; display: inline-block; width: 7px; height: 7px; margin-right: 4px; background: var(--c); box-shadow: 0 0 0 1px #000; }
-.draw-gallery { display: flex; gap: 6px; align-items: center; margin-top: 3px; padding: 3px 6px; overflow-x: auto; min-height: 56px; box-shadow: var(--thin-in); }
-.gallery-label { font-size: 11px; color: var(--gray); white-space: nowrap; }
+/* Draw: the easel (the bar over the page, then the page) and the bulletin board beside it (draw.js). */
+.draw-main { flex: 1; min-height: 0; display: flex; gap: 6px; }
+.draw-easel { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.easel-bar { display: flex; min-height: 27px; padding: 0 2px 4px; }
+.easel-now, .easel-then { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.easel-now[hidden], .easel-then[hidden] { display: none; }
+.easel-name { flex: 1; min-width: 8em; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.easel-status { color: var(--gray); }
+.easel-buttons { display: flex; flex-wrap: wrap; gap: 4px; }
+.easel-bar .btn { display: inline-flex; align-items: center; gap: 3px; }
+.easel-bar .btn .icon { width: 13px; height: 13px; }
+/* Looking at an earlier version: a yellow note over the page, and a yellow edge round it. */
+.easel-then { padding: 1px 2px 1px 6px; background: var(--info); color: #000; box-shadow: 0 0 0 1px #000; }
+.easel-then-text { flex: 1; min-width: 12em; }
+.draw-paper.then { box-shadow: 0 0 0 4px var(--info), 0 0 0 5px #000; }
+.draw-board { flex: none; width: clamp(196px, 27%, 300px); min-height: 0; display: flex; flex-direction: column; }
+.cork-head { display: flex; align-items: center; gap: 4px; padding: 4px 4px 6px; font-weight: 700; }
+.cork-head .icon { width: 14px; height: 14px; }
+/* Cork in a wooden frame: the same in light and dark (it's a thing in the room, not a window). */
+.cork {
+  flex: 1; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 20px 10px; align-content: start; padding: 18px 12px 14px;
+  background-color: #c0915a;
+  background-image: radial-gradient(rgb(92 52 16 / 0.4) 0.9px, transparent 1.3px), radial-gradient(rgb(255 238 206 / 0.35) 0.9px, transparent 1.3px), radial-gradient(rgb(120 70 25 / 0.25) 1.4px, transparent 2px);
+  background-size: 6px 6px, 9px 9px, 17px 13px;
+  background-position: 0 0, 2px 3px, 5px 1px;
+  border: 7px solid #7d4f26;
+  box-shadow: inset 2px 2px 5px rgb(0 0 0 / 0.45), 0 0 0 1px #3b220c, 1px 1px 0 1px #000;
+}
+.pin-card { position: relative; display: flex; flex-direction: column; align-self: start; min-width: 0; padding: 5px 5px 4px; border: 0; background: #fffdf4; color: #1a1a1a; text-align: left; font: 11px/1.3 var(--font); box-shadow: 1px 2px 3px rgb(0 0 0 / 0.4); transform: rotate(var(--tilt)); cursor: pointer; }
+.pin-card:hover, .pin-card:focus-visible { z-index: 1; transform: none; box-shadow: 2px 4px 8px rgb(0 0 0 / 0.45); }
+.pin-card:focus-visible { outline: 1px dotted #000; outline-offset: -3px; }
+.pin-photo { display: grid; place-items: center; aspect-ratio: 8 / 5; overflow: hidden; background: #fff; box-shadow: 0 0 0 1px rgb(0 0 0 / 0.2); }
+.pin-photo img, .pin-photo canvas { display: block; width: 100%; height: 100%; object-fit: cover; image-rendering: pixelated; }
+.pin-blank { color: #777; font-size: 10px; }
+.pin-caption { margin-top: 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pin-date { color: #666; font-size: 10px; }
+.pin-card.on-easel { box-shadow: 0 0 0 2px #c00000, 1px 2px 4px 2px rgb(0 0 0 / 0.4); }
+.pin-card.on-easel .pin-date { color: #c00000; font-weight: 700; }
+.pin-card.ghost { background: #f4ecd8; }
+.pushpin { position: absolute; top: -7px; left: calc(50% - 7px); width: 14px; height: 14px; border-radius: 50%; background: radial-gradient(circle at 35% 32%, rgb(255 255 255 / 0.8) 0 1.6px, transparent 2.6px), var(--pin); box-shadow: 1px 2px 2px rgb(0 0 0 / 0.5), inset -1px -2px 2px rgb(0 0 0 / 0.35); }
+.cork-empty { grid-column: 1 / -1; margin: 0; padding: 8px; background: #fffdf4; color: #333; font-size: 11px; line-height: 1.4; box-shadow: 1px 2px 3px rgb(0 0 0 / 0.35); transform: rotate(-0.6deg); }
+.cork-down { grid-column: 1 / -1; justify-self: center; padding: 2px 8px; border: 0; background: rgb(255 253 244 / 0.9); color: #333; font: 11px var(--font); box-shadow: 1px 1px 2px rgb(0 0 0 / 0.35); cursor: pointer; }
+.cork-down:hover { background: #fffdf4; text-decoration: underline; }
+/* Draw's popovers: Clear, Download, History, a card, what was taken down. */
+.popover.draw-pop { width: max-content; max-width: min(330px, calc(100vw - 16px)); }
+.draw-pop .pop-title { margin-bottom: 6px; }
+.draw-pop-note { margin: 0; font-size: 11px; line-height: 1.4; }
+.draw-pop .pop-actions + .draw-pop-note { margin-top: 8px; }
+.draw-versions, .draw-down-list { display: flex; flex-direction: column; gap: 1px; max-height: min(340px, 55vh); overflow-y: auto; margin-top: 6px; padding: 2px; background: var(--window); box-shadow: var(--sunken); }
+.draw-version, .draw-down-row { display: flex; align-items: center; gap: 6px; width: 100%; padding: 3px 4px; border: 0; background: transparent; color: var(--text); text-align: left; font: 11px/1.35 var(--font); }
+.draw-version { cursor: pointer; }
+.draw-version:not(:disabled):hover, .draw-version:focus-visible { background: var(--select); color: var(--on-select); outline: none; }
+.draw-version:not(:disabled):hover .muted, .draw-version:focus-visible .muted { color: inherit; }
+.draw-version:disabled { cursor: default; }
+.draw-version-pic { flex: none; width: 48px; height: 30px; background: #fff; box-shadow: 0 0 0 1px var(--shadow); }
+.draw-version-pic img { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+.draw-version-pic:empty { background: repeating-linear-gradient(135deg, #ffffff 0 4px, #e4e4e4 4px 6px); } /* (kept without a picture) */
+.draw-version-text { flex: 1; min-width: 0; }
+.draw-version-now { padding: 0 3px; background: var(--ok); color: #fff; font-size: 10px; }
+/* A narrower Draw: the board goes under the page, one row of cards to scroll sideways. */
+@container (max-width: 760px) {
+  .draw-main { flex-direction: column; }
+  .draw-board { width: auto; }
+  .cork { display: flex; flex: none; gap: 12px; overflow: auto hidden; padding: 16px 12px 10px; }
+  .pin-card { flex: none; width: 116px; }
+  .cork-empty { flex: none; width: 260px; }
+  .cork-down { flex: none; align-self: center; }
+}
 .gallery-item img { display: block; height: 44px; image-rendering: pixelated; background: #fff; box-shadow: var(--sunken); padding: 2px; }
 
 .space-view { position: relative; flex: 1; min-height: 0; display: flex; margin-top: 3px; padding: 2px; background: #000; box-shadow: var(--sunken); }
@@ -1085,12 +1151,8 @@ a.btn { text-decoration: none; }
 @media (pointer: coarse) { .layer-eye { width: 20px; height: 16px; } }
 .layer-chip.hidden-layer .layer-thumb { opacity: 0.25; }
 .layer-chip.hidden-layer .layer-eye { color: var(--gray); }
-.draw-clear-pop .pop-title { margin-bottom: 6px; }
 /* A toolbar too wide for the window wraps; Undo … Clear keep to the right on the next row. */
 .draw-tools [data-tool=undo] { margin-left: auto; }
-/* Clear's question: its three buttons on one row (Cancel used to drop to a line of its own). */
-.popover.draw-clear-pop { width: max-content; max-width: calc(100vw - 16px); }
-.draw-clear-note { margin: 0; }
 .draw-paper.typing { cursor: text; }
 /* Draw on phones (draw.js › #layout): one row of tools, Paint's color box in a palette, the actions in a bar under the page. */
 .draw-brush { display: none; }
@@ -1106,11 +1168,13 @@ a.btn { text-decoration: none; }
   .draw-stage { flex: none; place-items: start center; padding: 4px; }
   .draw-actions { display: flex; gap: 4px; padding: 4px 2px 0; }
   .draw-actions [data-tool=clear] { margin-left: auto; }
-  .draw-gallery { flex-wrap: wrap; align-content: flex-start; overflow-x: hidden; overflow-y: auto; }
-  /* The gallery: an even grid under its label, not ragged rows with the label in the first one. */
-  .draw-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); align-content: start; }
-  .gallery-label { grid-column: 1 / -1; }
-  .gallery-item img { width: 100%; height: auto; aspect-ratio: 8 / 5; object-fit: cover; }
+  /* Phones: the page hugs the top; the board fills what's left under it, an even grid to scroll. */
+  .draw-easel { flex: none; }
+  .draw-board { flex: 1; }
+  .cork { display: grid; flex: 1; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 16px 10px; overflow: hidden auto; padding: 14px 10px 10px; border-width: 5px; }
+  .pin-card { width: auto; }
+  .cork-empty { width: auto; }
+  .easel-bar .btn { padding-left: 6px; padding-right: 6px; }
   .draw-palette .draw-sizes, .draw-palette .draw-layers { width: max-content; }
   .draw-palette .draw-sizes { margin-top: 6px; }
   .draw-palette .swatch-btn { width: 19px; height: 19px; }

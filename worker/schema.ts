@@ -312,7 +312,76 @@ export const MIGRATIONS: ((sql: SqlStorage) => void)[] = [
       CREATE INDEX messages_by_nonce ON messages (user_id, nonce) WHERE nonce IS NOT NULL;
     `);
   },
+  // v21 (2026-11-09): Draw's drawings and bulletin board (PROTOCOL.md › Draw
+  // drawings and the board). A drawing is a page of strokes (its id is the
+  // strokes' `canvas`); the board pins them; `draw_versions` are earlier
+  // states of one (the ids of its strokes then) to go back to. Saved pictures
+  // say which drawing they're of. The pages that were already there get a row
+  // (fillDrawPages), pinned with the picture saved of them.
+  (sql) => {
+    sql.exec(`
+      CREATE TABLE draw_pages (
+        id INTEGER PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        created_by TEXT,
+        pinned_at INTEGER,
+        down_at INTEGER,
+        down_by TEXT,
+        drawing TEXT,
+        saved_at INTEGER,
+        saved_by TEXT,
+        artists TEXT,
+        changed_at INTEGER
+      );
+      CREATE TABLE draw_versions (
+        id TEXT PRIMARY KEY,
+        page INTEGER NOT NULL,
+        ts INTEGER NOT NULL,
+        user_id TEXT,
+        why TEXT NOT NULL,
+        stroke_ids TEXT NOT NULL,
+        drawing TEXT
+      );
+      CREATE INDEX draw_versions_by_page ON draw_versions (page, ts);
+      ALTER TABLE drawings ADD COLUMN page INTEGER;
+    `);
+    fillDrawPages(sql);
+  },
 ];
+
+/**
+ * Give every page of strokes a Draw drawing row (v21, and after restoring an
+ * older backup). Only pages without one: each gets the pictures saved while it
+ * was the newest page, the first one saved after its last change (else the
+ * newest) as its picture, and goes on the board if it has ink. The page on the
+ * easel gets a row too, blank or not.
+ */
+export function fillDrawPages(sql: SqlStorage) {
+  const easel = Number(sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'canvas'").toArray()[0]?.value ?? 1) || 1;
+  const have = new Set(sql.exec<{ id: number }>('SELECT id FROM draw_pages').toArray().map((r) => r.id));
+  const spans = sql
+    .exec<{ canvas: number; first: number; last: number; live: number }>(
+      `SELECT canvas, MIN(ts) AS first, MAX(MAX(ts), COALESCE(MAX(deleted_at), 0)) AS last, SUM(deleted_at IS NULL) AS live
+       FROM strokes GROUP BY canvas ORDER BY canvas`,
+    )
+    .toArray();
+  spans.forEach((span, i) => {
+    if (have.has(span.canvas)) return;
+    const next = spans[i + 1]?.first ?? Number.MAX_SAFE_INTEGER;
+    sql.exec('UPDATE drawings SET page = ? WHERE page IS NULL AND ts >= ? AND ts < ?', span.canvas, span.first, next);
+    type Pic = { id: string; ts: number; user_id: string };
+    const pic =
+      sql.exec<Pic>('SELECT id, ts, user_id FROM drawings WHERE page = ? AND ts >= ? ORDER BY ts LIMIT 1', span.canvas, span.last).toArray()[0]
+      ?? sql.exec<Pic>('SELECT id, ts, user_id FROM drawings WHERE page = ? ORDER BY ts DESC LIMIT 1', span.canvas).toArray()[0];
+    const artists = sql.exec<{ user_id: string }>('SELECT DISTINCT user_id FROM strokes WHERE canvas = ? AND deleted_at IS NULL', span.canvas).toArray().map((r) => r.user_id);
+    sql.exec(
+      'INSERT INTO draw_pages (id, created_at, pinned_at, drawing, saved_at, saved_by, artists) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      span.canvas, span.first, span.live > 0 ? (pic?.ts ?? span.last) : null, pic?.id ?? null, pic?.ts ?? null, pic?.user_id ?? null, artists.length ? JSON.stringify(artists) : null,
+    );
+    have.add(span.canvas);
+  });
+  if (!have.has(easel)) sql.exec('INSERT INTO draw_pages (id, created_at) VALUES (?, ?)', easel, Date.now());
+}
 
 /**
  * Bring the database up to the latest schema (or only up to version `to`,

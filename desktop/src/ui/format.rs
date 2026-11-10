@@ -44,7 +44,7 @@ pub fn fmt_day(ts: i64) -> String {
     local_time(ts).format("%A, %B %-d, %Y").to_string()
 }
 
-pub(super) fn uses_12h() -> bool {
+pub(crate) fn uses_12h() -> bool {
     let loc = sys_locale::get_locale().unwrap_or_else(|| "en-US".into()).replace('_', "-");
     ["en-US", "en-CA", "en-AU", "en-NZ", "en-PH", "en-IN", "es-US", "es-MX", "en"].iter().any(|l| loc == *l || loc.starts_with(&format!("{l}-")) && l.len() > 2)
 }

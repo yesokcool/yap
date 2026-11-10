@@ -58,6 +58,9 @@ fn msg_group(msg: &ServerMsg) -> Part {
         | ServerMsg::Signal { .. }
         | ServerMsg::View { .. } => Part::People,
         ServerMsg::DrawState { .. }
+        | ServerMsg::DrawBoard { .. }
+        | ServerMsg::DrawHistory { .. }
+        | ServerMsg::DrawVersion { .. }
         | ServerMsg::DrawSeg { .. }
         | ServerMsg::DrawStroke { .. }
         | ServerMsg::DrawUndo { .. }
@@ -326,6 +329,8 @@ impl Core {
                     let mut m = self.shared.model.lock();
                     match re.as_deref() {
                         Some("channel.create") => m.awaiting_channel = None,
+                        // (The version asked for is gone: stop waiting for it.)
+                        Some("draw.version") => m.draw.wanted = None,
                         Some("shelf") => m.shelf.values_mut().for_each(|st| st.loading = false),
                         Some("search") => {
                             if let Some(st) = m.search.as_mut() {
@@ -880,33 +885,99 @@ impl Core {
     /// The shared drawing board.
     pub(super) async fn on_draw_msg(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::DrawState { strokes, gallery } => {
+            ServerMsg::DrawState { canvas, strokes, board, by, why, at } => {
+                let event = format!("state {} {}", canvas.map_or("?".into(), |c| c.to_string()), why.as_deref().unwrap_or(""));
                 {
                     let mut m = self.shared.model.lock();
                     let me = m.config.uid.clone();
+                    let who = by.as_deref().and_then(|u| m.users.get(u)).map_or_else(|| "Someone".into(), |u| u.name.clone());
                     let d = &mut m.draw;
+                    d.page = canvas.or(d.page);
                     d.mine = strokes.iter().filter(|s| s.uid == me).map(|s| s.id.clone()).collect();
                     d.strokes = strokes;
-                    d.gallery = gallery;
+                    d.board = board;
                     d.live.clear();
+                    d.versions = None;
+                    d.preview = None;
+                    d.wanted = None;
                     d.version += 1;
                     d.loaded = true;
+                    let mine = by.as_deref() == Some(me.as_str());
+                    let toast = match (why.as_deref(), by.is_some()) {
+                        (Some("restore"), true) => {
+                            let then = at.map(|t| crate::ui::format::fmt_short(t, crate::ui::format::uses_12h())).unwrap_or_else(|| "an earlier version".into());
+                            Some(if mine { format!("Went back to {then} for everyone. History has what was there before.") } else { format!("{who} took this drawing back to {then}. History has what was there before.") })
+                        }
+                        (_, true) if mine => None,
+                        (Some("new"), true) => Some(format!("{who} started a new drawing. The one before is on the board.")),
+                        (Some("open"), true) => Some(format!("{who} put Drawing {} on the easel.", canvas.unwrap_or_default())),
+                        _ => None,
+                    };
+                    if let Some(t) = toast {
+                        m.toast(t);
+                    }
                 }
-                self.emit(CoreEvent::Draw("state".into()));
+                self.emit(CoreEvent::Draw(event.trim_end().to_string()));
                 self.repaint();
             }
-            ServerMsg::DrawSeg { sid, sk, c, w, e, p, l } => {
-                self.shared.model.lock().draw.add_live(sid, &sk, c, w, e, l, p);
+            ServerMsg::DrawBoard { canvas, board } => {
+                let n = board.len();
+                {
+                    let mut m = self.shared.model.lock();
+                    if canvas.is_some() && canvas != m.draw.page {
+                        return;
+                    }
+                    m.draw.board = board;
+                }
+                self.emit(CoreEvent::Draw(format!("board {n}")));
                 self.repaint();
             }
-            ServerMsg::DrawStroke { stroke } => {
+            ServerMsg::DrawHistory { page, versions } => {
+                let n = versions.len();
+                {
+                    let mut m = self.shared.model.lock();
+                    if Some(page) != m.draw.page {
+                        return;
+                    }
+                    m.draw.versions = Some(versions);
+                }
+                self.emit(CoreEvent::Draw(format!("history {n}")));
+                self.repaint();
+            }
+            ServerMsg::DrawVersion { id, page, ts, strokes } => {
+                let n = strokes.len();
+                {
+                    let mut m = self.shared.model.lock();
+                    let d = &mut m.draw;
+                    if d.wanted.as_deref() != Some(id.as_str()) || Some(page) != d.page {
+                        return;
+                    }
+                    d.wanted = None;
+                    let v = d.versions.as_ref().and_then(|l| l.iter().find(|v| v.id == id));
+                    let (why, uid) = v.map_or(("auto".into(), None), |v| (v.why.clone(), v.uid.clone()));
+                    d.preview = Some(super::model::DrawPreview { id: id.clone(), ts, why, uid, strokes });
+                    d.version += 1;
+                }
+                self.emit(CoreEvent::Draw(format!("version {id} ({n} strokes)")));
+                self.repaint();
+            }
+            ServerMsg::DrawSeg { sid, sk, c, w, e, p, l, pg } => {
+                let mut m = self.shared.model.lock();
+                if !m.draw.elsewhere(pg) {
+                    m.draw.add_live(sid, &sk, c, w, e, l, p);
+                }
+                drop(m);
+                self.repaint();
+            }
+            ServerMsg::DrawStroke { stroke, pg } => {
                 {
                     let mut m = self.shared.model.lock();
                     let d = &mut m.draw;
                     let suffix = format!(":{}", stroke.id);
                     d.live.retain(|k, _| !k.ends_with(&suffix));
-                    if !d.strokes.iter().any(|s| s.id == stroke.id) {
+                    if !d.elsewhere(pg) && !d.strokes.iter().any(|s| s.id == stroke.id) {
                         d.strokes.push(stroke.clone());
+                        d.changed();
                         d.version += 1;
                     }
                 }
@@ -916,13 +987,19 @@ impl Core {
             ServerMsg::DrawUndo { id } => {
                 {
                     let mut m = self.shared.model.lock();
-                    m.draw.strokes.retain(|s| s.id != id);
-                    m.draw.mine.retain(|s| *s != id);
-                    m.draw.version += 1;
+                    let d = &mut m.draw;
+                    let before = d.strokes.len();
+                    d.strokes.retain(|s| s.id != id);
+                    d.mine.retain(|s| *s != id);
+                    if d.strokes.len() != before {
+                        d.changed();
+                        d.version += 1;
+                    }
                 }
                 self.emit(CoreEvent::Draw(format!("undo {id}")));
                 self.repaint();
             }
+            // (Servers from before v0.54: a fresh page.)
             ServerMsg::DrawClear { by } => {
                 {
                     let mut m = self.shared.model.lock();
@@ -932,19 +1009,24 @@ impl Core {
                     m.draw.version += 1;
                     if by != m.config.uid {
                         let who = m.user_name(&by);
-                        m.toast(format!("{who} started a fresh page (the old one is in the gallery)."));
+                        m.toast(format!("{who} started a fresh page."));
                     }
                 }
                 self.emit(CoreEvent::Draw("clear".into()));
                 self.repaint();
             }
-            ServerMsg::DrawWipe { l, by } => {
+            ServerMsg::DrawWipe { l, by, pg, all } => {
                 let gone = {
                     let mut m = self.shared.model.lock();
+                    if m.draw.elsewhere(pg) {
+                        return;
+                    }
                     let gone = m.draw.wipe(l);
-                    if by != m.config.uid {
+                    m.draw.changed();
+                    // (A whole-drawing clear comes as one wipe per layer: said once.)
+                    if by != m.config.uid && !(all && l != 0) {
                         let who = m.user_name(&by);
-                        m.toast(format!("{who} cleared layer {} (the page is in the gallery).", l as usize + 1));
+                        m.toast(if all { format!("{who} cleared the whole drawing. History can bring it back.") } else { format!("{who} cleared layer {}. History can bring it back.", l as usize + 1) });
                     }
                     gone
                 };
@@ -954,13 +1036,16 @@ impl Core {
             ServerMsg::Drawing { drawing } => {
                 {
                     let mut m = self.shared.model.lock();
-                    if !m.draw.gallery.iter().any(|d| d.id == drawing.id) {
-                        m.draw.gallery.insert(0, drawing.clone());
-                    }
-                    // Space's Gallery hangs it too (newest first).
-                    if m.space.gallery_loaded && !m.space.gallery.iter().any(|d| d.id == drawing.id) {
-                        m.space.gallery.insert(0, drawing.clone());
-                        m.space.gallery.truncate(60);
+                    // Space's Gallery hangs it (newest first); a drawing saved again
+                    // replaces its old picture (one frame per drawing, like the board).
+                    let space = &mut m.space;
+                    let sg = &mut space.gallery;
+                    if space.gallery_loaded && !sg.iter().any(|d| d.id == drawing.id) {
+                        if drawing.page.is_some() {
+                            sg.retain(|d| d.page != drawing.page);
+                        }
+                        sg.insert(0, drawing.clone());
+                        sg.truncate(60);
                     }
                 }
                 self.emit(CoreEvent::Draw(format!("saved {}", drawing.media)));

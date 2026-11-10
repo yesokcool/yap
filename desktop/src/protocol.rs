@@ -759,24 +759,62 @@ pub enum ServerMsg {
     /// A session switched shared views.
     #[serde(rename = "view")]
     View { sid: String, #[serde(default)] view: Option<String> },
+    /// The drawing on the easel (`canvas`), its strokes and the board
+    /// (PROTOCOL.md › Draw drawings and the board). `by` / `why` when someone
+    /// moved the easel or went back (`at` = the version's time).
     #[serde(rename = "draw.state")]
     DrawState {
         #[serde(default)]
+        canvas: Option<i64>,
+        #[serde(default)]
         strokes: Vec<Stroke>,
         #[serde(default)]
-        gallery: Vec<SavedDrawing>,
+        board: Vec<DrawPage>,
+        #[serde(default)]
+        by: Option<String>,
+        #[serde(default)]
+        why: Option<String>,
+        #[serde(default)]
+        at: Option<i64>,
     },
+    /// The board changed (a save, a drawing taken down or put back).
+    #[serde(rename = "draw.board")]
+    DrawBoard {
+        #[serde(default)]
+        canvas: Option<i64>,
+        #[serde(default)]
+        board: Vec<DrawPage>,
+    },
+    /// The easel drawing's versions, newest first.
+    #[serde(rename = "draw.history")]
+    DrawHistory {
+        page: i64,
+        #[serde(default)]
+        versions: Vec<DrawVersion>,
+    },
+    /// One version's strokes, to look at (just you).
+    #[serde(rename = "draw.version")]
+    DrawVersion {
+        id: String,
+        page: i64,
+        #[serde(default)]
+        ts: i64,
+        #[serde(default)]
+        strokes: Vec<Stroke>,
+    },
+    /// `pg`: the drawing it's on (absent from older servers: the one on the easel).
     #[serde(rename = "draw.seg")]
-    DrawSeg { sid: String, sk: String, #[serde(default)] c: String, #[serde(default)] w: f32, #[serde(default)] e: bool, #[serde(default)] p: Vec<f32>, #[serde(default)] l: u8 },
+    DrawSeg { sid: String, sk: String, #[serde(default)] c: String, #[serde(default)] w: f32, #[serde(default)] e: bool, #[serde(default)] p: Vec<f32>, #[serde(default)] l: u8, #[serde(default)] pg: Option<i64> },
     #[serde(rename = "draw.stroke")]
-    DrawStroke { stroke: Stroke },
+    DrawStroke { stroke: Stroke, #[serde(default)] pg: Option<i64> },
     #[serde(rename = "draw.undo")]
     DrawUndo { id: String },
     #[serde(rename = "draw.clear")]
     DrawClear { #[serde(default)] by: String },
-    /// One layer of the page emptied for everyone (PROTOCOL.md › Draw layers).
+    /// One layer of the page emptied for everyone (PROTOCOL.md › Draw layers);
+    /// `all`: one of these per layer, the whole drawing cleared.
     #[serde(rename = "draw.wipe")]
-    DrawWipe { l: u8, #[serde(default)] by: String },
+    DrawWipe { l: u8, #[serde(default)] by: String, #[serde(default)] pg: Option<i64>, #[serde(default)] all: bool },
     #[serde(rename = "drawing")]
     Drawing { drawing: SavedDrawing },
     /// Just the gallery (`draw.gallery`, for Space's Gallery): newest first, ≤ 60.
@@ -897,7 +935,7 @@ fn is_zero(v: &u8) -> bool {
     *v == 0
 }
 
-/// A drawing saved to the gallery (`/media/<media>`).
+/// A picture of a drawing (`/media/<media>`): Space's Gallery.
 #[derive(Deserialize, Clone, Debug, PartialEq)]
 pub struct SavedDrawing {
     pub id: String,
@@ -906,6 +944,62 @@ pub struct SavedDrawing {
     pub uid: String,
     #[serde(default)]
     pub ts: i64,
+    /// The drawing it's a picture of (absent before v0.54).
+    #[serde(default)]
+    pub page: Option<i64>,
+}
+
+/// A drawing on Draw's bulletin board, or the one on the easel
+/// (PROTOCOL.md › Draw drawings and the board).
+#[derive(Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DrawPage {
+    pub id: i64,
+    #[serde(default)]
+    pub created_at: i64,
+    /// Its latest picture (`/media/<media>`).
+    #[serde(default)]
+    pub media: Option<String>,
+    #[serde(default)]
+    pub saved_at: Option<i64>,
+    #[serde(default)]
+    pub saved_by: Option<String>,
+    /// On the board since (None = never pinned).
+    #[serde(default)]
+    pub pinned_at: Option<i64>,
+    /// Taken down: when and by whom.
+    #[serde(default)]
+    pub down_at: Option<i64>,
+    #[serde(default)]
+    pub down_by: Option<String>,
+    /// Who drew on it, as of its last save.
+    #[serde(default)]
+    pub artists: Vec<String>,
+    /// Only the one on the easel: changed since its picture was saved.
+    #[serde(default)]
+    pub dirty: bool,
+}
+
+/// A kept version of the drawing on the easel (History).
+#[derive(Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct DrawVersion {
+    pub id: String,
+    #[serde(default)]
+    pub ts: i64,
+    /// Who it was kept for; None = kept while drawing.
+    #[serde(default)]
+    pub uid: Option<String>,
+    /// "save", "auto", "wipe", "restore" or "leave".
+    #[serde(default)]
+    pub why: String,
+    /// Strokes on the page then.
+    #[serde(default)]
+    pub n: u32,
+    #[serde(default)]
+    pub media: Option<String>,
+    /// Exactly what's on the easel now.
+    #[serde(default)]
+    pub now: bool,
 }
 
 /// Where someone stands in Space (world 2400 × 1600; `d` = facing, radians).
@@ -1063,16 +1157,24 @@ pub mod out {
     pub fn draw_gallery() -> Value {
         json!({ "t": "draw.gallery" })
     }
-    /// `l`: the layer, written only when it isn't the bottom one.
-    pub fn draw_seg(sk: &str, c: &str, w: f32, e: bool, p: &[f32], l: u8) -> Value {
+    /// `l`: the layer, written only when it isn't the bottom one; `pg`: the
+    /// drawing the stroke was started on.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_seg(sk: &str, c: &str, w: f32, e: bool, p: &[f32], l: u8, pg: Option<i64>) -> Value {
         let mut v = json!({ "t": "draw.seg", "sk": sk, "c": c, "w": w, "e": e, "p": p });
         if l != 0 {
             v["l"] = json!(l);
         }
+        if let Some(pg) = pg {
+            v["pg"] = json!(pg);
+        }
         v
     }
-    pub fn draw_stroke(s: &Stroke) -> Value {
+    pub fn draw_stroke(s: &Stroke, pg: Option<i64>) -> Value {
         let mut v = json!({ "t": "draw.stroke", "sk": s.id, "c": s.c, "w": s.w, "e": s.e, "p": s.p });
+        if let Some(pg) = pg {
+            v["pg"] = json!(pg);
+        }
         if let Some(k) = &s.k {
             v["k"] = json!(k);
         }
@@ -1084,15 +1186,48 @@ pub mod out {
         }
         v
     }
-    /// Empty one layer of the page for everyone.
-    pub fn draw_wipe(l: u8) -> Value {
-        json!({ "t": "draw.wipe", "l": l })
+    /// Empty one layer of drawing `pg` for everyone (`all`: every layer).
+    pub fn draw_wipe(l: u8, all: bool, pg: Option<i64>) -> Value {
+        let mut v = json!({ "t": "draw.wipe", "l": if all { 0 } else { l } });
+        if all {
+            v["all"] = json!(true);
+        }
+        if let Some(pg) = pg {
+            v["pg"] = json!(pg);
+        }
+        v
     }
     pub fn draw_undo(id: &str) -> Value {
         json!({ "t": "draw.undo", "id": id })
     }
-    pub fn draw_clear() -> Value {
-        json!({ "t": "draw.clear" })
+    /// A new blank drawing on the easel; `from` = the one we saw there.
+    pub fn draw_new(from: Option<i64>) -> Value {
+        let mut v = json!({ "t": "draw.new" });
+        if let Some(f) = from {
+            v["from"] = json!(f);
+        }
+        v
+    }
+    /// Put drawing `page` on the easel for everyone.
+    pub fn draw_open(page: i64, from: Option<i64>) -> Value {
+        let mut v = json!({ "t": "draw.open", "page": page });
+        if let Some(f) = from {
+            v["from"] = json!(f);
+        }
+        v
+    }
+    /// Take a drawing down from the board (`on` false) or put it back.
+    pub fn draw_pin(page: i64, on: bool) -> Value {
+        json!({ "t": "draw.pin", "page": page, "on": on })
+    }
+    pub fn draw_history() -> Value {
+        json!({ "t": "draw.history" })
+    }
+    pub fn draw_version(id: &str) -> Value {
+        json!({ "t": "draw.version", "id": id })
+    }
+    pub fn draw_restore(id: &str) -> Value {
+        json!({ "t": "draw.restore", "id": id })
     }
     pub fn space_state() -> Value {
         json!({ "t": "space.state" })
@@ -1358,7 +1493,7 @@ mod tests {
         assert!(matches!(serde_json::from_str::<ServerMsg>(unpin).unwrap(), ServerMsg::Pinned { pinned_at: None, .. }));
         let st = r##"{"t":"draw.state","canvas":3,"strokes":[{"id":"s","uid":"u","c":"#000000","w":32,"e":false,"p":[1,2,3,4]},{"id":"t","uid":"u","c":"#ff0000","w":14,"e":false,"p":[5,6],"k":"text","text":"hi"}],"gallery":[{"id":"g","media":"0123","uid":"u","ts":1}]}"##;
         match serde_json::from_str::<ServerMsg>(st).unwrap() {
-            ServerMsg::DrawState { strokes, gallery } => assert!(strokes.len() == 2 && strokes[1].text.as_deref() == Some("hi") && gallery.len() == 1),
+            ServerMsg::DrawState { canvas, strokes, board, by, .. } => assert!(canvas == Some(3) && strokes.len() == 2 && strokes[1].text.as_deref() == Some("hi") && board.is_empty() && by.is_none()),
             _ => panic!("draw.state"),
         }
         let gal = r#"{"t":"draw.gallery","gallery":[{"id":"g","media":"0123456789abcdef","uid":"u","ts":1}]}"#;
@@ -1368,8 +1503,8 @@ mod tests {
         let sst = r#"{"t":"space.state","players":[{"sid":"a","x":1,"y":2,"d":0}],"me":null}"#;
         assert!(matches!(serde_json::from_str::<ServerMsg>(sst).unwrap(), ServerMsg::SpaceState { me: None, .. }));
         let stroke = Stroke { id: "s1".into(), c: "#000000".into(), w: 32.0, p: vec![1.0, 2.0], k: Some("poly".into()), ..Default::default() };
-        let v = out::draw_stroke(&stroke);
-        assert!(v["sk"] == "s1" && v["k"] == "poly" && v.get("text").is_none() && v.get("uid").is_none());
+        let v = out::draw_stroke(&stroke, None);
+        assert!(v["sk"] == "s1" && v["k"] == "poly" && v.get("text").is_none() && v.get("uid").is_none() && v.get("pg").is_none());
         assert!(v.get("l").is_none(), "the bottom layer isn't written");
         let plain = r#"{"t":"personal.plain","notes":[{"id":"a","body":"hi"},{"id":"b","body":"","image":{"id":"0123","width":10,"height":20}}]}"#;
         match serde_json::from_str::<ServerMsg>(plain).unwrap() {
@@ -1435,20 +1570,54 @@ mod tests {
         assert_eq!(top.l, 2);
         assert_eq!(serde_json::to_value(&top).unwrap()["l"], 2);
         assert_eq!(serde_json::from_value::<Stroke>(serde_json::to_value(&top).unwrap()).unwrap(), top);
-        assert_eq!(out::draw_stroke(&top)["l"], 2);
+        assert_eq!(out::draw_stroke(&top, Some(4))["l"], 2);
         // Live pieces: sent with l only off the bottom layer; heard with or without it.
-        assert!(out::draw_seg("a", "#000000", 14.0, false, &[1.0, 2.0], 0).get("l").is_none());
-        assert_eq!(out::draw_seg("a", "#000000", 14.0, false, &[1.0, 2.0], 2)["l"], 2);
+        assert!(out::draw_seg("a", "#000000", 14.0, false, &[1.0, 2.0], 0, None).get("l").is_none());
+        assert_eq!(out::draw_seg("a", "#000000", 14.0, false, &[1.0, 2.0], 2, None)["l"], 2);
         let seg = r##"{"t":"draw.seg","sid":"x","sk":"a","c":"#000000","w":14,"e":false,"p":[1,2],"l":1}"##;
         assert!(matches!(serde_json::from_str::<ServerMsg>(seg).unwrap(), ServerMsg::DrawSeg { l: 1, .. }));
         let seg0 = r##"{"t":"draw.seg","sid":"x","sk":"a","c":"#000000","w":14,"e":false,"p":[1,2]}"##;
         assert!(matches!(serde_json::from_str::<ServerMsg>(seg0).unwrap(), ServerMsg::DrawSeg { l: 0, .. }));
         // The wipe, both ways.
-        assert_eq!(out::draw_wipe(1), serde_json::json!({ "t": "draw.wipe", "l": 1 }));
+        assert_eq!(out::draw_wipe(1, false, None), serde_json::json!({ "t": "draw.wipe", "l": 1 }));
         match serde_json::from_str::<ServerMsg>(r#"{"t":"draw.wipe","l":2,"by":"u"}"#).unwrap() {
-            ServerMsg::DrawWipe { l, by } => assert!(l == 2 && by == "u"),
+            ServerMsg::DrawWipe { l, by, pg, all } => assert!(l == 2 && by == "u" && pg.is_none() && !all),
             _ => panic!("draw.wipe"),
         }
+    }
+
+    /// PROTOCOL.md › Draw drawings and the board: the board, History, and
+    /// strokes that say which drawing they're on.
+    #[test]
+    fn draw_board_messages() {
+        let st = r#"{"t":"draw.state","canvas":7,"strokes":[],"gallery":[],"board":[{"id":7,"createdAt":5,"dirty":true},{"id":3,"createdAt":1,"media":"ab","savedAt":2,"savedBy":"u","pinnedAt":2,"artists":["u","v"]},{"id":2,"createdAt":1,"pinnedAt":1,"downAt":4,"downBy":"v"}],"by":"v","why":"new"}"#;
+        match serde_json::from_str::<ServerMsg>(st).unwrap() {
+            ServerMsg::DrawState { canvas: Some(7), board, by, why, at: None, .. } => {
+                assert!(board[0].dirty && board[0].pinned_at.is_none() && board[0].media.is_none());
+                assert_eq!(board[1], DrawPage { id: 3, created_at: 1, media: Some("ab".into()), saved_at: Some(2), saved_by: Some("u".into()), pinned_at: Some(2), artists: vec!["u".into(), "v".into()], ..Default::default() });
+                assert!(board[2].down_at == Some(4) && board[2].down_by.as_deref() == Some("v"));
+                assert!(by.as_deref() == Some("v") && why.as_deref() == Some("new"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(serde_json::from_str::<ServerMsg>(r#"{"t":"draw.board","canvas":7,"board":[{"id":7,"createdAt":5}]}"#).unwrap(), ServerMsg::DrawBoard { canvas: Some(7), board } if board.len() == 1));
+        match serde_json::from_str::<ServerMsg>(r#"{"t":"draw.history","page":7,"versions":[{"id":"v2","ts":9,"why":"auto","n":4,"now":true},{"id":"v1","ts":8,"uid":"u","why":"save","n":3,"media":"cd"}]}"#).unwrap() {
+            ServerMsg::DrawHistory { page: 7, versions } => assert!(versions[0].now && versions[0].uid.is_none() && versions[1].media.as_deref() == Some("cd") && versions[1].why == "save"),
+            other => panic!("{other:?}"),
+        }
+        let ver = r##"{"t":"draw.version","id":"v1","page":7,"ts":8,"strokes":[{"id":"s","uid":"u","c":"#000000","w":32,"e":false,"p":[1,2]}]}"##;
+        assert!(matches!(serde_json::from_str::<ServerMsg>(ver).unwrap(), ServerMsg::DrawVersion { page: 7, ref strokes, .. } if strokes.len() == 1));
+        let stroke = r##"{"t":"draw.stroke","stroke":{"id":"s","uid":"u","c":"#000000","w":32,"e":false,"p":[1,2]},"pg":6}"##;
+        assert!(matches!(serde_json::from_str::<ServerMsg>(stroke).unwrap(), ServerMsg::DrawStroke { pg: Some(6), .. }));
+        assert!(matches!(serde_json::from_str::<ServerMsg>(r#"{"t":"draw.wipe","l":1,"by":"u","pg":7,"all":true}"#).unwrap(), ServerMsg::DrawWipe { pg: Some(7), all: true, .. }));
+        // Sent: the drawing a stroke was started on, the whole-drawing clear, the easel's moves.
+        assert_eq!(out::draw_seg("a", "#000000", 14.0, false, &[1.0, 2.0], 0, Some(7))["pg"], 7);
+        assert_eq!(out::draw_wipe(2, true, Some(7)), serde_json::json!({ "t": "draw.wipe", "l": 0, "all": true, "pg": 7 }));
+        assert_eq!(out::draw_new(Some(7)), serde_json::json!({ "t": "draw.new", "from": 7 }));
+        assert_eq!(out::draw_open(3, Some(7)), serde_json::json!({ "t": "draw.open", "page": 3, "from": 7 }));
+        assert_eq!(out::draw_pin(3, false), serde_json::json!({ "t": "draw.pin", "page": 3, "on": false }));
+        let pic: SavedDrawing = serde_json::from_str(r#"{"id":"g","media":"ab","uid":"u","ts":1,"page":3}"#).unwrap();
+        assert_eq!(pic.page, Some(3));
     }
 
     /// PROTOCOL.md › Identity: why the "Choose a password" prompt asks

@@ -43,7 +43,7 @@ import {
 import { WAITING, WEAK, devicesOf, onHandoff, onHello, onObsCreate, onObsRevoke, onResetPin, onRevokeDevice, onSetPin, onSignOut, onSignOutOthers, onVaultSet, resetPin, setTestPin, vaultOf } from './hub-accounts';
 import { DB_LIMIT_BYTES, EMOJI_RATE, addChannels, addEmoji, archiveChannels, checkInvite, invites, links, mergeUsers, modLog, onApprove, onBan, onChannelArchive, onChannelBitrate, onChannelCreate, onClaimOwner, onEmojiDelete, onEmojiRename, onInviteCreate, onInviteRevoke, onLinkAdd, onResetMain, resetMainKey, onLinkRemove, onRole, onStats, setRole, stats, unarchiveChannels, unmergeUser, type AddEmojiResult } from './hub-admin';
 import { exportPage, importBackup } from './hub-backup';
-import { addDrawing, gallery, onDrawClear, onDrawSeg, onDrawState, onDrawStroke, onDrawUndo, onDrawWipe } from './hub-draw';
+import { addDrawing, gallery, onDrawHistory, onDrawNew, onDrawOpen, onDrawPin, onDrawRestore, onDrawSeg, onDrawState, onDrawStroke, onDrawUndo, onDrawVersion, onDrawWipe } from './hub-draw';
 import { addSound, hangs, onHangCancel, onHangSet, onSoundDelete, onSoundPlay, nextHangAt, onWhenGet, onWhenSet, sounds, startDueHangs } from './hub-extras';
 import { onDelete, onEdit, onHistory, onPersonalPlain, onPersonalSeal, onPin, onPins, onPollVote, onReact, onSearch, onSend, onShelf, onUnreadCounts } from './hub-messages';
 import { notifySettings, onNotifySettings, onPing, onPushSubscribe, onQuiet } from './hub-pushes';
@@ -331,9 +331,25 @@ export class Hub extends DurableObject<Env> {
           this.limit(me.sid, 'stroke', 40, 8);
           return onDrawStroke(this, ws, me, msg);
         case 'draw.undo': return onDrawUndo(this, me, msg);
-        case 'draw.clear':
-          this.limit(me.sid, 'clear', 3, 1 / 20);
-          return onDrawClear(this, me);
+        case 'draw.clear': // (apps from before v0.54: a new drawing; the old one stays on the board)
+        case 'draw.new':
+          this.limit(me.sid, 'easel', 6, 1 / 3);
+          return onDrawNew(this, ws, me, msg.t === 'draw.new' ? msg : {});
+        case 'draw.open':
+          this.limit(me.sid, 'easel', 6, 1 / 3);
+          return onDrawOpen(this, ws, me, msg);
+        case 'draw.pin':
+          this.limit(me.sid, 'drawpin', 10, 1 / 2);
+          return onDrawPin(this, me, msg);
+        case 'draw.history':
+          this.limit(me.sid, 'history', 10, 1);
+          return onDrawHistory(this, ws);
+        case 'draw.version':
+          this.limit(me.sid, 'history', 10, 1);
+          return onDrawVersion(this, ws, msg);
+        case 'draw.restore':
+          this.limit(me.sid, 'restore', 3, 1 / 10);
+          return onDrawRestore(this, me, msg);
         case 'draw.wipe':
           this.limit(me.sid, 'wipe', 5, 1 / 10);
           return onDrawWipe(this, me, msg);
@@ -819,7 +835,7 @@ export class Hub extends DurableObject<Env> {
     return setTestPin(this, uid, pin);
   }
 
-  async addDrawing(input: { sid: string; ut: string; media: string }): Promise<{ ok: boolean; drawing?: SavedDrawing; message?: string }> {
+  async addDrawing(input: { sid: string; ut: string; media: string; page?: string | null; pin?: string | null }): Promise<{ ok: boolean; drawing?: SavedDrawing; message?: string }> {
     return addDrawing(this, input);
   }
 

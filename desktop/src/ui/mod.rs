@@ -12,7 +12,7 @@ mod dialogs;
 mod doodle;
 mod draw;
 mod extras;
-mod format;
+pub(crate) mod format;
 mod gifs;
 mod icons;
 mod images;

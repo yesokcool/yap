@@ -1956,7 +1956,7 @@ await test('drawing: shapes (straight segments) and text strokes are kept and re
   b.send({ t: 'view', view: null });
 });
 
-await test('drawing: live pieces + strokes reach others; undo is yours; clear starts fresh; saves go to the gallery', async () => {
+await test('drawing: live pieces + strokes reach others; undo is yours; an older app\'s clear starts a new drawing; saves pin the one on the easel', async () => {
   // (Earlier tests leave `view` messages unread: an old "on draw" one would let this go on before
   // the server has put both on the board, and the first piece would then reach nobody.)
   for (const c of [a, b]) c.inbox = c.inbox.filter((m) => m.t !== 'view');
@@ -1980,14 +1980,17 @@ await test('drawing: live pieces + strokes reach others; undo is yours; clear st
   assert.equal((await b.next((m) => m.t === 'draw.undo')).id, `stroke_${RUN}`);
   const save = await fetch(`${BASE}/api/drawing?${new URLSearchParams({ key: KEY, sid: b.ready.sid, ut: b.ready.uploadToken })}`, { method: 'POST', body: png() });
   assert.equal(save.status, 200, await save.clone().text());
-  assert.equal((await a.next((m) => m.t === 'drawing')).drawing.uid, b.uid);
+  const saved = (await a.next((m) => m.t === 'drawing')).drawing;
+  assert.deepEqual([saved.uid, saved.page], [b.uid, state.canvas], 'a save without a page is of the drawing on the easel');
+  // Apps from before drawings send draw.clear: a new drawing, and the one before stays on the board.
   a.send({ t: 'draw.clear' });
-  const cleared = await b.next((m) => m.t === 'draw.clear');
-  assert.ok(cleared.canvas > state.canvas);
-  b.send({ t: 'draw.state' });
-  const fresh = await b.next((m) => m.t === 'draw.state');
+  const fresh = await b.next((m) => m.t === 'draw.state' && m.why === 'new');
+  assert.ok(fresh.canvas > state.canvas);
+  assert.equal(fresh.by, a.uid);
   assert.equal(fresh.strokes.length, 0);
-  assert.ok(fresh.gallery.length >= 1);
+  const before = fresh.board.find((p) => p.id === state.canvas);
+  assert.ok(before?.pinnedAt && before.media === saved.media, 'the drawing before is pinned, with its picture');
+  assert.ok(fresh.gallery.some((d) => d.media === saved.media));
 });
 
 await test('drawing: layers travel with strokes; a wipe empties one layer for everyone', async () => {
@@ -2006,11 +2009,132 @@ await test('drawing: layers travel with strokes; a wipe empties one layer for ev
   a.send({ t: 'draw.wipe', l: 7 });
   assert.equal((await a.next((m) => m.t === 'error' && m.re === 'draw.wipe')).code, 'bad_layer');
   b.send({ t: 'draw.wipe', l: 2 });
-  assert.deepEqual(await a.next((m) => m.t === 'draw.wipe'), { t: 'draw.wipe', l: 2, by: b.uid });
+  const wiped = await a.next((m) => m.t === 'draw.wipe');
+  assert.deepEqual([wiped.l, wiped.by, typeof wiped.pg], [2, b.uid, 'number']);
   b.send({ t: 'draw.state' });
   const st = await b.next((m) => m.t === 'draw.state');
   assert.equal(st.strokes.some((s) => s.id === top), false, 'the top layer is empty');
   assert.ok(st.strokes.some((s) => s.id === bottom), 'the bottom layer is untouched');
+});
+
+await test('drawings: save pins the easel; new and open move the easel for everyone (nothing with ink is lost); take down and put back', async () => {
+  // Both are still on the draw view. Start from a blank easel (and an inbox without the tests before's Draw news).
+  const fresh = () => {
+    for (const c of [a, b]) c.inbox = c.inbox.filter((m) => !m.t.startsWith('draw') && m.t !== 'drawing');
+  };
+  fresh();
+  b.send({ t: 'draw.state' });
+  let st = await b.next((m) => m.t === 'draw.state');
+  if (st.strokes.length) {
+    a.send({ t: 'draw.new', from: st.canvas });
+    st = await b.next((m) => m.t === 'draw.state' && m.why === 'new');
+  }
+  const one = st.canvas;
+  const s1 = `one${rid()}`;
+  a.send({ t: 'draw.stroke', sk: s1, c: '#ff0000', w: 14, e: false, p: [10, 10, 500, 500], pg: one });
+  assert.equal((await b.next((m) => m.t === 'draw.stroke' && m.stroke.id === s1)).pg, one);
+  // Someone switched meanwhile (as far as the sender knows): refused, nothing moves.
+  a.send({ t: 'draw.new', from: one + 999 });
+  assert.equal((await a.next((m) => m.t === 'error' && m.re === 'draw.new')).code, 'stale_page');
+  // Save to board: the picture is of drawing one, and it goes up.
+  fresh();
+  const up = await fetch(`${BASE}/api/drawing?${new URLSearchParams({ key: KEY, sid: a.ready.sid, ut: a.ready.uploadToken, page: String(one), pin: '1' })}`, { method: 'POST', body: png() });
+  assert.equal(up.status, 200, await up.clone().text());
+  const pic1 = (await b.next((m) => m.t === 'drawing' && m.drawing.page === one)).drawing;
+  let board = (await b.next((m) => m.t === 'draw.board')).board;
+  let page1 = board.find((p) => p.id === one);
+  assert.deepEqual([Boolean(page1.pinnedAt), page1.media, page1.dirty, page1.artists], [true, pic1.media, false, [a.uid]]);
+  // New drawing: everyone on Draw gets the blank one; one stays pinned.
+  a.send({ t: 'draw.new', from: one });
+  st = await b.next((m) => m.t === 'draw.state' && m.why === 'new');
+  const two = st.canvas;
+  assert.ok(two > one);
+  assert.deepEqual([st.by, st.strokes.length], [a.uid, 0]);
+  assert.ok(st.board.some((p) => p.id === one && p.pinnedAt));
+  assert.deepEqual(st.board.find((p) => p.id === two), { id: two, createdAt: st.board.find((p) => p.id === two).createdAt, dirty: false }, 'the blank one: not pinned, nothing to save');
+  // New again on a blank easel: nothing happens (just the state back).
+  a.send({ t: 'draw.new', from: two });
+  assert.equal((await a.next((m) => m.t === 'draw.state' && !m.why)).canvas, two);
+  // Draw on two, never save it, open one: two goes on the board anyway (no picture yet), one comes back with its ink.
+  const s2 = `two${rid()}`;
+  b.send({ t: 'draw.stroke', sk: s2, c: '#0000ff', w: 14, e: false, p: [20, 20, 600, 300] });
+  await a.next((m) => m.t === 'draw.stroke' && m.stroke.id === s2);
+  a.send({ t: 'draw.open', page: one, from: two });
+  st = await b.next((m) => m.t === 'draw.state' && m.why === 'open');
+  assert.deepEqual([st.canvas, st.by, st.strokes.map((s) => s.id)], [one, a.uid, [s1]]);
+  const page2 = st.board.find((p) => p.id === two);
+  assert.ok(page2.pinnedAt && !page2.media, 'a drawing with ink that leaves the easel is pinned, even unsaved');
+  // A stroke finished after the easel moved stays on the drawing it was drawn on.
+  const late = `late${rid()}`;
+  b.send({ t: 'draw.stroke', sk: late, c: '#0000ff', w: 14, e: false, p: [30, 30, 40, 40], pg: two });
+  assert.equal((await a.next((m) => m.t === 'draw.stroke' && m.stroke.id === late)).pg, two);
+  b.send({ t: 'draw.state' });
+  assert.equal((await b.next((m) => m.t === 'draw.state' && !m.why)).strokes.some((s) => s.id === late), false);
+  b.send({ t: 'draw.open', page: 999999 }); // (b: moving the easel is limited to a few at a time, and a has moved it a lot)
+  assert.equal((await b.next((m) => m.t === 'error' && m.re === 'draw.open')).code, 'no_page');
+  // Take two down, put it back.
+  fresh();
+  b.send({ t: 'draw.pin', page: two, on: false });
+  board = (await a.next((m) => m.t === 'draw.board')).board;
+  assert.deepEqual([Boolean(board.find((p) => p.id === two).downAt), board.find((p) => p.id === two).downBy], [true, b.uid]);
+  a.send({ t: 'draw.gallery' });
+  assert.equal((await a.next((m) => m.t === 'draw.gallery')).gallery.some((d) => d.page === two), false);
+  fresh();
+  b.send({ t: 'draw.pin', page: two, on: true });
+  board = (await a.next((m) => m.t === 'draw.board')).board;
+  assert.equal(board.find((p) => p.id === two).downAt, undefined);
+  // Saving one again: Space's gallery hangs only its newest picture.
+  const s3 = `three${rid()}`;
+  a.send({ t: 'draw.stroke', sk: s3, c: '#00ff00', w: 32, e: false, p: [700, 700, 900, 900] });
+  await b.next((m) => m.t === 'draw.stroke' && m.stroke.id === s3);
+  const again = await fetch(`${BASE}/api/drawing?${new URLSearchParams({ key: KEY, sid: a.ready.sid, ut: a.ready.uploadToken, page: String(one) })}`, { method: 'POST', body: png(2) });
+  assert.equal(again.status, 200, await again.clone().text());
+  const pic2 = (await b.next((m) => m.t === 'drawing' && m.drawing.page === one)).drawing;
+  a.send({ t: 'draw.gallery' });
+  const hung = (await a.next((m) => m.t === 'draw.gallery')).gallery.filter((d) => d.page === one);
+  assert.deepEqual(hung.map((d) => d.id), [pic2.id]);
+});
+
+await test('drawing history: a wipe keeps the page first; look at a version; go back to it for everyone (and back again)', async () => {
+  for (const c of [a, b]) c.inbox = c.inbox.filter((m) => !m.t.startsWith('draw') && m.t !== 'drawing');
+  b.send({ t: 'draw.state' });
+  const st = await b.next((m) => m.t === 'draw.state' && !m.why);
+  const ids = st.strokes.map((s) => s.id);
+  assert.ok(ids.length >= 2, 'the drawing from the test before');
+  // (A stroke since its last save, so the page before the wipe isn't just that save.)
+  const s4 = `four${rid()}`;
+  a.send({ t: 'draw.stroke', sk: s4, c: '#000000', w: 14, e: false, p: [50, 50, 60, 60] });
+  await b.next((m) => m.t === 'draw.stroke' && m.stroke.id === s4);
+  ids.push(s4);
+  b.send({ t: 'draw.wipe', l: 0, pg: st.canvas + 12345 });
+  assert.equal((await b.next((m) => m.t === 'error' && m.re === 'draw.wipe')).code, 'stale_page', 'a wipe meant for another drawing does nothing');
+  b.send({ t: 'draw.wipe', l: 0, pg: st.canvas });
+  await a.next((m) => m.t === 'draw.wipe' && m.l === 0);
+  a.send({ t: 'draw.history' });
+  const h = await a.next((m) => m.t === 'draw.history');
+  assert.equal(h.page, st.canvas);
+  const kept = h.versions[0];
+  assert.deepEqual([kept.why, kept.uid, kept.n, kept.now], ['wipe', b.uid, ids.length, undefined], 'the page as it was before the wipe');
+  assert.ok(h.versions.some((v) => v.why === 'save' && v.media), 'saves are versions too, with their picture');
+  a.send({ t: 'draw.version', id: kept.id });
+  const v = await a.next((m) => m.t === 'draw.version');
+  assert.deepEqual(v.strokes.map((s) => s.id), ids);
+  a.send({ t: 'draw.version', id: 'nope' });
+  assert.equal((await a.next((m) => m.t === 'error' && m.re === 'draw.version')).code, 'no_version');
+  // Go back: everyone on Draw gets the page as it was; it's changed since its last save.
+  a.send({ t: 'draw.restore', id: kept.id });
+  const back = await b.next((m) => m.t === 'draw.state' && m.why === 'restore');
+  assert.deepEqual([back.by, back.at, back.strokes.map((s) => s.id)], [a.uid, kept.ts, ids]);
+  assert.equal(back.board.find((p) => p.id === st.canvas).dirty, true);
+  a.send({ t: 'draw.history' });
+  const after = await a.next((m) => m.t === 'draw.history');
+  assert.equal(after.versions[0].id, kept.id, 'a blank page is not kept as a version');
+  assert.equal(after.versions[0].now, true, "and that version is what's there now");
+  // A version of another drawing can't be put on this one. (b moves the easel: a has moved it a lot.)
+  b.send({ t: 'draw.new', from: st.canvas });
+  await a.next((m) => m.t === 'draw.state' && m.why === 'new');
+  a.send({ t: 'draw.restore', id: kept.id });
+  assert.equal((await a.next((m) => m.t === 'error' && m.re === 'draw.restore')).code, 'stale_page');
 });
 
 await test('space: moves reach others on the space view; newcomers get everyone’s spot', async () => {

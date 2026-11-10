@@ -3,13 +3,13 @@
 
 use super::*;
 
-/// What Clear does once the page is safely in the gallery.
+/// Where Draw's easel goes (once the drawing on it is safely on the board).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AfterSave {
-    /// A fresh page for everyone (`draw.clear`).
-    Clear,
-    /// Empty this layer for everyone (`draw.wipe`).
-    Wipe(u8),
+pub enum EaselMove {
+    /// A new blank drawing (`draw.new`).
+    New,
+    /// This drawing from the board (`draw.open`).
+    Open(i64),
 }
 
 pub enum Cmd {
@@ -101,18 +101,37 @@ pub enum Cmd {
     JumpTo { channel: String, id: String },
     /// Show a shared view (Draw, Space) instead of the chat, or go back (None).
     SetView(Option<View>),
-    /// Drawing board: a live piece of my stroke (on layer `l`) / the finished
-    /// stroke / undo / clear / empty one layer for everyone.
-    DrawSeg { sk: String, c: String, w: f32, e: bool, p: Vec<f32>, l: u8 },
-    DrawStroke(crate::protocol::Stroke),
+    /// Draw: a live piece of my stroke (on layer `l`) / the finished stroke,
+    /// each with `pg`, the drawing it was started on / undo.
+    DrawSeg { sk: String, c: String, w: f32, e: bool, p: Vec<f32>, l: u8, pg: Option<i64> },
+    DrawStroke(crate::protocol::Stroke, Option<i64>),
     DrawUndo,
-    DrawClear,
-    DrawWipe(u8),
-    /// Keep the board in the gallery: the 640 × 400 PNG, or the wiggle as a
-    /// looping GIF (`gif`; one frame with `wiggle` off). `download`: also into
-    /// Downloads; `share`: also post it in the chat; `then`: a fresh page, or
-    /// one layer emptied, for everyone (only once the archive is safely uploaded).
-    SaveDrawing { strokes: Vec<crate::protocol::Stroke>, gif: bool, wiggle: bool, download: bool, share: bool, then: Option<AfterSave> },
+    /// Empty layer `l` (`all`: every layer) of the drawing on the easel, for
+    /// everyone (History keeps it).
+    DrawWipe { l: u8, all: bool },
+    /// Save to board: a picture of the whole drawing on the easel becomes its picture on the board.
+    DrawSaveToBoard,
+    /// New drawing, or one from the board on the easel, for everyone. The one
+    /// on the easel goes on the board first (when it changed), and when that
+    /// fails the easel stays.
+    DrawMove(EaselMove),
+    /// (The core's own: the easel's drawing is on the board, move it now.)
+    DrawMoveNow { to: EaselMove, from: Option<i64> },
+    /// Take a drawing down from the board (`on` false) or put it back.
+    DrawPin { page: i64, on: bool },
+    /// History: ask for the versions / look at one (just me) / take the
+    /// drawing back to the one I'm looking at, for everyone / back to now.
+    DrawHistory,
+    DrawLook(String),
+    DrawRestore,
+    DrawNow,
+    /// Download what I see: a 640 × 400 PNG, or the wiggle as a looping GIF
+    /// (`gif`; one frame with `wiggle` off).
+    DrawDownload { strokes: Vec<crate::protocol::Stroke>, gif: bool, wiggle: bool },
+    /// Download a drawing's picture from the board.
+    DrawDownloadPinned { page: i64, media: String },
+    /// Post what I see in the chat (the GIF with `wiggle` on, else the PNG).
+    DrawShare { strokes: Vec<crate::protocol::Stroke>, wiggle: bool },
     /// Space: where I am / an emote over my head / my character (None = my picture).
     SpaceMove { x: f32, y: f32, d: f32 },
     SpaceEmote(String),

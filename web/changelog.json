@@ -1,6 +1,27 @@
 {
-  "current": "0.53.1",
+  "current": "0.55.0",
   "releases": [
+    {
+      "version": "0.55.0",
+      "date": "2026-11-10",
+      "title": "New stuff",
+      "items": [
+        "Desktop app: Draw has the bulletin board beside the page; click a drawing to put it on the easel for everyone, download it, or take it down.",
+        "Desktop app: New drawing starts a blank page without losing the one you were on, and History shows earlier versions of a drawing so you can go back to one for everyone.",
+        "Desktop app: Download saves a PNG or the wiggling GIF to your Downloads; Save to board is what pins a drawing, and Share only posts it in the chat."
+      ]
+    },
+    {
+      "version": "0.54.0",
+      "date": "2026-11-10",
+      "title": "New stuff",
+      "items": [
+        "Draw: a bulletin board beside the page holds every drawing you save; click one to put it back on the easel for everyone, download it, or take it down.",
+        "Draw: New drawing starts a blank page without losing the one you were on: it goes up on the board first.",
+        "Draw: History shows earlier versions of the drawing on the easel; look at one, then go back to it for everyone if someone messed it up.",
+        "Draw: Download saves a PNG or the wiggling GIF to your computer; Save to board is what pins a drawing, and Share only posts it in the chat."
+      ]
+    },
     {
       "version": "0.53.1",
       "date": "2026-11-09",
@@ -1069,6 +1090,27 @@
     }
   ],
   "highlights": [
+    {
+      "date": "2026-11-10",
+      "emoji": "📌",
+      "title": "Draw has a bulletin board",
+      "text": "Every drawing gets pinned to a board beside the page. Click one to put it back on the easel for everyone, or press New drawing to start fresh: the one you were on is pinned first, so nothing gets lost. Save to board updates its picture, and Download saves a PNG or GIF to your computer.",
+      "where": "Draw"
+    },
+    {
+      "date": "2026-11-10",
+      "emoji": "⏪",
+      "title": "Go back if a drawing gets messed up",
+      "text": "History keeps earlier versions of each drawing: every few minutes while people draw, on every save, and before a clear. Look at one, then press Go back to this to restore it for everyone. Going back can be undone too.",
+      "where": "Draw › History"
+    },
+    {
+      "date": "2026-11-10",
+      "emoji": "🖥️",
+      "title": "The desktop app has the board too",
+      "text": "The desktop app's own Draw now has the bulletin board, New drawing, Save to board, Download and History, the same as the web. Update it from the app when it offers.",
+      "where": "Desktop app › Draw"
+    },
     {
       "date": "2026-11-09",
       "emoji": "🔔",

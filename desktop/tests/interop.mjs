@@ -2,7 +2,7 @@
 // (`yap --headless`, WAV mic) in the same server — text, sends the server turns
 // away (a burst of 12 slowed down and sent again in order; a refused reply),
 // @mentions, reactions,
-// pings and a KLIPY GIF both ways, edits both ways, replies both ways, Draw,
+// pings and a KLIPY GIF both ways, edits both ways, replies both ways, Draw (the board too),
 // Space (players, emotes, ball, tag, balloons, fire/water, laps, the Gallery), the
 // encrypted Personal space (passcode set on the native side, earlier notes
 // sealed, notes and a sealed picture read on the other side, both ways; a
@@ -635,11 +635,12 @@ await test('pins both ways: native pins a web message (web shows the pin mark), 
   evidence.pins = n.lines.filter((l) => /PIN/.test(l));
 });
 
-await test('Draw: native draws a line (top layer), a box and a word (web sees the strokes, the line with l 2) and saves the GIF (640 × 400, 3 frames, looping; in the web gallery); web draws, native sees it; a wipe of the top layer reaches native', async () => {
+await test('Draw: native draws a line (top layer), a box and a word (web sees the strokes, the line with l 2) and saves it to the board (a 640 × 400 PNG, pinned on the web\'s board) with History; web draws, native sees it; a wipe of the top layer reaches native; native starts a new drawing (the web follows, the old one stays pinned)', async () => {
   await web.click('[data-action="open-view"][data-view="draw"]');
-  await web.waitForFunction(() => yap.ui.draw, null, { timeout: 5000 });
+  await web.waitForFunction(() => yap.ui.draw?.pageId != null, null, { timeout: 5000 });
   const before = await web.evaluate(() => yap.ui.draw.strokes.length);
-  const n = native(nativeName, null, ['--draw', '--duration', '14']);
+  const page = await web.evaluate(() => yap.ui.draw.pageId);
+  const n = native(nativeName, null, ['--draw', '--duration', '16']);
   await n.waitFor(/drew a line, a box and a word/, 10000);
   await web.waitForFunction((b) => yap.ui.draw.strokes.length >= b + 3 && yap.ui.draw.strokes.some((s) => s.text === 'hi from native'), before, { timeout: 8000 });
   // Layers (PROTOCOL.md › Draw layers): the line is on the top layer (l 2); the word stays on the bottom one (no l).
@@ -650,23 +651,25 @@ await test('Draw: native draws a line (top layer), a box and a word (web sees th
   const sk = `web${RUN}`;
   await web.evaluate((sk) => yap.ui.send({ t: 'draw.stroke', sk, c: '#ff0000', w: 32, e: false, p: [100, 100, 900, 900, 1500, 400] }), sk);
   await n.waitFor(new RegExp(`DRAW stroke ${sk} by`), 8000);
-  // Native's "GIF": 640 × 400, the 3 wiggle frames at 14 cs, looping; the web's gallery gets it.
+  // Native's Save to board: the whole drawing as a 640 × 400 PNG, the easel's picture, pinned on the web's board.
   await n.waitFor(/DRAW saved (\w+)/, 10000);
   const media = n.lines.map((l) => l.match(/DRAW saved (\w+)/)?.[1]).find(Boolean);
-  const gif = Buffer.from(await (await fetch(`${BASE}/media/${media}`)).arrayBuffer());
-  assert.equal(gif.subarray(0, 6).toString(), 'GIF89a', 'a GIF');
-  assert.deepEqual([gif.readUInt16LE(6), gif.readUInt16LE(8)], [640, 400], '640 × 400');
-  const frames = gif.toString('latin1').split('\x21\xf9\x04').slice(1);
-  assert.equal(frames.length, 3, 'three wiggle frames');
-  assert.ok(frames.every((f) => f.charCodeAt(1) + 256 * f.charCodeAt(2) === 14), '140 ms each');
-  assert.ok(gif.includes('NETSCAPE2.0'), 'loops');
-  await web.waitForFunction((m) => yap.ui.draw.gallery.some((d) => d.media === m), media, { timeout: 8000 });
+  const png = Buffer.from(await (await fetch(`${BASE}/media/${media}`)).arrayBuffer());
+  assert.equal(png.subarray(1, 4).toString(), 'PNG', 'a PNG');
+  assert.deepEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [640, 400], '640 × 400');
+  await web.waitForFunction(([m, pg]) => yap.ui.draw.board.some((p) => p.id === pg && p.media === m && p.pinnedAt), [media, page], { timeout: 8000 });
+  // History: native asked for it after saving, and it has that save.
+  await n.waitFor(/DRAW history [1-9]/, 8000);
   // The web empties the top layer for everyone: native drops the line (and whatever else was up there).
-  await web.evaluate(() => yap.ui.send({ t: 'draw.wipe', l: 2 }));
+  await web.evaluate((pg) => yap.ui.send({ t: 'draw.wipe', l: 2, pg }), page);
   await n.waitFor(/DRAW wipe 2 by \S+ \([1-9]\d* gone\)/, 8000);
+  // Then native starts a new drawing: it pins the changed one first, and everyone on Draw moves to a blank page.
+  await n.waitFor(/DRAW state \d+ new/, 10000);
+  await web.waitForFunction((pg) => yap.ui.draw.pageId !== pg && yap.ui.draw.strokes.length === 0, page, { timeout: 8000 });
+  await web.waitForFunction(([m, pg]) => yap.ui.draw.board.some((p) => p.id === pg && p.pinnedAt && p.media && p.media !== m), [media, page], { timeout: 8000 });
   await n.done;
   await web.click('#text-channels button.channel >> nth=0');
-  evidence.draw = n.lines.filter((l) => /DRAW|drew/.test(l));
+  evidence.draw = n.lines.filter((l) => /DRAW|drew|drawing/.test(l));
 });
 
 await test('Space: native walks in and waves (web sees the player and the emote); web moves, native sees it; ball, tag, water balloons, fire, laps and the Gallery both ways', async () => {

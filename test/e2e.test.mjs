@@ -3270,8 +3270,10 @@ await test('draw together: strokes show up live for the other person', async () 
   await b.screenshot({ path: path.join(OUT, 'desktop-draw.png') });
   // Pixel-art page: drawn at 640×400 and blown up with hard edges.
   assert.deepEqual(await a.evaluate(() => [document.querySelector('.draw-layer').width, document.querySelector('.draw-layer').height]), [640, 400]);
-  // GIF: the wiggle as a looping animation, downloaded and kept in the gallery.
-  const [download] = await Promise.all([a.waitForEvent('download'), a.click('[data-tool="gif"]')]);
+  // Download › GIF: the wiggle as a looping animation, saved to this computer (not pinned anywhere).
+  await a.click('[data-tool="download"]');
+  await a.waitForSelector('.draw-pop-download:not([hidden])');
+  const [download] = await Promise.all([a.waitForEvent('download'), a.click('[data-pop="gif"]')]);
   assert.match(download.suggestedFilename(), /\.gif$/);
   const gif = fs.readFileSync(await download.path());
   assert.equal(gif.subarray(0, 6).toString(), 'GIF89a');
@@ -3282,10 +3284,13 @@ await test('draw together: strokes show up live for the other person', async () 
     return [img.naturalWidth, img.naturalHeight];
   }, gif.toString('base64'));
   assert.deepEqual(decoded, [640, 400], 'Chromium decodes it');
+  // Save to board: a picture of the whole page goes up on the bulletin board, for Ben too.
+  await a.click('[data-tool="save"]');
   await until(() => b.evaluate(async () => {
-    const first = document.querySelector('.gallery-item');
-    return Boolean(first) && (await fetch(first.href)).headers.get('content-type') === 'image/gif';
-  }), 8000, 'the GIF in the gallery');
+    const page = yap.ui.draw.board.find((p) => p.id === yap.ui.draw.pageId);
+    return Boolean(page?.media && page.pinnedAt) && (await fetch(`/media/${page.media}`)).headers.get('content-type') === 'image/png';
+  }), 8000, 'the picture on the board');
+  await b.waitForSelector('.draw-board .pin-card.on-easel:has-text("On the easel")');
   // Share puts the drawing in the chat.
   await a.click('[data-tool="share"]');
   await b.waitForFunction(() => [...yap.state.history.get('general')?.messages ?? []].some((m) => m.image?.width === 640), null, { timeout: 8000 });
@@ -3379,21 +3384,19 @@ await test('draw layers: draw on the top layer, erase it without touching the bo
   await b.waitForTimeout(150);
   await b.screenshot({ path: path.join(OUT, 'desktop-draw-layers.png') });
   await b.click('[data-eye="1"]');
-  // Clear just layer 2 for everyone (the page goes to the gallery first).
-  const gallery = await b.evaluate(() => yap.ui.draw.gallery.length);
+  // Clear just layer 2 for everyone (History keeps the page as it was).
   await a.click('[data-tool="clear"]');
-  await a.waitForSelector('.draw-clear-pop:not([hidden])');
+  await a.waitForSelector('.draw-pop-clear:not([hidden])');
   await a.screenshot({ path: path.join(OUT, 'desktop-draw-clear.png') });
-  await a.click('[data-clear="layer"]');
+  await a.click('[data-pop="clear-layer"]');
   await b.waitForFunction(() => !yap.ui.draw.strokes.some((s) => s.l === 1), null, { timeout: 8000 });
-  await b.waitForFunction((n) => yap.ui.draw.gallery.length > n, gallery, { timeout: 8000 });
   assert.ok(await b.evaluate(() => yap.ui.draw.strokes.some((s) => !s.l)), 'the bottom layer is still there for Ben');
   assert.equal(await ink(b, 1), 0);
   await a.keyboard.press('1');
   await a.click('[data-tool="wiggle"]');
 });
 
-await test('draw on a touch screen: a second finger never takes over a stroke; Clear keeps a page the gallery couldn\'t take', async () => {
+await test('draw on a touch screen: a second finger never takes over a stroke; New drawing keeps the easel when the board couldn\'t take its picture', async () => {
   // Both are still on Draw. Two fingers, the way a palm or a pinch lands on a phone or tablet.
   const box = await a.locator('.draw-paper').boundingBox();
   const cdp = await a.context().newCDPSession(a);
@@ -3415,20 +3418,62 @@ await test('draw on a touch screen: a second finger never takes over a stroke; C
   assert.equal(ys.length, 1, 'one stroke, from the first finger');
   assert.ok(Math.max(...ys[0]) - Math.min(...ys[0]) < 50, 'it stays on the first finger\'s line (no zigzag to the second)');
   assert.ok(ys[0].length >= 14, `it kept drawing after the second finger lifted (${ys[0].length} points)`);
-  // The gallery says no: Clear keeps the page, and says so (it used to clear it anyway).
+  // The board says no: New drawing leaves the easel as it is, and says so (nothing unsaved is ever swapped away).
   await a.route('**/api/drawing?**', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: false, message: 'Saving too fast.' }) }));
-  const n = await b.evaluate(() => yap.ui.draw.strokes.length);
-  await a.click('[data-tool="clear"]');
-  await a.click('[data-clear="page"]');
-  await a.waitForSelector('#toast:not([hidden]):has-text("nothing was cleared")', { timeout: 8000 });
+  const [n, page] = await b.evaluate(() => [yap.ui.draw.strokes.length, yap.ui.draw.pageId]);
+  await a.click('[data-tool="new"]');
+  await a.waitForSelector('#toast:not([hidden]):has-text("nothing changed")', { timeout: 8000 });
   await b.waitForTimeout(500);
-  assert.equal(await b.evaluate(() => yap.ui.draw.strokes.length), n, 'the page is still there for Ben');
-  // And Save doesn't claim it saved.
+  assert.deepEqual(await b.evaluate(() => [yap.ui.draw.strokes.length, yap.ui.draw.pageId]), [n, page], 'the same drawing is still on the easel for Ben');
+  // And Save doesn't claim it pinned anything.
   await a.click('[data-tool="save"]');
-  await a.waitForSelector('#toast:not([hidden]):has-text("Couldn\'t save to the gallery: Saving too fast.")', { timeout: 5000 });
+  await a.waitForSelector('#toast:not([hidden]):has-text("Couldn\'t pin it to the board: Saving too fast.")', { timeout: 5000 });
   await a.waitForTimeout(300);
-  assert.doesNotMatch(await a.textContent('#toast'), /Saved/);
+  assert.doesNotMatch(await a.textContent('#toast'), /Pinned|Updated/);
   await a.unroute('**/api/drawing?**');
+});
+
+await test('draw board: New drawing pins the one on the easel; a card puts it back on the easel for everyone; History goes back after a clear', async () => {
+  // Both are still on Draw; Ada's drawing has ink from the tests before.
+  const first = await a.evaluate(() => yap.ui.draw.pageId);
+  await a.click('[data-tool="new"]');
+  await b.waitForFunction((id) => yap.ui.draw.pageId !== id && yap.ui.draw.strokes.length === 0, first, { timeout: 8000 });
+  await b.waitForSelector('#toast:not([hidden]):has-text("started a new drawing")');
+  await b.waitForSelector(`.pin-card[data-card="${first}"] img`, { timeout: 8000 }); // pinned, with its picture
+  const second = await b.evaluate(() => yap.ui.draw.pageId);
+  // Ben draws on the new one and never saves it.
+  const box = await b.locator('.draw-paper').boundingBox();
+  await b.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.6);
+  await b.mouse.down();
+  await b.mouse.move(box.x + box.width * 0.8, box.y + box.height * 0.4, { steps: 8 });
+  await b.mouse.up();
+  await a.waitForFunction(() => yap.ui.draw.strokes.length === 1, null, { timeout: 5000 });
+  // Ada puts the first one back on the easel from the board: Ben's goes up on the board, picture and all.
+  await a.click(`.pin-card[data-card="${first}"]`);
+  await a.waitForSelector('.draw-pop-card:not([hidden])');
+  await a.screenshot({ path: path.join(OUT, 'desktop-draw-card.png') });
+  await a.click('.draw-pop-card [data-pop="open"]');
+  await b.waitForFunction((id) => yap.ui.draw.pageId === id && yap.ui.draw.strokes.length > 0, first, { timeout: 8000 });
+  await b.waitForSelector(`#toast:not([hidden]):has-text("put Drawing ${first} on the easel")`);
+  await b.waitForSelector(`.pin-card[data-card="${second}"] img`, { timeout: 8000 });
+  assert.equal(await b.textContent('.easel-title'), `Drawing ${first}`);
+  // Ben clears the whole drawing; Ada looks back in History and takes it back for everyone.
+  const n = await a.evaluate(() => yap.ui.draw.strokes.length);
+  await b.click('[data-tool="clear"]');
+  await b.click('.draw-pop-clear [data-pop="clear-all"]');
+  await a.waitForFunction(() => yap.ui.draw.strokes.length === 0, null, { timeout: 8000 });
+  await a.waitForSelector('#toast:not([hidden]):has-text("cleared the whole drawing")');
+  await a.click('[data-tool="history"]');
+  await a.waitForSelector('.draw-pop-history .draw-version:not(:disabled)', { timeout: 5000 });
+  await a.screenshot({ path: path.join(OUT, 'desktop-draw-history.png') });
+  await a.click('.draw-pop-history .draw-version:not(:disabled)');
+  await a.waitForSelector('.easel-then:not([hidden]):has-text("Only you see this")');
+  assert.equal(await b.evaluate(() => yap.ui.draw.strokes.length), 0, 'looking back is just for Ada');
+  await a.screenshot({ path: path.join(OUT, 'desktop-draw-looking-back.png') });
+  await a.click('[data-tool="restore"]');
+  await b.waitForFunction((count) => yap.ui.draw.strokes.length === count, n, { timeout: 8000 });
+  await b.waitForSelector('#toast:not([hidden]):has-text("took this drawing back")');
+  await a.waitForSelector('.easel-then', { state: 'hidden' });
 });
 
 await test('pictures: attach one, everyone sees it in the chat', async () => {
@@ -3781,15 +3826,16 @@ await test('space music: stepping on the floor piano and drums plays them for ev
   await b.click('[data-action="open-channel"][data-id="general"]');
 });
 
-await test('space gallery: a drawing saved in Draw goes up live; walk up to it and it opens big (GIFs too)', async () => {
+await test('space gallery: a drawing saved in Draw goes up live (its new picture replaces its old one); walk up to it and it opens big', async () => {
   await b.click('[data-action="open-view"][data-view="space"]');
   await spaceAt(b, 1200, 800); // the Gallery's aisle
-  await b.waitForFunction(() => yap.ui.space.gallery.length >= 2, null, { timeout: 5000 }); // the GIF and the shared page from the Draw test
+  await b.waitForFunction(() => yap.ui.space.gallery.length >= 1, null, { timeout: 5000 }); // the page pinned in the Draw test
   const newest = await b.evaluate(() => yap.ui.space.gallery[0].id);
-  // Ada saves her page in Draw: it's hung first on the first wall, for Ben, right away.
+  // Ada saves her page to the board in Draw (it changed since): its new picture is hung first on the first wall, for Ben, right away.
   await a.click('[data-action="open-view"][data-view="draw"]');
   await a.waitForFunction(() => yap.ui.draw && document.querySelector('.draw-paper').clientWidth > 100);
-  await Promise.all([a.waitForEvent('download'), a.click('[data-tool="save"]')]);
+  await a.waitForFunction(() => yap.ui.draw.board.find((p) => p.id === yap.ui.draw.pageId)?.dirty);
+  await a.click('[data-tool="save"]');
   await b.waitForFunction((id) => yap.ui.space.gallery[0].id !== id && yap.ui.space.galleryPage === 0, newest, { timeout: 8000 });
   await b.waitForSelector('.space-game:has-text("Ada hung a new drawing")', { timeout: 3000 });
   await b.waitForSelector('.space-wall:not([hidden]):has-text("Wall 1 of")');
@@ -3802,11 +3848,10 @@ await test('space gallery: a drawing saved in Draw goes up live; walk up to it a
     return img.getAttribute('src') === `/media/${yap.ui.space.gallery[0].media}` && img.complete && img.naturalWidth === 640;
   }, null, { timeout: 5000 });
   await b.screenshot({ path: path.join(OUT, 'desktop-space-gallery-viewer.png') });
-  // Older: the shared page, then the GIF, which the viewer shows as a real (wiggling) GIF.
+  // Older: the next drawing on the board (one frame per drawing: Ada's earlier picture of hers is gone from the walls).
   await b.keyboard.press('ArrowRight');
-  await b.click('[data-viewer="1"]');
-  await b.waitForFunction(() => yap.ui.space.viewing === 2);
-  assert.equal(await b.evaluate(async () => (await fetch(document.querySelector('.space-viewer-img').src)).headers.get('content-type')), 'image/gif');
+  await b.waitForFunction(() => yap.ui.space.viewing === 1 && document.querySelector('.space-viewer-img').getAttribute('src') === `/media/${yap.ui.space.gallery[1].media}`);
+  assert.equal(new Set(await b.evaluate(() => yap.ui.space.gallery.filter((d) => d.page != null).map((d) => d.page))).size, await b.evaluate(() => yap.ui.space.gallery.filter((d) => d.page != null).length));
   await b.keyboard.press('Escape');
   await b.waitForSelector('.space-viewer', { state: 'hidden' });
   await b.click('[data-action="open-channel"][data-id="general"]');

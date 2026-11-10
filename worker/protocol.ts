@@ -200,6 +200,43 @@ export interface SavedDrawing {
   media: string;
   uid: string;
   ts: number;
+  /** The drawing (page) it's a picture of; absent on pictures saved before v0.54. */
+  page?: number;
+}
+
+/** A drawing on Draw's bulletin board, or the one on the easel (PROTOCOL.md › Draw drawings and the board). */
+export interface DrawPage {
+  /** Its number: the `canvas` its strokes are on. */
+  id: number;
+  createdAt: number;
+  /** Its latest picture (/media/<media>), when it was ever saved. */
+  media?: string;
+  savedAt?: number;
+  savedBy?: string;
+  /** On the board since (absent = never pinned). */
+  pinnedAt?: number;
+  /** Taken down from the board: when and by whom (Put back pins it again). */
+  downAt?: number;
+  downBy?: string;
+  /** Who drew on it, as of its last save. */
+  artists?: string[];
+  /** Only the drawing on the easel: changed since its picture was saved (or never saved). */
+  dirty?: boolean;
+}
+
+/** An earlier state of a drawing, to look at or go back to. */
+export interface DrawVersion {
+  id: string;
+  ts: number;
+  /** Who it was kept for (saved, cleared, went back, switched); absent = kept while drawing. */
+  uid?: string;
+  why: 'save' | 'auto' | 'wipe' | 'restore' | 'leave';
+  /** Strokes on the page then. */
+  n: number;
+  /** The picture saved with it (why 'save'). */
+  media?: string;
+  /** It's exactly what's on the easel now. */
+  now?: boolean;
 }
 
 /** Where a pointer is on a shared view, anchored to content so it lines up across layouts. */
@@ -449,12 +486,26 @@ export type ClientMessage =
   | { t: 'draw.state' }
   /** Just the saved drawings (newest first, ≤ 60) — e.g. for the Space art gallery. */
   | { t: 'draw.gallery' }
-  | { t: 'draw.seg'; sk: string; c: string; w: number; e: boolean; p: number[]; l?: number }
-  | { t: 'draw.stroke'; sk: string; c: string; w: number; e: boolean; p: number[]; k?: 'poly' | 'text'; text?: string; l?: number }
+  /** `pg` = the drawing it's drawn on (absent = the one on the easel). */
+  | { t: 'draw.seg'; sk: string; c: string; w: number; e: boolean; p: number[]; l?: number; pg?: number }
+  | { t: 'draw.stroke'; sk: string; c: string; w: number; e: boolean; p: number[]; k?: 'poly' | 'text'; text?: string; l?: number; pg?: number }
   | { t: 'draw.undo'; id: string }
+  /** Before v0.54: a fresh page for everyone. Now the same as draw.new. */
   | { t: 'draw.clear' }
-  /** Empty one layer of the page for everyone. */
-  | { t: 'draw.wipe'; l: number }
+  /** Empty one layer of the page for everyone, or every layer (`all`); `pg`: only if that drawing is still on the easel. */
+  | { t: 'draw.wipe'; l: number; all?: boolean; pg?: number }
+  /** A new blank drawing on the easel for everyone; `from` = the one you saw there (refused if that changed). */
+  | { t: 'draw.new'; from?: number }
+  /** Put a drawing from the board on the easel for everyone. */
+  | { t: 'draw.open'; page: number; from?: number }
+  /** Pin a drawing back on the board (on) or take it down. */
+  | { t: 'draw.pin'; page: number; on: boolean }
+  /** The easel drawing's earlier versions → draw.history. */
+  | { t: 'draw.history' }
+  /** One version's strokes, to look at → draw.version. */
+  | { t: 'draw.version'; id: string }
+  /** Take the easel drawing back to a version, for everyone. */
+  | { t: 'draw.restore'; id: string }
   | { t: 'space.state' }
   | { t: 'space.move'; x: number; y: number; d: number }
   /** A quick emote over your head in Space (one of SPACE_EMOTES). */
@@ -525,13 +576,21 @@ export type ServerMessage =
   | { t: 'cursor'; sid: string; view: string; a: CursorAnchor | null }
   | { t: 'notify'; mode: NotifyMode; topic: string | null; quiet?: QuietHours | null }
   | { t: 'ping'; from: string; text: string }
-  | { t: 'draw.state'; canvas: number; strokes: Stroke[]; gallery: SavedDrawing[] }
+  /**
+   * The drawing on the easel (`canvas`) and the board. Sent to you on request, and to
+   * everyone on Draw when the easel changes: `by` did it, `why` how (`at` = the version's time).
+   */
+  | { t: 'draw.state'; canvas: number; strokes: Stroke[]; gallery: SavedDrawing[]; board: DrawPage[]; by?: string; why?: 'open' | 'new' | 'restore'; at?: number }
+  | { t: 'draw.board'; canvas: number; board: DrawPage[] }
+  | { t: 'draw.history'; page: number; versions: DrawVersion[] }
+  | { t: 'draw.version'; id: string; page: number; ts: number; strokes: Stroke[] }
   | { t: 'draw.gallery'; gallery: SavedDrawing[] }
-  | { t: 'draw.seg'; sid: string; sk: string; c: string; w: number; e: boolean; p: number[]; l?: number }
-  | { t: 'draw.stroke'; stroke: Stroke }
+  | { t: 'draw.seg'; sid: string; sk: string; c: string; w: number; e: boolean; p: number[]; l?: number; pg?: number }
+  | { t: 'draw.stroke'; stroke: Stroke; pg?: number }
   | { t: 'draw.undo'; id: string }
   | { t: 'draw.clear'; canvas: number; by: string }
-  | { t: 'draw.wipe'; l: number; by: string }
+  /** One layer emptied (`all`: one of every layer, emptied at once). */
+  | { t: 'draw.wipe'; l: number; by: string; pg?: number; all?: boolean }
   | { t: 'drawing'; drawing: SavedDrawing }
   /** `me` = where you were last time (null the first time). */
   | { t: 'space.state'; players: { sid: string; x: number; y: number; d: number }[]; me: { x: number; y: number; d: number } | null }

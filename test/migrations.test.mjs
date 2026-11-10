@@ -4,7 +4,7 @@
 //   node --experimental-strip-types --no-warnings test/migrations.test.mjs
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { MIGRATIONS, eraseDeletedPosts, migrate } from '../worker/schema.ts';
+import { MIGRATIONS, eraseDeletedPosts, fillDrawPages, migrate } from '../worker/schema.ts';
 
 /** Just enough of Cloudflare's SqlStorage (ctx.storage.sql) over node:sqlite. */
 function sqlStorage() {
@@ -142,6 +142,43 @@ t('the busiest message reads walk an index instead of every row (rows read are a
   assert.match(reads['a history page far back'], /USING INDEX messages_by_channel \(channel_id=\? AND \(ts,id\)<\(\?,\?\)\)/);
   assert.match(reads['a send that came again'], /USING INDEX messages_by_nonce \(user_id=\? AND nonce=\?\)/);
   for (const [what, detail] of Object.entries(reads)) assert.doesNotMatch(detail, /SCAN messages|TEMP B-TREE/, what);
+});
+
+t("v21: the pages of strokes already there become drawings on the board, each with the picture saved of it", () => {
+  const sql = atVersion(20);
+  const stroke = (id, canvas, uid, ts, deletedAt = null) =>
+    sql.exec('INSERT INTO strokes (id, canvas, user_id, data, ts, deleted_at) VALUES (?, ?, ?, ?, ?, ?)', id, canvas, uid, '{"c":"#000000","w":14,"e":false,"p":[1,2]}', ts, deletedAt);
+  const picture = (id, ts) => sql.exec('INSERT INTO drawings (id, media_id, user_id, ts) VALUES (?, ?, ?, ?)', id, `m_${id}`, 'u2', ts);
+  picture('before-any', 50); // saved before anything was drawn: no page of its own
+  stroke('a', 1, 'u1', 100);
+  stroke('b', 1, 'u2', 200);
+  stroke('c', 1, 'u1', 300, 400); // undone at 400: the page's last change
+  picture('mid1', 350); // a save while drawing page 1
+  picture('end1', 500); // the first save after its last change: page 1's picture
+  picture('archive1', 600); // Clear's archive, also after
+  stroke('d', 2, 'u1', 700);
+  picture('p2', 900);
+  stroke('e', 3, 'u2', 1000, 1100); // page 3: everything undone, nothing saved
+  sql.exec("INSERT INTO meta (key, value) VALUES ('canvas', '4')"); // the easel: a blank page 4
+  migrate(sql);
+  assert.deepEqual(rows(sql, 'SELECT id, pinned_at, drawing, saved_at, saved_by, artists FROM draw_pages ORDER BY id').map((r) => ({ ...r, created_at: undefined })), [
+    { id: 1, pinned_at: 500, drawing: 'end1', saved_at: 500, saved_by: 'u2', artists: '["u1","u2"]', created_at: undefined },
+    { id: 2, pinned_at: 900, drawing: 'p2', saved_at: 900, saved_by: 'u2', artists: '["u1"]', created_at: undefined },
+    { id: 3, pinned_at: null, drawing: null, saved_at: null, saved_by: null, artists: null, created_at: undefined },
+    { id: 4, pinned_at: null, drawing: null, saved_at: null, saved_by: null, artists: null, created_at: undefined },
+  ]);
+  assert.deepEqual(rows(sql, 'SELECT id, page FROM drawings ORDER BY ts').map((r) => `${r.id}:${r.page}`), ['before-any:null', 'mid1:1', 'end1:1', 'archive1:1', 'p2:2']);
+  assert.equal(rows(sql, 'SELECT created_at FROM draw_pages WHERE id = 1')[0].created_at, 100);
+  // A new database: just the blank easel, page 1.
+  assert.deepEqual(rows(atVersion(LATEST), 'SELECT id, pinned_at FROM draw_pages'), [{ id: 1, pinned_at: null }]);
+});
+
+t('v21: filling drawings in again (after restoring an older backup) only adds the missing ones', () => {
+  const sql = atVersion(LATEST);
+  sql.exec("UPDATE draw_pages SET pinned_at = 5 WHERE id = 1");
+  sql.exec("INSERT INTO strokes (id, canvas, user_id, data, ts) VALUES ('x', 7, 'u1', '{}', 10)");
+  fillDrawPages(sql);
+  assert.deepEqual(rows(sql, 'SELECT id, pinned_at FROM draw_pages ORDER BY id'), [{ id: 1, pinned_at: 5 }, { id: 7, pinned_at: 10 }]);
 });
 
 let failed = 0;

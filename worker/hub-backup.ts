@@ -1,7 +1,7 @@
 // Backups and restores (PROTOCOL.md › Backups): the full export the
 // owner's tools page through, and rebuilding an empty server from one.
 import { toMessage, type MessageRow } from './rows';
-import { MIGRATIONS, eraseDeletedPosts } from './schema';
+import { MIGRATIONS, eraseDeletedPosts, fillDrawPages } from './schema';
 import type { HubHost } from './hub-host';
 
 /**
@@ -29,6 +29,8 @@ export async function exportPage(hub: HubHost, afterTs: number, limit: number) {
     edits: all('SELECT * FROM message_edits ORDER BY edited_at'),
     strokes: all('SELECT * FROM strokes ORDER BY ts'),
     drawings: all('SELECT * FROM drawings ORDER BY ts'),
+    drawPages: all('SELECT * FROM draw_pages ORDER BY id'),
+    drawVersions: all('SELECT * FROM draw_versions ORDER BY ts'),
     pollVotes: all('SELECT * FROM poll_votes ORDER BY ts'),
     sounds: all('SELECT * FROM sounds ORDER BY created_at'),
     hangs: all('SELECT * FROM hangs ORDER BY created_at'),
@@ -65,8 +67,9 @@ export async function importBackup(hub: HubHost, part: { phase: string; data?: R
     if (Number(data.schema) > MIGRATIONS.length) return { ok: false, message: `Backup is schema ${data.schema}; this server only knows ${MIGRATIONS.length}. Deploy newer code first.` };
     hub.sql.exec('DELETE FROM channels');
     hub.sql.exec('DELETE FROM links');
+    hub.sql.exec('DELETE FROM draw_pages'); // (the empty server's blank easel; the backup's drawings come next, or fillDrawPages makes them)
     let count = 0;
-    for (const [key, table] of [['channels', 'channels'], ['aliases', 'user_aliases'], ['users', 'users'], ['emojis', 'emojis'], ['reactions', 'reactions'], ['edits', 'message_edits'], ['strokes', 'strokes'], ['drawings', 'drawings'], ['pollVotes', 'poll_votes'], ['sounds', 'sounds'], ['hangs', 'hangs'], ['invites', 'invites'], ['links', 'links'], ['modLog', 'mod_log'], ['devices', 'devices'], ['meta', 'meta']] as const) {
+    for (const [key, table] of [['channels', 'channels'], ['aliases', 'user_aliases'], ['users', 'users'], ['emojis', 'emojis'], ['reactions', 'reactions'], ['edits', 'message_edits'], ['strokes', 'strokes'], ['drawings', 'drawings'], ['drawPages', 'draw_pages'], ['drawVersions', 'draw_versions'], ['pollVotes', 'poll_votes'], ['sounds', 'sounds'], ['hangs', 'hangs'], ['invites', 'invites'], ['links', 'links'], ['modLog', 'mod_log'], ['devices', 'devices'], ['meta', 'meta']] as const) {
       count += insertRows(hub, table, (data[key] as Record<string, unknown>[] | undefined) ?? []);
     }
     hub.sql.exec("INSERT INTO meta (key, value) VALUES ('importing', '1') ON CONFLICT(key) DO UPDATE SET value = '1'");
@@ -87,6 +90,7 @@ export async function importBackup(hub: HubHost, part: { phase: string; data?: R
   }
   if (part.phase === 'finish') {
     eraseDeletedPosts(hub.sql);
+    fillDrawPages(hub.sql); // a backup from before v21 has pages of strokes but no drawings
     hub.sql.exec("DELETE FROM meta WHERE key = 'importing'");
     hub.lastTs = 0;
     hub.aliases = null;

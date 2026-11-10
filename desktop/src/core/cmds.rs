@@ -54,9 +54,18 @@ fn cmd_group(cmd: &Cmd) -> Part {
         | Cmd::DrawSeg { .. }
         | Cmd::DrawStroke(..)
         | Cmd::DrawUndo
-        | Cmd::DrawClear
-        | Cmd::DrawWipe(..)
-        | Cmd::SaveDrawing { .. }
+        | Cmd::DrawWipe { .. }
+        | Cmd::DrawSaveToBoard
+        | Cmd::DrawMove(..)
+        | Cmd::DrawMoveNow { .. }
+        | Cmd::DrawPin { .. }
+        | Cmd::DrawHistory
+        | Cmd::DrawLook(..)
+        | Cmd::DrawRestore
+        | Cmd::DrawNow
+        | Cmd::DrawDownload { .. }
+        | Cmd::DrawDownloadPinned { .. }
+        | Cmd::DrawShare { .. }
         | Cmd::SpaceMove { .. }
         | Cmd::SpaceGame { .. }
         | Cmd::SpaceEmote(..)
@@ -460,26 +469,34 @@ impl Core {
     pub(super) async fn on_views_cmd(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::SetView(v) => self.set_view(v),
-            Cmd::DrawSeg { sk, c, w, e, p, l } => {
-                self.send(out::draw_seg(&sk, &c, w, e, &p, l));
+            Cmd::DrawSeg { sk, c, w, e, p, l, pg } => {
+                self.send(out::draw_seg(&sk, &c, w, e, &p, l, pg));
             }
-            Cmd::DrawStroke(mut stroke) => {
+            Cmd::DrawStroke(mut stroke, pg) => {
                 {
                     let mut m = self.shared.model.lock();
                     stroke.uid = m.config.uid.clone();
-                    m.draw.mine.push(stroke.id.clone());
-                    m.draw.strokes.push(stroke.clone());
-                    m.draw.version += 1;
+                    // (Finished after the easel moved: it stays on its own drawing.)
+                    if !m.draw.elsewhere(pg) {
+                        m.draw.mine.push(stroke.id.clone());
+                        m.draw.strokes.push(stroke.clone());
+                        m.draw.changed();
+                        m.draw.version += 1;
+                    }
                 }
-                self.send(out::draw_stroke(&stroke));
+                self.send(out::draw_stroke(&stroke, pg));
                 self.repaint();
             }
             Cmd::DrawUndo => {
                 let last = {
                     let mut m = self.shared.model.lock();
+                    if m.draw.preview.is_some() {
+                        return;
+                    }
                     let last = m.draw.mine.pop();
                     if let Some(id) = &last {
                         m.draw.strokes.retain(|s| &s.id != id);
+                        m.draw.changed();
                         m.draw.version += 1;
                     }
                     last
@@ -489,57 +506,104 @@ impl Core {
                 }
                 self.repaint();
             }
-            Cmd::DrawClear => {
-                self.send(out::draw_clear());
+            Cmd::DrawWipe { l, all } => {
+                // Everyone on Draw hears `draw.wipe`, us included; that's when it goes.
+                let pg = self.shared.model.lock().draw.page;
+                self.send(out::draw_wipe(l, all, pg));
             }
-            Cmd::DrawWipe(l) => {
-                // Everyone on the board hears `draw.wipe`, us included; that's when it goes.
-                self.send(out::draw_wipe(l));
+            Cmd::DrawSaveToBoard => self.draw_keep(None),
+            Cmd::DrawMove(to) => self.draw_keep(Some(to)),
+            Cmd::DrawMoveNow { to, from } => {
+                self.send(match to {
+                    EaselMove::New => out::draw_new(from),
+                    EaselMove::Open(page) => out::draw_open(page, from),
+                });
             }
-            Cmd::SaveDrawing { strokes, gif, wiggle, download, share, then } => {
+            Cmd::DrawPin { page, on } => {
+                self.send(out::draw_pin(page, on));
+            }
+            Cmd::DrawHistory => {
+                self.shared.model.lock().draw.versions = None;
+                self.send(out::draw_history());
+                self.repaint();
+            }
+            Cmd::DrawLook(id) => {
+                self.shared.model.lock().draw.wanted = Some(id.clone());
+                self.send(out::draw_version(&id));
+            }
+            Cmd::DrawRestore => {
+                let id = self.shared.model.lock().draw.preview.as_ref().map(|p| p.id.clone());
+                if let Some(id) = id {
+                    self.send(out::draw_restore(&id));
+                }
+            }
+            Cmd::DrawNow => {
+                self.shared.model.lock().draw.end_preview();
+                self.repaint();
+            }
+            Cmd::DrawDownload { strokes, gif, wiggle } => {
+                let page = self.shared.model.lock().draw.page;
+                let shared = self.shared.clone();
+                tokio::spawn(async move {
+                    let r = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                        let (bytes, ext) = if gif { (crate::drawing::gif(&strokes, wiggle)?, "gif") } else { (crate::drawing::png(&strokes)?, "png") };
+                        save_to_downloads(&page.map_or("yap-drawing".into(), |p| format!("yap-drawing-{p}")), ext, &bytes)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    shared.model.lock().toast(match r {
+                        Ok(name) => format!("Saved {name} to Downloads."),
+                        Err(e) => format!("Couldn't download it: {e}"),
+                    });
+                    (shared.repaint)();
+                });
+            }
+            Cmd::DrawDownloadPinned { page, media } => {
+                let url = format!("{}/media/{media}", self.shared.model.lock().config.server);
+                let shared = self.shared.clone();
+                tokio::spawn(async move {
+                    let r = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                        let (bytes, mime) = crate::http::get_bytes(&url)?;
+                        save_to_downloads(&format!("yap-drawing-{page}"), if mime == "image/gif" { "gif" } else { "png" }, &bytes)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    shared.model.lock().toast(match r {
+                        Ok(name) => format!("Saved {name} to Downloads."),
+                        Err(e) => format!("Couldn't download it: {e}"),
+                    });
+                    (shared.repaint)();
+                });
+            }
+            Cmd::DrawShare { strokes, wiggle } => {
                 let (server, key, sid, ut, channel) = {
                     let m = self.shared.model.lock();
                     let ch = m.channel(&m.config.channel).filter(|c| c.is_text()).map(|c| c.id.clone()).or_else(|| m.first_text_channel().map(|c| c.id.clone()));
                     (m.config.server.clone(), m.config.key.clone(), m.sid.clone().unwrap_or_default(), m.upload_token.clone().unwrap_or_default(), ch)
                 };
+                let Some(channel) = channel else {
+                    self.shared.model.lock().toast("No text channel to share it in.");
+                    self.repaint();
+                    return;
+                };
                 let tx = self.cmd_tx.clone();
                 let shared = self.shared.clone();
                 tokio::spawn(async move {
-                    let r = tokio::task::spawn_blocking(move || -> Result<(crate::protocol::SavedDrawing, Option<String>), String> {
-                        let (bytes, mime, ext) = if gif { (crate::drawing::gif(&strokes, wiggle)?, "image/gif", "gif") } else { (crate::drawing::png(&strokes)?, "image/png", "png") };
-                        let mut saved = None;
-                        if download {
-                            saved = Some(save_to_downloads("yap-drawing", ext, &bytes)?);
-                        }
-                        Ok((crate::http::upload_drawing(&server, &key, &sid, &ut, bytes, mime)?, saved))
+                    // A picture in the chat (not the board): with Wiggle on, the wiggling GIF.
+                    let r = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                        let (bytes, mime) = if wiggle { (crate::drawing::gif(&strokes, true)?, "image/gif") } else { (crate::drawing::png(&strokes)?, "image/png") };
+                        crate::http::upload_image(&server, &key, &sid, &ut, bytes, mime)
                     })
                     .await
                     .unwrap_or_else(|e| Err(e.to_string()));
                     match r {
-                        Ok((drawing, _)) if share => match channel {
-                            Some(ch) => {
-                                let image = ImageRef { id: drawing.media.clone(), width: crate::drawing::PIX_W as f32, height: crate::drawing::PIX_H as f32 };
-                                let _ = tx.send(Cmd::PictureUploaded { channel: ch.clone(), body: String::new(), image: Some(image), reply_to: None });
-                                let name = shared.model.lock().channel(&ch).map(|c| c.name.clone()).unwrap_or_default();
-                                shared.model.lock().toast(format!("Shared in {name}."));
-                            }
-                            None => shared.model.lock().toast("No text channel to share it in."),
-                        },
-                        Ok((_, Some(name))) => shared.model.lock().toast(format!("Saved {name} to Downloads and the gallery.")),
-                        Ok(_) => {
-                            if let Some(after) = then {
-                                let _ = tx.send(match after {
-                                    AfterSave::Clear => Cmd::DrawClear,
-                                    AfterSave::Wipe(l) => Cmd::DrawWipe(l),
-                                });
-                            }
-                            shared.model.lock().toast("Saved to the gallery.");
+                        Ok(id) => {
+                            let image = ImageRef { id, width: crate::drawing::PIX_W as f32, height: crate::drawing::PIX_H as f32 };
+                            let _ = tx.send(Cmd::PictureUploaded { channel: channel.clone(), body: String::new(), image: Some(image), reply_to: None });
+                            let name = shared.model.lock().channel(&channel).map(|c| c.name.clone()).unwrap_or_default();
+                            shared.model.lock().toast(format!("Shared in {name}."));
                         }
-                        Err(e) => match then {
-                            Some(AfterSave::Clear) => shared.model.lock().toast(format!("Couldn't keep the page in the gallery, so it wasn't cleared: {e}")),
-                            Some(AfterSave::Wipe(l)) => shared.model.lock().toast(format!("Couldn't keep the page in the gallery, so layer {} wasn't cleared: {e}", l as usize + 1)),
-                            None => shared.model.lock().toast(format!("Couldn't save the drawing: {e}")),
-                        },
+                        Err(e) => shared.model.lock().toast(format!("Couldn't share it: {e}")),
                     }
                     (shared.repaint)();
                 });
@@ -590,6 +654,79 @@ impl Core {
             }
             _ => {}
         }
+    }
+
+    /// Save to board (`then` None), or before the easel moves (New drawing,
+    /// a drawing from the board): a picture of the whole drawing on the easel
+    /// becomes its picture on the board, unless the board has it as it is (or
+    /// it's blank). The move goes only once that picture is safely up.
+    fn draw_keep(&mut self, then: Option<EaselMove>) {
+        let mut m = self.shared.model.lock();
+        if m.draw.busy {
+            return;
+        }
+        let d = &m.draw;
+        let page = d.page;
+        if then == Some(EaselMove::Open(page.unwrap_or(-1))) {
+            return;
+        }
+        let blank = d.strokes.is_empty();
+        let easel = d.easel().cloned();
+        let (up, down) = easel.as_ref().map_or((false, false), |p| (p.pinned_at.is_some() && p.down_at.is_none(), p.down_at.is_some()));
+        let as_is = easel.as_ref().is_some_and(|p| !p.dirty && p.media.is_some());
+        let refuse = match then {
+            None if blank => Some("Draw something first."),
+            None if up && as_is => Some("The board already has this drawing as it is."),
+            Some(EaselMove::New) if blank => Some("This one's blank already: draw away. The others are on the board."),
+            _ => None,
+        };
+        if let Some(why) = refuse {
+            m.toast(why);
+            drop(m);
+            self.repaint();
+            return;
+        }
+        if then.is_some() {
+            m.draw.end_preview();
+            // Nothing new to keep: just move.
+            if blank || as_is {
+                drop(m);
+                if let Some(to) = then {
+                    let _ = self.cmd_tx.send(Cmd::DrawMoveNow { to, from: page });
+                }
+                self.repaint();
+                return;
+            }
+        }
+        m.draw.busy = true;
+        let strokes = m.draw.strokes.clone();
+        // A save puts it (back) on the board; before a move, one that was taken down stays down.
+        let pin = then.is_none() || !down;
+        let (server, key, sid, ut) = (m.config.server.clone(), m.config.key.clone(), m.sid.clone().unwrap_or_default(), m.upload_token.clone().unwrap_or_default());
+        drop(m);
+        let tx = self.cmd_tx.clone();
+        let shared = self.shared.clone();
+        tokio::spawn(async move {
+            let r = tokio::task::spawn_blocking(move || -> Result<crate::protocol::SavedDrawing, String> {
+                let bytes = crate::drawing::png(&strokes)?;
+                crate::http::upload_drawing(&server, &key, &sid, &ut, bytes, "image/png", page, pin)
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+            let mut m = shared.model.lock();
+            m.draw.busy = false;
+            match (r, then) {
+                (Ok(_), None) => m.toast(if up { "Updated its picture on the board." } else { "Pinned to the board." }),
+                (Ok(_), Some(to)) => {
+                    let _ = tx.send(Cmd::DrawMoveNow { to, from: page });
+                }
+                (Err(e), None) => m.toast(format!("Couldn't pin it to the board: {e}")),
+                (Err(e), Some(EaselMove::New)) => m.toast(format!("Couldn't pin this drawing to the board, so nothing changed. Try again in a moment. ({e})")),
+                (Err(e), Some(EaselMove::Open(_))) => m.toast(format!("Couldn't pin the drawing on the easel to the board, so it stayed. Try again in a moment. ({e})")),
+            }
+            drop(m);
+            (shared.repaint)();
+        });
     }
 
     /// Mute and deafen, by the buttons' rules (`remote::next`), from the

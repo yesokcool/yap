@@ -38,7 +38,7 @@ than most chat apps and costs nothing to run.
     chimes.
   - A call report you can copy when a call sounded off.
 - **Places** next to the chat, so the call keeps going:
-  - **Draw**, a shared board with layers;
+  - **Draw**, a shared easel with layers, and a bulletin board of the drawings you've saved (each with its history);
   - **Space**, a little top-down world where rooms are voice zones;
   - **Watch together** for YouTube;
   - **When's good**, a weekly planner with reminders;

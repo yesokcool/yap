@@ -370,8 +370,17 @@ export class SpaceWorld {
   onDrawing({ drawing }) {
     const d = cleanDrawing(drawing);
     if (!d || this.gallery.some((x) => x.id === d.id)) return;
+    // A drawing saved again: its new picture replaces the old one (one frame per drawing, like the board).
+    const old = d.page === null ? -1 : this.gallery.findIndex((x) => x.page === d.page);
+    let viewing = this.viewing;
+    if (old >= 0) {
+      this.gallery.splice(old, 1);
+      if (viewing === old) viewing = -2; // (the viewer had its old picture: it's the new one now)
+      else if (viewing > old) viewing -= 1;
+    }
     this.gallery.unshift(d);
-    if (this.viewing >= 0) this.viewing += 1; // keep showing the same one
+    if (viewing === -2) this.viewing = 0;
+    else if (viewing >= 0) this.viewing = viewing + 1; // keep showing the same one
     this.panelSig = '';
     if (this.running) this.#flashText(`🖼 ${this.hooks.user?.(d.uid)?.name ?? 'Someone'} hung a new drawing in the Gallery`, 3000);
   }
@@ -1617,7 +1626,8 @@ export class SpaceWorld {
 function cleanDrawing(d) {
   if (!d || typeof d !== 'object' || !MEDIA_RE.test(String(d.media ?? ''))) return null;
   const ts = Number(d.ts) || 0;
-  return { id: String(d.id ?? d.media), media: String(d.media), uid: String(d.uid ?? ''), ts, when: ts ? new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '' };
+  const page = Number.isInteger(d.page) ? d.page : null;
+  return { id: String(d.id ?? d.media), media: String(d.media), uid: String(d.uid ?? ''), ts, page, when: ts ? new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '' };
 }
 
 function freshBall() {

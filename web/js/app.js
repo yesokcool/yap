@@ -396,11 +396,11 @@ function handle(msg) {
     case 'draw.seg': return drawBoard?.onSeg(msg);
     case 'draw.stroke': return drawBoard?.onStroke(msg);
     case 'draw.undo': return drawBoard?.onUndo(msg);
-    case 'draw.clear': return drawBoard?.onClear(msg);
     case 'draw.wipe': return drawBoard?.onWipe(msg);
-    case 'drawing':
-      spaceWorld?.onDrawing(msg);
-      return drawBoard?.onDrawing(msg);
+    case 'draw.board': return drawBoard?.onBoard(msg);
+    case 'draw.history': return drawBoard?.onHistory(msg);
+    case 'draw.version': return drawBoard?.onVersion(msg);
+    case 'drawing': return spaceWorld?.onDrawing(msg);
     case 'draw.gallery': return spaceWorld?.onGallery(msg);
     case 'space.state': return spaceWorld?.onState(msg);
     case 'space.pos': return spaceWorld?.onPos(msg);

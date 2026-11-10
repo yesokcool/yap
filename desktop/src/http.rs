@@ -204,10 +204,15 @@ struct DrawingResponse {
     message: Option<String>,
 }
 
-/// `POST /api/drawing?sid&ut`: a PNG of the board → the gallery entry.
-/// A drawing for the gallery: PNG or GIF (`mime`; the server sniffs the bytes).
-pub fn upload_drawing(server: &str, key: &str, sid: &str, ut: &str, bytes: Vec<u8>, mime: &str) -> Result<crate::protocol::SavedDrawing, String> {
-    let url = format!("{server}/api/drawing?sid={}&ut={}", percent_encode(sid), percent_encode(ut));
+/// `POST /api/drawing?sid&ut&page&pin`: a picture of Draw's drawing `page`
+/// (PNG or GIF, `mime`; the server sniffs the bytes) becomes its picture on
+/// the board. `pin` false: one that was taken down stays down.
+#[allow(clippy::too_many_arguments)]
+pub fn upload_drawing(server: &str, key: &str, sid: &str, ut: &str, bytes: Vec<u8>, mime: &str, page: Option<i64>, pin: bool) -> Result<crate::protocol::SavedDrawing, String> {
+    let mut url = format!("{server}/api/drawing?sid={}&ut={}", percent_encode(sid), percent_encode(ut));
+    if let Some(page) = page {
+        url.push_str(&format!("&page={page}&pin={}", if pin { 1 } else { 0 }));
+    }
     let mut req = agent_config(Duration::from_secs(120))
         .build()
         .new_agent()

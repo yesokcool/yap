@@ -354,25 +354,78 @@ impl SearchState {
     }
 }
 
-/// The shared drawing board.
+/// Draw: the drawing on the easel and the bulletin board
+/// (PROTOCOL.md › Draw drawings and the board).
 #[derive(Default)]
 pub struct DrawModel {
+    /// The drawing on the easel (its number), once the server said.
+    pub page: Option<i64>,
     /// Finished strokes, in order.
     pub strokes: Vec<crate::protocol::Stroke>,
     /// Strokes others are drawing right now, by "sid:sk".
     pub live: HashMap<String, LiveStroke>,
-    pub gallery: Vec<crate::protocol::SavedDrawing>,
     /// My stroke ids, for undo.
     pub mine: Vec<String>,
-    /// Bumped whenever `strokes` changes (the UI re-renders its cache).
+    /// Bumped whenever what the page shows changes (the UI re-renders its cache).
     pub version: u64,
     pub loaded: bool,
+    /// The drawings on the board, the ones taken down, and the one on the easel.
+    pub board: Vec<crate::protocol::DrawPage>,
+    /// History of the drawing on the easel, newest first (None: asked, not here yet).
+    pub versions: Option<Vec<crate::protocol::DrawVersion>>,
+    /// The earlier version I'm looking at (just me), shown in place of the page.
+    pub preview: Option<DrawPreview>,
+    /// The version I asked to see.
+    pub wanted: Option<String>,
+    /// A save to the board or a move of the easel is on its way (one at a time).
+    pub busy: bool,
+}
+
+/// An earlier version of the drawing, being looked at.
+#[derive(Clone, Debug)]
+pub struct DrawPreview {
+    pub id: String,
+    pub ts: i64,
+    pub why: String,
+    pub uid: Option<String>,
+    pub strokes: Vec<crate::protocol::Stroke>,
 }
 
 /// Strokes in progress kept at once (one that's quiet for 8 s isn't drawn, and goes first).
 const MAX_LIVE: usize = 64;
 
 impl DrawModel {
+    /// What the page shows: the drawing on the easel, or the version I'm looking at.
+    pub fn shown(&self) -> &[crate::protocol::Stroke] {
+        self.preview.as_ref().map_or(&self.strokes, |p| &p.strokes)
+    }
+
+    /// The drawing on the easel, as the board knows it.
+    pub fn easel(&self) -> Option<&crate::protocol::DrawPage> {
+        self.board.iter().find(|p| Some(p.id) == self.page)
+    }
+
+    /// Something on the easel changed: its picture on the board is out of date.
+    pub fn changed(&mut self) {
+        let page = self.page;
+        if let Some(p) = self.board.iter_mut().find(|p| Some(p.id) == page) {
+            p.dirty = true;
+        }
+    }
+
+    /// Is a message about drawing `pg` for another drawing than the one shown?
+    pub fn elsewhere(&self, pg: Option<i64>) -> bool {
+        pg.is_some() && self.page.is_some() && pg != self.page
+    }
+
+    /// Stop looking at an earlier version.
+    pub fn end_preview(&mut self) {
+        if self.preview.take().is_some() {
+            self.version += 1;
+        }
+        self.wanted = None;
+    }
+
     /// `draw.seg`: more of a stroke someone is drawing. A stroke keeps at most
     /// what a finished one may have (`drawing::MAX_NUMBERS`), and at most
     /// `MAX_LIVE` are kept: an endless stream of pieces can't grow the board.

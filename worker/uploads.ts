@@ -51,7 +51,7 @@ export async function uploadImage(request: Request, url: URL, env: Env): Promise
   if (url.pathname === '/api/image') return Response.json({ ok: true, ...stored });
   const result = avatar
     ? await hub(env).setAvatar({ sid, ut, media: stored.id })
-    : await hub(env).addDrawing({ sid, ut, media: stored.id });
+    : await hub(env).addDrawing({ sid, ut, media: stored.id, page: url.searchParams.get('page'), pin: url.searchParams.get('pin') });
   return Response.json(result, { status: result.ok ? 200 : 400 });
 }
 

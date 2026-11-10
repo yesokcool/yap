@@ -79,8 +79,9 @@ pub struct Args {
     pub jump_oldest: bool,
     /// Pin the first message containing this (live or already there); logs PINNED / PINS.
     pub pin_msg: Option<String>,
-    /// Open the drawing board, draw a line (on the top layer), a box and a
-    /// word, save them as a GIF to the gallery; logs DRAW.
+    /// Open Draw, draw a line (on the top layer), a box and a word, save the
+    /// drawing to the board and ask for its History; once someone clears the
+    /// top layer, start a new drawing (the old one stays on the board); logs DRAW.
     pub draw: bool,
     /// Walk into Space, move around, wave, kick the ball, throw a balloon,
     /// catch fire and run a lap; logs SPACE (incl. `gallery <n>`).
@@ -546,20 +547,28 @@ async fn run_async(args: Args) -> i32 {
                     }
                     CoreEvent::Draw(what) => {
                         println!("{} DRAW {what}", ts(start));
-                        if what == "state" && args.draw && !drew {
+                        if args.draw && drew && what.starts_with("saved ") {
+                            let _ = cmd.send(Cmd::DrawHistory);
+                        }
+                        if args.draw && drew && what.starts_with("wipe 2 ") {
+                            println!("{} starting a new drawing", ts(start));
+                            let _ = cmd.send(Cmd::DrawMove(core::EaselMove::New));
+                        }
+                        if what.starts_with("state") && args.draw && !drew {
                             drew = true;
                             let sk = crate::config::random_hex(10);
                             // The line goes on the top layer (layer 3 in the app; `l` 2 on the wire).
                             let line = crate::protocol::Stroke { id: sk.clone(), c: "#0080ff".into(), w: 32.0, p: vec![1000.0, 1000.0, 4000.0, 2500.0], k: Some("poly".into()), l: 2, ..Default::default() };
-                            let _ = cmd.send(Cmd::DrawSeg { sk, c: line.c.clone(), w: 32.0, e: false, p: line.p.clone(), l: line.l });
-                            let _ = cmd.send(Cmd::DrawStroke(line.clone()));
+                            let pg = shared.model.lock().draw.page;
+                            let _ = cmd.send(Cmd::DrawSeg { sk, c: line.c.clone(), w: 32.0, e: false, p: line.p.clone(), l: line.l, pg });
+                            let _ = cmd.send(Cmd::DrawStroke(line.clone(), pg));
                             let b = crate::protocol::Stroke { id: crate::config::random_hex(10), c: "#ff0000".into(), w: 14.0, p: vec![5000.0, 1000.0, 8000.0, 1000.0, 8000.0, 3000.0, 5000.0, 3000.0, 5000.0, 1000.0], k: Some("poly".into()), ..Default::default() };
-                            let _ = cmd.send(Cmd::DrawStroke(b.clone()));
+                            let _ = cmd.send(Cmd::DrawStroke(b, pg));
                             let t = crate::protocol::Stroke { id: crate::config::random_hex(10), c: "#008000".into(), w: 32.0, p: vec![1200.0, 4500.0], k: Some("text".into()), text: Some("hi from native".into()), ..Default::default() };
-                            let _ = cmd.send(Cmd::DrawStroke(t.clone()));
+                            let _ = cmd.send(Cmd::DrawStroke(t, pg));
                             println!("{} drew a line, a box and a word (the line on the top layer, {})", ts(start), line.id);
-                            // "GIF": the three wiggle frames, into the gallery (logged as DRAW saved <media>).
-                            let _ = cmd.send(Cmd::SaveDrawing { strokes: vec![line, b, t], gif: true, wiggle: true, download: false, share: false, then: None });
+                            // Save to board: its picture (logged as DRAW saved <media>, then DRAW board).
+                            let _ = cmd.send(Cmd::DrawSaveToBoard);
                         }
                     }
                     CoreEvent::Space(what) => {

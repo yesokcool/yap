@@ -95,7 +95,10 @@ keychain, and unlock with it once connected; `-` = stay locked),
 `YAP_DEBUG_FOCUSED=1` (draw the title bars as if the window had focus),
 `YAP_DEBUG_DRAW_LAYERS=<layer>[:<hidden>…]` (Draw: the layer you're on and
 hidden ones, 1–3, e.g. `3:1`), `YAP_DEBUG_DRAW_CONFIRM=1` (Clear's choices
-open), `YAP_DEBUG_DRAW_SAVE=1` (archive the board to the gallery once),
+open), `YAP_DEBUG_DRAW_SAVE=1` (Save to board once),
+`YAP_DEBUG_DRAW_POP=download|history|card|down` (that popover open; `card`
+is the first card on the board), `YAP_DEBUG_DRAW_LOOK=1` (looking at the
+oldest version in History),
 `YAP_DEBUG_AUDIO=silence` + `YAP_DEBUG_OPEN=voice` (join the first voice
 channel with no real mic or speakers; `YAP_DEBUG_AUDIO=wav:<file>` has that
 WAV, looped, as the mic instead — talking while muted, a clipping mic; `soundboard` does that too and opens
@@ -450,13 +453,12 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   carry a small pin; the header's pin button shows how many and opens the
   channel's pinned list (`pins`; click → jump, × → unpin). `pinned` updates
   arrive live (and "Name pinned a message." for others' pins).
-- **Draw** (Places › Draw, inside the app; voice keeps going): the shared board
+- **Draw** (Places › Draw, inside the app; voice keeps going): the shared easel
   of `web/js/draw.js` — Paint's colour box, sizes S/M/L/XL, pen / line / box /
   circle / text, eraser, the "wiggle" line boil (the same position-seeded noise
   as the web, checked by a unit test against values from its code), undo
   (Ctrl/⌘+Z), live strokes from everyone (`draw.seg`) with their name at the
-  tip, finished strokes (`draw.stroke`), and the gallery (click to open full
-  size). **Pixelly, like WigglyPaint:** the page is drawn at a fixed 640 × 400
+  tip, finished strokes (`draw.stroke`). **Pixelly, like WigglyPaint:** the page is drawn at a fixed 640 × 400
   by our own rasterizer (`src/drawing.rs`: round-capped segments, the web's
   quadratic smoothing, eraser, text from the hand font's glyph outlines via
   `skrifa`), every pixel on or off (the web anti-aliases then snaps alpha ≥ 110;
@@ -472,19 +474,41 @@ couldn't be). Notes go out as `e1:` bodies (text, GIF or
   while it's drawn. The toolbar's Layers group has a chip per layer (1 bottom …
   3 top): a little picture of it, its number, pressed for the layer you draw
   on (keys 1 2 3), and an eye that hides it on your screen only (choosing or
-  drawing on a layer shows it again); neither is ever sent. **Save** = a
-  640 × 400 PNG on white, straight lines, to
-  Downloads and the gallery (`/api/drawing`); **GIF** = the 3 wiggle frames,
-  140 ms each, looping (NETSCAPE2.0; one frame with Wiggle off), encoded with
-  the pure-Rust `gif` crate (one global palette, like `web/js/gif.js`), to
-  Downloads and the gallery; **Share** posts the GIF with Wiggle on, the PNG
-  otherwise (image size 640 × 400) — Save, GIF and Share export what you see
-  (hidden layers left out); **Clear** asks "Clear layer N" (the one you're on)
-  or "Clear the page" (red danger buttons, neither the default): both archive the whole page (every layer) to the gallery
-  as that GIF, then send `draw.wipe {l}` or `draw.clear` — only once the upload
-  landed. Encoding and
-  uploading run off the UI thread. Gallery thumbnails are nearest-neighbour
-  too (and play on hover).
+  drawing on a layer shows it again); neither is ever sent. **Clear** asks
+  "Clear layer N" (the one you're on) or "Clear the whole drawing" (red danger
+  buttons, neither the default) and sends `draw.wipe {l}` (or `{all: true}`);
+  History can bring it back.
+  **Drawings and the board** (PROTOCOL.md › Draw drawings and the board): one
+  drawing is on the easel, the same for everyone; beside the page (under it on
+  a window narrower than 720 points) is a cork bulletin board of the pinned
+  ones (`draw.state.board`, `draw.board`): polaroid cards with a pushpin, their
+  latest picture (nearest-neighbour, a GIF plays on hover), "Drawing N · who"
+  and the day; the easel's card is drawn live from the page's sheets, ringed
+  red, first when it isn't pinned. A bar over the page has **+ New drawing**,
+  "Drawing N — on the board / changed since it was saved / not on the board
+  yet", **Save to board**, **Download**, **Share** and **History**. Save to
+  board renders the whole drawing (every layer) as a 640 × 400 PNG and posts
+  it to `/api/drawing?page=<easel>&pin=1`; New drawing and a card's "Put on
+  the easel" first do the same when the drawing changed since its picture
+  (`pin=0` keeps a taken-down one down), and only once that landed send
+  `draw.new` / `draw.open` with `from` — when it fails the easel stays and a
+  toast says so (`Cmd::DrawMove`, `core/cmds.rs › draw_keep`). Strokes carry
+  `pg`, the drawing they were started on; `draw.seg` / `draw.stroke` /
+  `draw.wipe` for another drawing are dropped. A card opens a popover: Put on
+  the easel, Download (`/media/<id>` to Downloads), Take down (`draw.pin`), or
+  Put back for a taken-down one; "Taken down (n)" lists those. **Download** =
+  a PNG on white, or the 3 wiggle frames as a GIF (140 ms each, looping,
+  NETSCAPE2.0; one frame with Wiggle off; the pure-Rust `gif` crate, one
+  global palette like `web/js/gif.js`) to Downloads, nothing uploaded;
+  **Share** posts the GIF with Wiggle on, the PNG otherwise, in the chat
+  (`/api/image`, image size 640 × 400) — Download and Share export what you
+  see (hidden layers left out). **History** (`draw.history`) lists the
+  easel drawing's versions (when, why, how many strokes, the saved picture);
+  one click asks for it (`draw.version`) and shows it in place of the page,
+  just for you: a yellow bar "<when> — <why>. Only you see this." with
+  **Go back to this** (`draw.restore`, for everyone) and **Back to now** (or
+  Esc); nothing can be drawn on it. Encoding and uploading run off the UI
+  thread.
 - **Space** (Places › Space): the world of `web/js/space.js` / PROTOCOL.md ›
   Space, map and all (`space-map.js`, drawn like `space-art.js`) — nine
   rooms: Lounge, Cinema (its screen and couches), Music, Arcade along the

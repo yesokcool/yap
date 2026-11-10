@@ -19,7 +19,7 @@ the subprotocol on the WebSocket.
 | `GET /ws` (*key*) | WebSocket upgrade, 426 without one. A wrong, old or missing key opens a token-only socket (*Resetting the main link*), not a 401. |
 | `POST /api/image?sid=S&ut=U` (*key*) | A picture for a message: PNG, GIF, WebP or JPEG (sniffed from the bytes; no SVG), ≤ 1.9 MB → `{ ok: true, id, mime }`; then `send { image: { id, width, height } }`. |
 | `POST /api/avatar?sid=S&ut=U` (*key*) | Your picture: image bytes ≤ 512 KB (clients square-crop to 256 px) → `{ ok: true }`. Broadcast as a `user` update; `User.avatar` = media id. |
-| `POST /api/drawing?sid=S&ut=U` (*key*) | Save a picture of the drawing board to the gallery (a PNG, or an animated GIF), ≤ 1.9 MB → `{ ok: true, drawing }`, and `drawing` to everyone. |
+| `POST /api/drawing?sid=S&ut=U[&page=N][&pin=0]` (*key*) | A picture of a Draw drawing (a PNG, or an animated GIF), ≤ 1.9 MB → `{ ok: true, drawing }`: it becomes drawing `page`'s picture (default: the one on the easel), the drawing goes on the board (`pin=0`: one that was taken down stays down) and is kept as a version; `drawing` to everyone when it's on the board, `draw.board` to everyone on Draw. See *Draw drawings and the board*. |
 | `POST /api/blob?sid=S&ut=U` (*key*) | An encrypted picture for your Personal space: opaque bytes, at most 1.9 MB + 28 → `{ ok: true, id }`. See *Encrypted Personal space*. |
 | `POST /api/sound?sid=S&ut=U&kind=board\|chime&name=N&emoji=E` (*key*) | A soundboard clip or your own join chime: a WAV the client made, ≤ 480 KB → `{ ok: true, sound }`. See *Extras* › Soundboard. |
 | `POST /api/doodle?sid=S&ut=U` (*key*) | A doodle reaction: PNG or GIF, ≤ 64 KB and ≤ 256 × 256 → `{ ok: true, id }`; react with `<d:id>`. See *Extras* › Doodle reactions. |
@@ -269,11 +269,17 @@ with no password gets a temporary one through `member.resetPin`.
 | `vault.set` | `wrap: {v, iter, salt, iv, ct} \| null` | Turn on / change the passcode of / reset your encrypted Personal space → `vault` to your connections. See *Encrypted Personal space*. |
 | `notify.settings` | `mode: "off" \| "pings" \| "all"` | Phone pushes via ntfy → `notify { mode, topic }`. `pings` = 📣 pings + @mentions; `all` = also every message while you're offline (≤ 1 per 20 s). |
 | `ping` | `text?` | 📣 Everyone online gets `ping`; everyone with pushes on gets one. One a minute per person (`slow_down`, "You can ping again in a minute."). |
-| `draw.state` | — | → `draw.state { canvas, strokes, gallery }` (send when opening the board). |
-| `draw.gallery` | — | → `draw.gallery { gallery }`: just the saved drawings (newest first, ≤ 60; PNGs and animated GIFs at `/media/<media>`). New saves still arrive as `drawing`. |
-| `draw.seg` / `draw.stroke` | `sk, c, w, e, p, l?` | Live pieces of a stroke (relayed, not stored) / the finished stroke (stored). `sk` = your stroke id, `c` "#rrggbb", `w` width, `e` eraser, `p` flat `[x,y,…]` in board units (10000 × 6250). Optional `k`: `"poly"` = straight segments (lines, boxes), `"text"` = `text` (≤ 200 chars) drawn at `p[0],p[1]` (exactly 2 numbers), size from `w`. Optional `l` = layer 0–2 (absent = 0; see *Draw layers*). |
-| `draw.undo` / `draw.clear` | `id` / — | Undo your own stroke (mods: any) / fresh page for everyone (old strokes kept). |
-| `draw.wipe` | `l` | Empty one layer of the page for everyone (its strokes are kept, marked deleted like an undo) → `draw.wipe {l, by}`. |
+| `draw.state` | — | → `draw.state { canvas, strokes, gallery, board }` (send when opening Draw): the drawing on the easel (`canvas`), its strokes, and the board. See *Draw drawings and the board*. |
+| `draw.gallery` | — | → `draw.gallery { gallery }`: the pictures Space's Gallery hangs (newest first, ≤ 60; PNGs and animated GIFs at `/media/<media>`): the newest picture of each drawing on the board, and pictures from before drawings (no `page`). New saves still arrive as `drawing`. |
+| `draw.seg` / `draw.stroke` | `sk, c, w, e, p, l?, pg?` | Live pieces of a stroke (relayed, not stored) / the finished stroke (stored). `sk` = your stroke id, `c` "#rrggbb", `w` width, `e` eraser, `p` flat `[x,y,…]` in board units (10000 × 6250). Optional `k`: `"poly"` = straight segments (lines, boxes), `"text"` = `text` (≤ 200 chars) drawn at `p[0],p[1]` (exactly 2 numbers), size from `w`. Optional `l` = layer 0–2 (absent = 0; see *Draw layers*). Optional `pg` = the drawing it was started on (absent = the one on the easel): a stroke finished after the easel moved stays on its own drawing (`stale_page` if that drawing doesn't exist). Both are relayed with `pg`. |
+| `draw.undo` / `draw.clear` | `id` / — | Undo your own stroke (mods: any) / apps from before v0.54: the same as `draw.new` without `from`. |
+| `draw.wipe` | `l, all?, pg?` | Empty one layer of the drawing on the easel for everyone, or every layer (`all: true`; `l` is then ignored). Its strokes are kept, marked deleted like an undo, and the page is kept as a version first. `pg`: only if that drawing is still on the easel (else `stale_page`). → one `draw.wipe {l, by, pg, all?}` per layer. |
+| `draw.new` | `from?` | A new blank drawing on the easel for everyone → `draw.state {…, by, why: "new"}` to everyone on Draw. `from` = the drawing you saw there: when someone moved the easel meanwhile, `stale_page`. When the easel is blank already, nothing changes (you just get `draw.state`). 6 at once, then one per 3 s (with `draw.open`). |
+| `draw.open` | `page, from?` | Put a drawing on the easel for everyone → `draw.state {…, by, why: "open"}` to everyone on Draw (`no_page` if there's no such drawing, `stale_page` as above). |
+| `draw.pin` | `page, on` | Take a drawing down from the board (`on: false`) or put it back where it was (`on: true`) → `draw.board` to everyone on Draw. |
+| `draw.history` | — | → `draw.history { page, versions }`: the easel drawing's versions, newest first, ≤ 50. |
+| `draw.version` | `id` | → `draw.version { id, page, ts, strokes }`: that version's strokes, to show (just you) (`no_version` if it's gone). |
+| `draw.restore` | `id` | Take the drawing on the easel back to that version, for everyone → `draw.state {…, by, why: "restore", at}` (`at` = the version's time). What was there is kept as a version first. `stale_page` when the version is of another drawing. 3 at once, then one per 10 s. |
 | `space.state` / `space.move` | — / `x, y, d` | Space view: everyone's last spot / your position (world 2400 × 1600, `d` = facing in radians). |
 | `space.emote` | `e` | One of 👋 😂 ❤️ 👍 🎉 💤 (`SPACE_EMOTES`), relayed to everyone on Space as `space.emote {sid, e}`. Sitting needs no message: seats are fixed spots, and standing exactly on one draws you seated. |
 | `profile` | `avatar: null` / `look: "🐸" \| null` | Removes your picture (upload with `POST /api/avatar`) / your Space character (an emoji; null = your picture). |
@@ -324,12 +330,12 @@ with no password gets a temporary one through `member.resetPin`.
 | `cursor` | `sid, view, a` | Another person's pointer (only sent to people on that view). |
 | `notify` | `mode, topic, quiet` | Your push settings; subscribe to `topic` in the ntfy app. Also in `ready.notify`. `quiet`: see *Extras* › Quiet hours. |
 | `ping` | `from, text` | Play a ping sound; show who and what. |
-| `draw.*` / `drawing` | see above / `drawing { id, media, uid, ts }` | Board updates for people on the draw view (`draw.seg` carries `l` when it isn't 0; `draw.wipe {l, by}`) / a PNG saved to the gallery (`/media/<media>`). |
+| `draw.*` / `drawing` | see above / `drawing { id, media, uid, ts, page? }` | Updates for people on the draw view (`draw.seg` carries `l` when it isn't 0, and `pg`; `draw.wipe {l, by, pg, all?}`; `draw.board { canvas, board }` when the board changes) / a picture of a drawing on the board (`/media/<media>`), to everyone. |
 | `space.state` / `space.pos` | `players[], me` / `sid, x, y, d` | Positions on the space view; `me` = where you stood last time (null the first time) — spawn there. |
 | `reaction` | `messageId, channelId, emoji, uid, on` | Someone added/removed a reaction. History messages carry `reactions: [{ emoji, uids }]`. |
 | `signal` | `from: sid, data` | |
 | `poll` / `sound` / `sound.added` / `sound.deleted` / `away` / `shelf` / `unread.counts` / `hang` / `hang.cancelled` / `hang.now` | | See *Extras*. `ready` also carries `sounds` and `hangs`; `notify` carries `quiet`. |
-| `error` | `code, message, re?` | `re` = the request type that failed. Codes: `already_hello bad_away bad_bitrate bad_chime bad_emoji bad_frame bad_game bad_gif bad_hang bad_image bad_index bad_json bad_key bad_kind bad_layer bad_login bad_name bad_pin bad_poll bad_position bad_quiet bad_role bad_roll bad_seal bad_slots bad_stroke bad_subscription bad_token bad_url bad_vault bad_version bad_video banned busy denied empty forbidden internal last_channel locked name_taken no_channel no_device no_emoji no_hang no_hello no_invite no_link no_message no_peer no_pin no_request no_sound no_user no_video not_in_voice pending pin_required slow_down too_long too_many unavailable unknown_type weak_pin` (`test/unit.test.mjs` checks this list against the server). Uploads have their own: *HTTP* › Failures. |
+| `error` | `code, message, re?` | `re` = the request type that failed. Codes: `already_hello bad_away bad_bitrate bad_chime bad_emoji bad_frame bad_game bad_gif bad_hang bad_image bad_index bad_json bad_key bad_kind bad_layer bad_login bad_name bad_pin bad_poll bad_position bad_quiet bad_role bad_roll bad_seal bad_slots bad_stroke bad_subscription bad_token bad_url bad_vault bad_version bad_video banned busy denied empty forbidden internal last_channel locked name_taken no_channel no_device no_emoji no_hang no_hello no_invite no_link no_message no_page no_peer no_pin no_request no_sound no_user no_version no_video not_in_voice pending pin_required slow_down stale_page too_long too_many unavailable unknown_type weak_pin` (`test/unit.test.mjs` checks this list against the server). Uploads have their own: *HTTP* › Failures. |
 
 Shapes: `Channel { id, name, kind, position, lastMessageAt, bitrate? }` (`bitrate` on voice channels: bits/s for everyone in it, null = each person's own),
 `User { id, name, color, lastSeen, role, avatar, look, away?, chime?, invitedBy?, invite? }` (`lastSeen` is always 0 now — there's no presence; `invitedBy`/`invite` only on waiting-room entries, see *Identity* › Waiting room),
@@ -338,6 +344,8 @@ Shapes: `Channel { id, name, kind, position, lastMessageAt, bitrate? }` (`bitrat
 `Message { id, channelId, uid, body, ts, gif?, image?, editedAt?, reactions?, reply?, pinnedAt?, poll?, roll? }`,
 `Reply { id, uid, channelId?, body (first 200 chars), gif?: true, image?: true, deleted?: true }` (`channelId` is missing only when the original is gone entirely),
 `Stroke { id, uid, c, w, e, p, k?, text?, l? }` (a stored stroke, in `draw.state` and `draw.stroke`: `id` is the `sk` it was drawn with),
+`DrawPage { id, createdAt, media?, savedAt?, savedBy?, pinnedAt?, downAt?, downBy?, artists?, dirty? }` (a drawing: see *Draw drawings and the board*),
+`DrawVersion { id, ts, uid?, why: "save" | "auto" | "wipe" | "restore" | "leave", n, media?, now? }`,
 `Gif { provider: "klipy", slug, title, width, height, mp4?, webm?, webp?, gif?, still? }`,
 `Emoji { id, name, mime, uid, createdAt }` (`id` = first 32 hex chars of the image's SHA-256).
 Times are ms since the epoch.
@@ -493,9 +501,10 @@ their sid (`id8`).
   C4–G5, 32 wide × 150 tall from (1328, 150), black keys 20 wide × 92 tall
   centred on the line after white keys 0, 1, 3, 4, 5, 7, 8, 10. Drum pads
   (radius 32, y 420): kick at x 1400, snare 1480, tom 1560, hi-hat 1640.
-- **The Gallery** shows what's been saved in Draw and needs no `space.game`:
+- **The Gallery** shows the drawings on Draw's board and needs no `space.game`:
   send `draw.gallery` when Space opens (and on reconnect), then add each
-  `drawing` as it arrives, newest first. Twelve frames to a wall, six on the
+  `drawing` as it arrives, newest first (one frame per drawing: a new picture
+  of a drawing already hung replaces its old one, by `page`). Twelve frames to a wall, six on the
   top wall and six on the bottom one, left to right; more than twelve and you
   page through walls (your own page; nobody else's walls turn). Each frame
   shows the drawing at 112 × 70 with nearest-neighbour scaling (it's pixel
@@ -525,12 +534,57 @@ which one it's on.
 - **Which layer you draw on** is yours alone (default: bottom), and so is
   **hiding** one: a hidden layer just isn't shown on your screen. Choosing a
   layer, or drawing on it, shows it again.
-- **Save, GIF and Share** export what you see (hidden layers left out).
-  Clear's archive and a wipe's archive always keep every layer.
-- **Wipe:** `draw.wipe {l}` empties one layer for everyone. Like Clear, the
-  client saves the whole page to the gallery first. Undo can't bring wiped
-  strokes back.
+- **Download and Share** export what you see (hidden layers left out). A
+  picture for the board always has every layer.
+- **Wipe:** `draw.wipe {l}` empties one layer for everyone (`all`: every
+  layer). The server keeps the page as a version first, so History can bring
+  it back; Undo can't.
 - Older clients ignore `l` and draw everything as one layer until they update.
+
+## Draw drawings and the board (v0.54)
+
+Draw has many drawings, one on the **easel** at a time: the same one for
+everyone on Draw, the one strokes go on. Next to it is a **bulletin board**
+of the drawings people pinned.
+
+- **A drawing** is a page of strokes; its id (`DrawPage.id`, "Drawing 12") is
+  the strokes' `canvas`. `draw.state.canvas` says which is on the easel, and
+  `draw.state.board` / `draw.board.board` list the drawings: the ones on the
+  board (`pinnedAt`, newest pinned first), the ones taken down (`downAt`, by
+  `downBy`), and the one on the easel even when it's neither. Each has its
+  latest picture (`media`, `savedAt`, `savedBy`) and who drew on it then
+  (`artists`); the easel's says whether it changed since (`dirty`).
+- **Save to board:** the client draws the whole drawing (every layer) as a
+  PNG and posts it to `/api/drawing?page=<easel>`; it becomes the drawing's
+  picture and the drawing goes on the board. Saving again replaces the
+  picture; a drawing keeps its place on the board.
+- **Moving the easel** (`draw.new`, `draw.open`): before asking, the client
+  saves the picture of the drawing on the easel when it changed since its
+  last one (and, when that fails, doesn't move the easel and says so). The
+  server keeps the drawing that leaves as a version and pins it if it has ink
+  and never was pinned (a picture or not), so nothing drawn is lost to a new
+  page. A taken-down one stays down. Everyone on Draw gets the new
+  `draw.state` with `by` and `why`.
+- **Strokes in flight:** strokes carry `pg`, the drawing they were started
+  on. Clients drop `draw.seg`, `draw.stroke` and `draw.wipe` for another
+  drawing than the one they show; the server keeps a late stroke on its own
+  drawing.
+- **Versions (History):** the server keeps the ids of a drawing's live
+  strokes as a version: when it's saved (with that picture), before a wipe,
+  before going back, when it leaves the easel, and while people draw, before
+  the first stroke after 3 minutes without a version. A blank page, or one
+  exactly like the newest version, isn't kept again (a save then marks that
+  version as saved). Strokes are never erased (undo, wipe and going back only
+  mark them deleted), so going back is flipping those marks:
+  `draw.restore {id}` deletes the strokes that aren't in the version and
+  brings back the ones that are. Looking at a version (`draw.version`) is
+  just for you; clients show it in place of the page, without other people's
+  live strokes, and don't draw on it.
+- **Space's Gallery** (`draw.gallery`, `drawing`) hangs the newest picture of
+  each drawing on the board.
+- **Older apps** send `draw.clear` (a new drawing), save pictures without
+  `page` (of the drawing on the easel, pinned), and treat an unasked
+  `draw.state` as a fresh state; they don't see the board.
 
 ## Extras (v0.36)
 
@@ -1316,7 +1370,7 @@ tools read it as `tools/instance.mjs` says). Unset key = admin API off.
 | Endpoint | |
 |---|---|
 | `GET /api/admin/stats` | `{ hub: { databaseBytes, messages, users, channels, emojis, sessions, pending }, media: { blobs, bytes, databaseBytes } }`: row counts and database sizes (each database's limit is 1 GB on the free plan). |
-| `GET /api/admin/export?after=<ts>` | The chat database, paged 5000 messages at a time (follow `next` until `null`): archived channels, deleted messages (`deletedAt`, as empty rows), deleted emojis, and on the first page reactions, edits, strokes, drawings, poll votes, sounds, hangs, invites, links, the mod log, device-token hashes and Draw's page number. **Not in it:** When's good, browser push subscriptions, sign-in lockouts, the media trash, and the server's own bookkeeping (Watch together's state, its address, the voice resume secret). After a restore, When's good and Watch start empty, and browser pushes come back as each browser opens Yap again. |
+| `GET /api/admin/export?after=<ts>` | The chat database, paged 5000 messages at a time (follow `next` until `null`): archived channels, deleted messages (`deletedAt`, as empty rows), deleted emojis, and on the first page reactions, edits, strokes, drawings (pictures, `drawPages`, `drawVersions`), poll votes, sounds, hangs, invites, links, the mod log, device-token hashes and Draw's page number. **Not in it:** When's good, browser push subscriptions, sign-in lockouts, the media trash, and the server's own bookkeeping (Watch together's state, its address, the voice resume secret). After a restore, When's good and Watch start empty, and browser pushes come back as each browser opens Yap again. |
 | `GET /api/admin/media` | Every stored file `{ id, mime, size }` (emojis, pictures, avatars, drawings, doodles, clips, sealed pictures). |
 | `GET /api/admin/media/<id>` | One stored file's bytes, `Cache-Control: no-store` (backups use this, so nothing a post's deletion should erase lingers in a cache). |
 | `POST /api/admin/emoji?name=N` | Add an emoji without a live session (bulk imports); body = image bytes. Uploader shows as `admin`. |
