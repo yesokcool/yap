@@ -37,7 +37,9 @@ export const watchParty = new WatchParty($('watch-view'), {
 const boardName = () => (state.links ?? []).find((l) => l.view === 'board')?.name ?? 'Board';
 
 /** Places a link can open (`/#place=space`): all but a screen share, which only exists while someone shares. */
-export const LINKABLE = ['board', 'draw', 'space', 'when', 'watch'];
+export const LINKABLE = [
+  'board', 'draw', 'space', 'when', 'watch',
+];
 /** Does this server have a board (its Places link)? */
 export const hasBoard = () => (state.links ?? []).some((l) => l.view === 'board');
 

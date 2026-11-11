@@ -50,7 +50,9 @@ import { notifySettings, onNotifySettings, onPing, onPushSubscribe, onQuiet } fr
 import { onSpaceMove, onSpaceState, saveSpot } from './hub-space';
 import { onWatchNext, onWatchQueue, onWatchSet, setWatching, watchState } from './hub-watch';
 
-const VIEWS = new Set(['board', 'draw', 'space']);
+const VIEWS = new Set([
+  'board', 'draw', 'space',
+]);
 /** meta row: until when an OBS link of `uid` may keep listening in `channel` without its account. */
 const obsGraceKey = (uid: string, channel: string) => `obs_grace:${uid}:${channel}`;
 
@@ -230,7 +232,8 @@ export class Hub extends DurableObject<Env> {
           const g = String(msg.g ?? '');
           const d = JSON.stringify(msg.d ?? null);
           if (!/^[a-z]{1,16}$/.test(g) || d.length > 512) throw new ClientError('bad_game', 'Game updates are small.');
-          return this.relayToView('space', ws, { t: 'space.game', sid: me.sid, g, d: JSON.parse(d) });
+          // Each goes only to the others on its own place.
+          return this.relayToView(msg.t.slice(0, msg.t.indexOf('.')), ws, { t: msg.t, sid: me.sid, g, d: JSON.parse(d) });
         }
         case 'personal.plain': return onPersonalPlain(this, ws, me);
         case 'personal.seal':

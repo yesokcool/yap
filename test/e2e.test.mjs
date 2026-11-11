@@ -4436,7 +4436,9 @@ fs.rmSync(path.dirname(wav), { recursive: true, force: true });
 
 for (const [mark, name, err] of results) {
   console.log(`${mark} ${name}`);
-  if (err) console.log(`    ${err.message ?? err}`);
+  // (With the line of the step that failed: "Timeout 5000ms exceeded" alone says nothing in a long test.)
+  const at = err?.stack?.match(/e2e\.test\.mjs:(\d+)/)?.[1];
+  if (err) console.log(`    ${err.message ?? err}${at ? `\n    at test/e2e.test.mjs:${at}` : ''}`);
 }
 if (measured) console.log(`\nOpus: ${measured.kbps} kbps received, ${measured.packets} packets, ${measured.lost} lost\nfmtp: ${measured.fmtp}`);
 if (obsMeasured?.median) console.log(`OBS page: a click plays ${obsMeasured.median.toFixed(1)} ms after it leaves Ada (median of ${obsMeasured.heard}), ${obsMeasured.pps} packets/s${obsMeasured.clean ? `; a 1 kHz tone comes out at THD+N ${obsMeasured.clean.thdn.toFixed(1)} dB` : ''}${obsMeasured.keepDb ? `; keep-alive ${obsMeasured.keepDb.toFixed(1)} dBFS in pauses` : ''}`);

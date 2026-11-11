@@ -206,6 +206,12 @@ louder than that: every client plays at `gain × your volume` through a
 
 ## Gotchas & lessons
 
+- **Don't save a file under `web/` or `worker/` while `npm run test:all` is
+  running.** Its test server is `wrangler dev`, which reloads on any change
+  there and drops every socket: the protocol suite then fails in a chain
+  ("timed out waiting", `no_session`) that looks nothing like the edit that
+  caused it (2026-11-10: 67 of 131 failed that way; a clean rerun was green).
+
 - **stasel/WebRTC hands out new wrapper objects** from `pc.transceivers`,
   `receiver.track` and `track.source` on every call: never compare them with
   `===`, and never read `source.volume` back (a fresh wrapper says 0). Find the
